@@ -50,3 +50,24 @@ export function toPascal(s: string) {
 export function safeName(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9-_]+/g, "-").replace(/^-+|-+$/g, "") || "app";
 }
+
+export function toKebab(s: string): string {
+  return s
+    .replace(/([a-z])([A-Z])/g, "$1-$2")
+    .replace(/[_\s]+/g, "-")
+    .toLowerCase()
+    .replace(/^-+|-+$/g, "");
+}
+
+export function toSnake(s: string): string {
+  return s
+    .replace(/([a-z])([A-Z])/g, "$1_$2")
+    .replace(/[-\s]+/g, "_")
+    .toLowerCase()
+    .replace(/^_+|_+$/g, "");
+}
+
+export function toCamel(s: string): string {
+  const pascal = toPascal(s);
+  return pascal ? pascal[0].toLowerCase() + pascal.slice(1) : "";
+}

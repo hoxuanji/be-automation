@@ -1,5 +1,5 @@
 import type { Endpoint, Entity, FieldType, GeneratedFile, StackConfig } from "./types";
-import { safeName, toPascal } from "./types";
+import { safeName, toPascal, toKebab, toSnake } from "./types";
 
 export function goFiles(
   config: StackConfig,
@@ -9,7 +9,7 @@ export function goFiles(
   const module = `github.com/your-org/${safeName(config.name)}`;
   const files: GeneratedFile[] = [];
 
-  files.push({ path: "go.mod", content: goMod(module, config.framework) });
+  files.push({ path: "go.mod", content: goMod(module, config.framework, entities.length > 0) });
   files.push({ path: "Dockerfile", content: goDockerfile() });
   files.push({
     path: "cmd/api/main.go",
@@ -21,7 +21,7 @@ export function goFiles(
   });
   files.push({
     path: "internal/server/server.go",
-    content: goServer(module, config, endpoints),
+    content: goServer(module, config, endpoints, entities),
   });
   files.push({
     path: "internal/server/middleware.go",
@@ -38,14 +38,350 @@ export function goFiles(
       content: goSQLDB(config.database),
     });
   }
+
+  if (entities.length > 0) {
+    files.push({ path: "internal/models/models.go", content: goModels(module, entities) });
+    files.push({ path: "internal/db/gorm.go", content: goGormDB(config.database) });
+    for (const entity of entities) {
+      files.push({
+        path: `internal/handlers/${toSnake(entity.name)}.go`,
+        content: goEntityHandler(module, config.framework, entity),
+      });
+    }
+  }
+
   if (config.cache === "redis" || config.cache === "upstash" || config.cache === "dragonfly") {
     files.push({ path: "internal/cache/redis.go", content: goRedis() });
   }
-  if (entities.length > 0) {
-    files.push({ path: "internal/models/models.go", content: goModels(module, entities) });
-  }
 
   return files;
+}
+
+function goEntityHandler(module: string, framework: string, entity: Entity): string {
+  const pascal = entity.name;
+  const snake = toSnake(entity.name);
+  const kebab = toKebab(entity.name);
+
+  if (framework === "gin") {
+    return `package handlers
+
+import (
+\t"net/http"
+
+\t"github.com/gin-gonic/gin"
+\t"gorm.io/gorm"
+
+\t"${module}/internal/models"
+)
+
+type ${pascal}Handler struct{ db *gorm.DB }
+
+func New${pascal}Handler(db *gorm.DB) *${pascal}Handler { return &${pascal}Handler{db: db} }
+
+func (h *${pascal}Handler) List(c *gin.Context) {
+\tvar items []models.${pascal}
+\tif err := h.db.Find(&items).Error; err != nil {
+\t\tc.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+\t\treturn
+\t}
+\tc.JSON(http.StatusOK, items)
+}
+
+func (h *${pascal}Handler) GetByID(c *gin.Context) {
+\tvar item models.${pascal}
+\tif err := h.db.First(&item, "id = ?", c.Param("id")).Error; err != nil {
+\t\tc.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+\t\treturn
+\t}
+\tc.JSON(http.StatusOK, item)
+}
+
+func (h *${pascal}Handler) Create(c *gin.Context) {
+\tvar payload models.${pascal}
+\tif err := c.ShouldBindJSON(&payload); err != nil {
+\t\tc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+\t\treturn
+\t}
+\tif err := h.db.Create(&payload).Error; err != nil {
+\t\tc.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+\t\treturn
+\t}
+\tc.JSON(http.StatusCreated, payload)
+}
+
+func (h *${pascal}Handler) Update(c *gin.Context) {
+\tvar item models.${pascal}
+\tif err := h.db.First(&item, "id = ?", c.Param("id")).Error; err != nil {
+\t\tc.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+\t\treturn
+\t}
+\tvar payload map[string]any
+\tif err := c.ShouldBindJSON(&payload); err != nil {
+\t\tc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+\t\treturn
+\t}
+\tif err := h.db.Model(&item).Updates(payload).Error; err != nil {
+\t\tc.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+\t\treturn
+\t}
+\tc.JSON(http.StatusOK, item)
+}
+
+func (h *${pascal}Handler) Delete(c *gin.Context) {
+\tif err := h.db.Delete(&models.${pascal}{}, "id = ?", c.Param("id")).Error; err != nil {
+\t\tc.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+\t\treturn
+\t}
+\tc.Status(http.StatusNoContent)
+}
+`;
+  }
+
+  if (framework === "fiber") {
+    return `package handlers
+
+import (
+\t"github.com/gofiber/fiber/v2"
+\t"gorm.io/gorm"
+
+\t"${module}/internal/models"
+)
+
+type ${pascal}Handler struct{ db *gorm.DB }
+
+func New${pascal}Handler(db *gorm.DB) *${pascal}Handler { return &${pascal}Handler{db: db} }
+
+func (h *${pascal}Handler) List(c *fiber.Ctx) error {
+\tvar items []models.${pascal}
+\tif err := h.db.Find(&items).Error; err != nil {
+\t\treturn c.Status(500).JSON(fiber.Map{"error": err.Error()})
+\t}
+\treturn c.JSON(items)
+}
+
+func (h *${pascal}Handler) GetByID(c *fiber.Ctx) error {
+\tvar item models.${pascal}
+\tif err := h.db.First(&item, "id = ?", c.Params("id")).Error; err != nil {
+\t\treturn c.Status(404).JSON(fiber.Map{"error": "not found"})
+\t}
+\treturn c.JSON(item)
+}
+
+func (h *${pascal}Handler) Create(c *fiber.Ctx) error {
+\tvar payload models.${pascal}
+\tif err := c.BodyParser(&payload); err != nil {
+\t\treturn c.Status(400).JSON(fiber.Map{"error": err.Error()})
+\t}
+\tif err := h.db.Create(&payload).Error; err != nil {
+\t\treturn c.Status(500).JSON(fiber.Map{"error": err.Error()})
+\t}
+\treturn c.Status(201).JSON(payload)
+}
+
+func (h *${pascal}Handler) Update(c *fiber.Ctx) error {
+\tvar item models.${pascal}
+\tif err := h.db.First(&item, "id = ?", c.Params("id")).Error; err != nil {
+\t\treturn c.Status(404).JSON(fiber.Map{"error": "not found"})
+\t}
+\tvar payload map[string]any
+\tif err := c.BodyParser(&payload); err != nil {
+\t\treturn c.Status(400).JSON(fiber.Map{"error": err.Error()})
+\t}
+\tif err := h.db.Model(&item).Updates(payload).Error; err != nil {
+\t\treturn c.Status(500).JSON(fiber.Map{"error": err.Error()})
+\t}
+\treturn c.JSON(item)
+}
+
+func (h *${pascal}Handler) Delete(c *fiber.Ctx) error {
+\tif err := h.db.Delete(&models.${pascal}{}, "id = ?", c.Params("id")).Error; err != nil {
+\t\treturn c.Status(500).JSON(fiber.Map{"error": err.Error()})
+\t}
+\treturn c.SendStatus(204)
+}
+`;
+  }
+
+  if (framework === "echo") {
+    return `package handlers
+
+import (
+\t"net/http"
+
+\t"github.com/labstack/echo/v4"
+\t"gorm.io/gorm"
+
+\t"${module}/internal/models"
+)
+
+type ${pascal}Handler struct{ db *gorm.DB }
+
+func New${pascal}Handler(db *gorm.DB) *${pascal}Handler { return &${pascal}Handler{db: db} }
+
+func (h *${pascal}Handler) List(c echo.Context) error {
+\tvar items []models.${pascal}
+\tif err := h.db.Find(&items).Error; err != nil {
+\t\treturn c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+\t}
+\treturn c.JSON(http.StatusOK, items)
+}
+
+func (h *${pascal}Handler) GetByID(c echo.Context) error {
+\tvar item models.${pascal}
+\tif err := h.db.First(&item, "id = ?", c.Param("id")).Error; err != nil {
+\t\treturn c.JSON(http.StatusNotFound, map[string]any{"error": "not found"})
+\t}
+\treturn c.JSON(http.StatusOK, item)
+}
+
+func (h *${pascal}Handler) Create(c echo.Context) error {
+\tvar payload models.${pascal}
+\tif err := c.Bind(&payload); err != nil {
+\t\treturn c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
+\t}
+\tif err := h.db.Create(&payload).Error; err != nil {
+\t\treturn c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+\t}
+\treturn c.JSON(http.StatusCreated, payload)
+}
+
+func (h *${pascal}Handler) Update(c echo.Context) error {
+\tvar item models.${pascal}
+\tif err := h.db.First(&item, "id = ?", c.Param("id")).Error; err != nil {
+\t\treturn c.JSON(http.StatusNotFound, map[string]any{"error": "not found"})
+\t}
+\tvar payload map[string]any
+\tif err := c.Bind(&payload); err != nil {
+\t\treturn c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
+\t}
+\tif err := h.db.Model(&item).Updates(payload).Error; err != nil {
+\t\treturn c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+\t}
+\treturn c.JSON(http.StatusOK, item)
+}
+
+func (h *${pascal}Handler) Delete(c echo.Context) error {
+\tif err := h.db.Delete(&models.${pascal}{}, "id = ?", c.Param("id")).Error; err != nil {
+\t\treturn c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+\t}
+\treturn c.NoContent(http.StatusNoContent)
+}
+`;
+  }
+
+  // chi
+  return `package handlers
+
+import (
+\t"encoding/json"
+\t"net/http"
+
+\t"github.com/go-chi/chi/v5"
+\t"gorm.io/gorm"
+
+\t"${module}/internal/models"
+)
+
+type ${pascal}Handler struct{ db *gorm.DB }
+
+func New${pascal}Handler(db *gorm.DB) *${pascal}Handler { return &${pascal}Handler{db: db} }
+
+func (h *${pascal}Handler) writeJSON(w http.ResponseWriter, status int, v any) {
+\tw.Header().Set("Content-Type", "application/json")
+\tw.WriteHeader(status)
+\t_ = json.NewEncoder(w).Encode(v)
+}
+
+func (h *${pascal}Handler) List(w http.ResponseWriter, r *http.Request) {
+\tvar items []models.${pascal}
+\tif err := h.db.Find(&items).Error; err != nil {
+\t\th.writeJSON(w, 500, map[string]any{"error": err.Error()})
+\t\treturn
+\t}
+\th.writeJSON(w, 200, items)
+}
+
+func (h *${pascal}Handler) GetByID(w http.ResponseWriter, r *http.Request) {
+\tvar item models.${pascal}
+\tif err := h.db.First(&item, "id = ?", chi.URLParam(r, "id")).Error; err != nil {
+\t\th.writeJSON(w, 404, map[string]any{"error": "not found"})
+\t\treturn
+\t}
+\th.writeJSON(w, 200, item)
+}
+
+func (h *${pascal}Handler) Create(w http.ResponseWriter, r *http.Request) {
+\tvar payload models.${pascal}
+\tif err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+\t\th.writeJSON(w, 400, map[string]any{"error": err.Error()})
+\t\treturn
+\t}
+\tif err := h.db.Create(&payload).Error; err != nil {
+\t\th.writeJSON(w, 500, map[string]any{"error": err.Error()})
+\t\treturn
+\t}
+\th.writeJSON(w, 201, payload)
+}
+
+func (h *${pascal}Handler) Update(w http.ResponseWriter, r *http.Request) {
+\tvar item models.${pascal}
+\tif err := h.db.First(&item, "id = ?", chi.URLParam(r, "id")).Error; err != nil {
+\t\th.writeJSON(w, 404, map[string]any{"error": "not found"})
+\t\treturn
+\t}
+\tvar payload map[string]any
+\tif err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+\t\th.writeJSON(w, 400, map[string]any{"error": err.Error()})
+\t\treturn
+\t}
+\tif err := h.db.Model(&item).Updates(payload).Error; err != nil {
+\t\th.writeJSON(w, 500, map[string]any{"error": err.Error()})
+\t\treturn
+\t}
+\th.writeJSON(w, 200, item)
+}
+
+func (h *${pascal}Handler) Delete(w http.ResponseWriter, r *http.Request) {
+\tif err := h.db.Delete(&models.${pascal}{}, "id = ?", chi.URLParam(r, "id")).Error; err != nil {
+\t\th.writeJSON(w, 500, map[string]any{"error": err.Error()})
+\t\treturn
+\t}
+\tw.WriteHeader(http.StatusNoContent)
+}
+`;
+  // suppress unused var warning
+  void snake; void kebab;
+}
+
+function goGormDB(database: string): string {
+  const isSQLite = database === "sqlite";
+  if (isSQLite) {
+    return `package db
+
+import (
+\t"gorm.io/driver/sqlite"
+\t"gorm.io/gorm"
+)
+
+func OpenGorm(dsn string) (*gorm.DB, error) {
+\tif dsn == "" {
+\t\tdsn = "app.db"
+\t}
+\treturn gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+}
+`;
+  }
+  return `package db
+
+import (
+\tgormPg "gorm.io/driver/postgres"
+\t"gorm.io/gorm"
+)
+
+func OpenGorm(dsn string) (*gorm.DB, error) {
+\treturn gorm.Open(gormPg.Open(dsn), &gorm.Config{})
+}
+`;
 }
 
 function goModels(module: string, entities: Entity[]): string {
@@ -122,13 +458,16 @@ function buildGORMTags(f: { type: FieldType; primaryKey?: boolean; unique: boole
   return tags.join(" ");
 }
 
-function goMod(module: string, framework: string) {
+function goMod(module: string, framework: string, withEntities = false) {
   const frameworkDep: Record<string, string> = {
     gin: "\tgithub.com/gin-gonic/gin v1.10.0",
     fiber: "\tgithub.com/gofiber/fiber/v2 v2.52.0",
     echo: "\tgithub.com/labstack/echo/v4 v4.12.0",
     chi: "\tgithub.com/go-chi/chi/v5 v5.1.0",
   };
+  const gormDeps = withEntities
+    ? "\tgorm.io/gorm v1.25.12\n\tgorm.io/driver/postgres v1.5.11"
+    : "";
   return `module ${module}
 
 go 1.23
@@ -136,6 +475,7 @@ go 1.23
 require (
 ${frameworkDep[framework] ?? frameworkDep.gin}
 \tgithub.com/caarlos0/env/v11 v11.2.2
+${gormDeps}
 )
 `;
 }
@@ -161,44 +501,44 @@ function goMain(module: string) {
   return `package main
 
 import (
-	"context"
-	"log/slog"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
+\t"context"
+\t"log/slog"
+\t"os"
+\t"os/signal"
+\t"syscall"
+\t"time"
 
-	"${module}/internal/config"
-	"${module}/internal/server"
+\t"${module}/internal/config"
+\t"${module}/internal/server"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
+\tlogger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+\tslog.SetDefault(logger)
 
-	cfg, err := config.Load()
-	if err != nil {
-		logger.Error("config", "err", err)
-		os.Exit(1)
-	}
+\tcfg, err := config.Load()
+\tif err != nil {
+\t\tlogger.Error("config", "err", err)
+\t\tos.Exit(1)
+\t}
 
-	srv := server.New(cfg, logger)
+\tsrv := server.New(cfg, logger)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+\tctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+\tdefer cancel()
 
-	go func() {
-		if err := srv.Run(); err != nil {
-			logger.Error("serve", "err", err)
-			os.Exit(1)
-		}
-	}()
+\tgo func() {
+\t\tif err := srv.Run(); err != nil {
+\t\t\tlogger.Error("serve", "err", err)
+\t\t\tos.Exit(1)
+\t\t}
+\t}()
 
-	<-ctx.Done()
-	logger.Info("shutting down")
-	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(shutdown)
+\t<-ctx.Done()
+\tlogger.Info("shutting down")
+\tshutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+\tdefer cancel()
+\t_ = srv.Shutdown(shutdown)
 }
 `;
 }
@@ -209,47 +549,146 @@ function goConfig() {
 import env "github.com/caarlos0/env/v11"
 
 type Config struct {
-	AppName  string \`env:"APP_NAME" envDefault:"app"\`
-	Port     string \`env:"PORT" envDefault:"8080"\`
-	LogLevel string \`env:"LOG_LEVEL" envDefault:"info"\`
+\tAppName  string \`env:"APP_NAME" envDefault:"app"\`
+\tPort     string \`env:"PORT" envDefault:"8080"\`
+\tLogLevel string \`env:"LOG_LEVEL" envDefault:"info"\`
 
-	DatabaseURL string \`env:"DATABASE_URL"\`
-	RedisURL    string \`env:"REDIS_URL"\`
-	JWTSecret   string \`env:"JWT_SECRET"\`
+\tDatabaseURL string \`env:"DATABASE_URL"\`
+\tRedisURL    string \`env:"REDIS_URL"\`
+\tJWTSecret   string \`env:"JWT_SECRET"\`
 }
 
 func Load() (*Config, error) {
-	c := &Config{}
-	if err := env.Parse(c); err != nil {
-		return nil, err
-	}
-	return c, nil
+\tc := &Config{}
+\tif err := env.Parse(c); err != nil {
+\t\treturn nil, err
+\t}
+\treturn c, nil
 }
 `;
 }
 
-function goServer(module: string, config: StackConfig, endpoints: Endpoint[]) {
-  const importDB = /postgres|mysql|neon|supabase|cockroach|planetscale/.test(
-    config.database
-  )
+function goServer(module: string, config: StackConfig, endpoints: Endpoint[], entities: Entity[]) {
+  const importDB = /postgres|mysql|neon|supabase|cockroach|planetscale/.test(config.database)
     ? `\t"${module}/internal/db"\n`
     : "";
   const importCache = /redis|upstash|dragonfly/.test(config.cache)
     ? `\t"${module}/internal/cache"\n`
     : "";
+  const importHandlers = entities.length > 0
+    ? `\t"${module}/internal/handlers"\n`
+    : "";
 
-  if (config.framework === "gin") return ginServer(module, config, endpoints, importDB, importCache);
-  if (config.framework === "fiber") return fiberServer(module, config, endpoints, importDB, importCache);
-  if (config.framework === "echo") return echoServer(module, config, endpoints, importDB, importCache);
-  return chiServer(module, config, endpoints, importDB, importCache);
+  if (config.framework === "gin") return ginServer(module, config, endpoints, entities, importDB, importCache, importHandlers);
+  if (config.framework === "fiber") return fiberServer(module, config, endpoints, entities, importDB, importCache, importHandlers);
+  if (config.framework === "echo") return echoServer(module, config, endpoints, entities, importDB, importCache, importHandlers);
+  return chiServer(module, config, endpoints, entities, importDB, importCache, importHandlers);
+}
+
+function entityRoutes(framework: string, entities: Entity[]): { setup: string; routes: string } {
+  if (entities.length === 0) return { setup: "", routes: "" };
+
+  if (framework === "gin") {
+    const setup = entities
+      .map((e) => `\t${toCamelLocal(e.name)}H := handlers.New${e.name}Handler(gormDB)`)
+      .join("\n");
+    const routes = entities
+      .map((e) => {
+        const kb = toKebab(e.name);
+        return [
+          `\tr.GET("/${kb}s", ${toCamelLocal(e.name)}H.List)`,
+          `\tr.GET("/${kb}s/:id", ${toCamelLocal(e.name)}H.GetByID)`,
+          `\tr.POST("/${kb}s", ${toCamelLocal(e.name)}H.Create)`,
+          `\tr.PATCH("/${kb}s/:id", ${toCamelLocal(e.name)}H.Update)`,
+          `\tr.DELETE("/${kb}s/:id", ${toCamelLocal(e.name)}H.Delete)`,
+        ].join("\n");
+      })
+      .join("\n");
+    return { setup, routes };
+  }
+
+  if (framework === "fiber") {
+    const setup = entities
+      .map((e) => `\t${toCamelLocal(e.name)}H := handlers.New${e.name}Handler(gormDB)`)
+      .join("\n");
+    const routes = entities
+      .map((e) => {
+        const kb = toKebab(e.name);
+        return [
+          `\tapp.Get("/${kb}s", ${toCamelLocal(e.name)}H.List)`,
+          `\tapp.Get("/${kb}s/:id", ${toCamelLocal(e.name)}H.GetByID)`,
+          `\tapp.Post("/${kb}s", ${toCamelLocal(e.name)}H.Create)`,
+          `\tapp.Patch("/${kb}s/:id", ${toCamelLocal(e.name)}H.Update)`,
+          `\tapp.Delete("/${kb}s/:id", ${toCamelLocal(e.name)}H.Delete)`,
+        ].join("\n");
+      })
+      .join("\n");
+    return { setup, routes };
+  }
+
+  if (framework === "echo") {
+    const setup = entities
+      .map((e) => `\t${toCamelLocal(e.name)}H := handlers.New${e.name}Handler(gormDB)`)
+      .join("\n");
+    const routes = entities
+      .map((e) => {
+        const kb = toKebab(e.name);
+        return [
+          `\te.GET("/${kb}s", ${toCamelLocal(e.name)}H.List)`,
+          `\te.GET("/${kb}s/:id", ${toCamelLocal(e.name)}H.GetByID)`,
+          `\te.POST("/${kb}s", ${toCamelLocal(e.name)}H.Create)`,
+          `\te.PATCH("/${kb}s/:id", ${toCamelLocal(e.name)}H.Update)`,
+          `\te.DELETE("/${kb}s/:id", ${toCamelLocal(e.name)}H.Delete)`,
+        ].join("\n");
+      })
+      .join("\n");
+    return { setup, routes };
+  }
+
+  // chi
+  const setup = entities
+    .map((e) => `\t${toCamelLocal(e.name)}H := handlers.New${e.name}Handler(gormDB)`)
+    .join("\n");
+  const routes = entities
+    .map((e) => {
+      const kb = toKebab(e.name);
+      return [
+        `\tr.Get("/${kb}s", ${toCamelLocal(e.name)}H.List)`,
+        `\tr.Get("/${kb}s/{id}", ${toCamelLocal(e.name)}H.GetByID)`,
+        `\tr.Post("/${kb}s", ${toCamelLocal(e.name)}H.Create)`,
+        `\tr.Patch("/${kb}s/{id}", ${toCamelLocal(e.name)}H.Update)`,
+        `\tr.Delete("/${kb}s/{id}", ${toCamelLocal(e.name)}H.Delete)`,
+      ].join("\n");
+    })
+    .join("\n");
+  return { setup, routes };
+}
+
+function toCamelLocal(name: string): string {
+  const s = name;
+  return s ? s[0].toLowerCase() + s.slice(1) : "";
+}
+
+function gormOpenBlock(database: string): string {
+  if (!(/postgres|mysql|neon|supabase|cockroach|planetscale/.test(database) || database === "sqlite" || database === "mysql")) {
+    return "";
+  }
+  return `\tgormDB, err := db.OpenGorm(cfg.DatabaseURL)
+\tif err != nil {
+\t\tlog.Error("gorm open", "err", err)
+\t\tos.Exit(1)
+\t}
+`;
 }
 
 function ginServer(
   module: string,
   config: StackConfig,
   endpoints: Endpoint[],
+  entities: Entity[],
   importDB: string,
-  importCache: string
+  importCache: string,
+  importHandlers: string
 ) {
   const routes = endpoints
     .map(
@@ -264,42 +703,49 @@ function ginServer(
 }`
     )
     .join("\n\n");
+
+  const { setup: entitySetup, routes: entityRouteLines } = entityRoutes("gin", entities);
+  const gormBlock = entities.length > 0 ? gormOpenBlock(config.database) : "";
+  const needsOS = entities.length > 0;
+
   return `package server
 
 import (
-	"context"
-	"log/slog"
-	"net/http"
+\t"context"
+\t"log/slog"
+\t"net/http"
+${needsOS ? '\t"os"\n' : ""}
+\t"github.com/gin-gonic/gin"
 
-	"github.com/gin-gonic/gin"
-
-	"${module}/internal/config"
-${importDB}${importCache})
+\t"${module}/internal/config"
+${importDB}${importCache}${importHandlers})
 
 type Server struct {
-	cfg    *config.Config
-	log    *slog.Logger
-	srv    *http.Server
-	engine *gin.Engine
+\tcfg    *config.Config
+\tlog    *slog.Logger
+\tsrv    *http.Server
+\tengine *gin.Engine
 }
 
 func New(cfg *config.Config, log *slog.Logger) *Server {
-	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	r.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
+\tgin.SetMode(gin.ReleaseMode)
+\tr := gin.New()
+\tr.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
 
-	r.GET("/health", healthHandler)
+\tr.GET("/health", healthHandler)
 ${routes}
+${gormBlock}${entitySetup}
+${entityRouteLines}
 
-	return &Server{cfg: cfg, log: log, engine: r, srv: &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: r,
-	}}
+\treturn &Server{cfg: cfg, log: log, engine: r, srv: &http.Server{
+\t\tAddr:    ":" + cfg.Port,
+\t\tHandler: r,
+\t}}
 }
 
 func (s *Server) Run() error {
-	s.log.Info("listening", "addr", s.srv.Addr)
-	return s.srv.ListenAndServe()
+\ts.log.Info("listening", "addr", s.srv.Addr)
+\treturn s.srv.ListenAndServe()
 }
 
 func (s *Server) Shutdown(ctx context.Context) error { return s.srv.Shutdown(ctx) }
@@ -312,8 +758,10 @@ function fiberServer(
   module: string,
   config: StackConfig,
   endpoints: Endpoint[],
+  entities: Entity[],
   importDB: string,
-  importCache: string
+  importCache: string,
+  importHandlers: string
 ) {
   const routes = endpoints
     .map(
@@ -328,31 +776,38 @@ function fiberServer(
 }`
     )
     .join("\n\n");
+
+  const { setup: entitySetup, routes: entityRouteLines } = entityRoutes("fiber", entities);
+  const gormBlock = entities.length > 0 ? gormOpenBlock(config.database) : "";
+  const needsOS = entities.length > 0;
+
   return `package server
 
 import (
-	"context"
-	"log/slog"
+\t"context"
+\t"log/slog"
+${needsOS ? '\t"os"\n' : ""}
+\t"github.com/gofiber/fiber/v2"
 
-	"github.com/gofiber/fiber/v2"
-
-	"${module}/internal/config"
-${importDB}${importCache})
+\t"${module}/internal/config"
+${importDB}${importCache}${importHandlers})
 
 type Server struct {
-	cfg *config.Config
-	log *slog.Logger
-	app *fiber.App
+\tcfg *config.Config
+\tlog *slog.Logger
+\tapp *fiber.App
 }
 
 func New(cfg *config.Config, log *slog.Logger) *Server {
-	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	app.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
+\tapp := fiber.New(fiber.Config{DisableStartupMessage: true})
+\tapp.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
 
-	app.Get("/health", healthHandler)
+\tapp.Get("/health", healthHandler)
 ${routes}
+${gormBlock}${entitySetup}
+${entityRouteLines}
 
-	return &Server{cfg: cfg, log: log, app: app}
+\treturn &Server{cfg: cfg, log: log, app: app}
 }
 
 func (s *Server) Run() error { return s.app.Listen(":" + s.cfg.Port) }
@@ -366,8 +821,10 @@ function echoServer(
   module: string,
   config: StackConfig,
   endpoints: Endpoint[],
+  entities: Entity[],
   importDB: string,
-  importCache: string
+  importCache: string,
+  importHandlers: string
 ) {
   const routes = endpoints
     .map(
@@ -382,32 +839,39 @@ function echoServer(
 }`
     )
     .join("\n\n");
+
+  const { setup: entitySetup, routes: entityRouteLines } = entityRoutes("echo", entities);
+  const gormBlock = entities.length > 0 ? gormOpenBlock(config.database) : "";
+  const needsOS = entities.length > 0;
+
   return `package server
 
 import (
-	"context"
-	"log/slog"
+\t"context"
+\t"log/slog"
+${needsOS ? '\t"os"\n' : ""}
+\t"github.com/labstack/echo/v4"
 
-	"github.com/labstack/echo/v4"
-
-	"${module}/internal/config"
-${importDB}${importCache})
+\t"${module}/internal/config"
+${importDB}${importCache}${importHandlers})
 
 type Server struct {
-	cfg *config.Config
-	log *slog.Logger
-	e   *echo.Echo
+\tcfg *config.Config
+\tlog *slog.Logger
+\te   *echo.Echo
 }
 
 func New(cfg *config.Config, log *slog.Logger) *Server {
-	e := echo.New()
-	e.HideBanner = true
-	e.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
+\te := echo.New()
+\te.HideBanner = true
+\te.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
 
-	e.GET("/health", healthHandler)
+\te.GET("/health", healthHandler)
 ${routes}
+${gormBlock}${entitySetup}
+${entityRouteLines}
 
-	return &Server{cfg: cfg, log: log, e: e}
+\treturn &Server{cfg: cfg, log: log, e: e}
 }
 
 func (s *Server) Run() error { return s.e.Start(":" + s.cfg.Port) }
@@ -421,8 +885,10 @@ function chiServer(
   module: string,
   config: StackConfig,
   endpoints: Endpoint[],
+  entities: Entity[],
   importDB: string,
-  importCache: string
+  importCache: string,
+  importHandlers: string
 ) {
   const routes = endpoints
     .map(
@@ -437,42 +903,49 @@ function chiServer(
 }`
     )
     .join("\n\n");
+
+  const { setup: entitySetup, routes: entityRouteLines } = entityRoutes("chi", entities);
+  const gormBlock = entities.length > 0 ? gormOpenBlock(config.database) : "";
+  const needsOS = entities.length > 0;
+
   return `package server
 
 import (
-	"context"
-	"encoding/json"
-	"log/slog"
-	"net/http"
+\t"context"
+\t"encoding/json"
+\t"log/slog"
+\t"net/http"
+${needsOS ? '\t"os"\n' : ""}
+\t"github.com/go-chi/chi/v5"
 
-	"github.com/go-chi/chi/v5"
-
-	"${module}/internal/config"
-${importDB}${importCache})
+\t"${module}/internal/config"
+${importDB}${importCache}${importHandlers})
 
 type Server struct {
-	cfg *config.Config
-	log *slog.Logger
-	srv *http.Server
+\tcfg *config.Config
+\tlog *slog.Logger
+\tsrv *http.Server
 }
 
 func New(cfg *config.Config, log *slog.Logger) *Server {
-	r := chi.NewRouter()
-	r.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
+\tr := chi.NewRouter()
+\tr.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
 
-	r.Get("/health", healthHandler)
+\tr.Get("/health", healthHandler)
 ${routes}
+${gormBlock}${entitySetup}
+${entityRouteLines}
 
-	return &Server{cfg: cfg, log: log, srv: &http.Server{Addr: ":" + cfg.Port, Handler: r}}
+\treturn &Server{cfg: cfg, log: log, srv: &http.Server{Addr: ":" + cfg.Port, Handler: r}}
 }
 
 func (s *Server) Run() error { return s.srv.ListenAndServe() }
 func (s *Server) Shutdown(ctx context.Context) error { return s.srv.Shutdown(ctx) }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+\tw.Header().Set("Content-Type", "application/json")
+\tw.WriteHeader(status)
+\t_ = json.NewEncoder(w).Encode(v)
 }
 
 ${handlers}
@@ -485,34 +958,34 @@ function goMiddleware(config: StackConfig) {
     return `package server
 
 import (
-	"log/slog"
-	"time"
+\t"log/slog"
+\t"time"
 
-	"github.com/gin-gonic/gin"
+\t"github.com/gin-gonic/gin"
 )
 
 func recoverer(log *slog.Logger) gin.HandlerFunc {
-	return gin.CustomRecoveryWithWriter(nil, func(c *gin.Context, err any) {
-		log.Error("panic", "err", err)
-		c.AbortWithStatus(500)
-	})
+\treturn gin.CustomRecoveryWithWriter(nil, func(c *gin.Context, err any) {
+\t\tlog.Error("panic", "err", err)
+\t\tc.AbortWithStatus(500)
+\t})
 }
 
 func requestLog(log *slog.Logger) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-		c.Next()
-		log.Info("req", "m", c.Request.Method, "p", c.Request.URL.Path, "s", c.Writer.Status(), "d", time.Since(start))
-	}
+\treturn func(c *gin.Context) {
+\t\tstart := time.Now()
+\t\tc.Next()
+\t\tlog.Info("req", "m", c.Request.Method, "p", c.Request.URL.Path, "s", c.Writer.Status(), "d", time.Since(start))
+\t}
 }
 
 ${config.rateLimit ? `func rateLimit() gin.HandlerFunc { return func(c *gin.Context) { c.Next() } } // TODO: implement using redis
 ` : ""}${config.tracing ? `func tracing() gin.HandlerFunc { return func(c *gin.Context) { c.Next() } } // TODO: wire otel
 ` : ""}func authRequired(c *gin.Context) {
-	token := c.GetHeader("Authorization")
-	if token == "" { c.AbortWithStatus(401); return }
-	// TODO: verify JWT using cfg.JWTSecret
-	c.Next()
+\ttoken := c.GetHeader("Authorization")
+\tif token == "" { c.AbortWithStatus(401); return }
+\t// TODO: verify JWT using cfg.JWTSecret
+\tc.Next()
 }
 `;
   }
@@ -520,36 +993,36 @@ ${config.rateLimit ? `func rateLimit() gin.HandlerFunc { return func(c *gin.Cont
     return `package server
 
 import (
-	"log/slog"
-	"time"
+\t"log/slog"
+\t"time"
 
-	"github.com/gofiber/fiber/v2"
+\t"github.com/gofiber/fiber/v2"
 )
 
 func recoverer(log *slog.Logger) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Error("panic", "err", r)
-				_ = c.SendStatus(500)
-			}
-		}()
-		return c.Next()
-	}
+\treturn func(c *fiber.Ctx) error {
+\t\tdefer func() {
+\t\t\tif r := recover(); r != nil {
+\t\t\t\tlog.Error("panic", "err", r)
+\t\t\t\t_ = c.SendStatus(500)
+\t\t\t}
+\t\t}()
+\t\treturn c.Next()
+\t}
 }
 
 func requestLog(log *slog.Logger) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		start := time.Now()
-		err := c.Next()
-		log.Info("req", "m", c.Method(), "p", c.Path(), "s", c.Response().StatusCode(), "d", time.Since(start))
-		return err
-	}
+\treturn func(c *fiber.Ctx) error {
+\t\tstart := time.Now()
+\t\terr := c.Next()
+\t\tlog.Info("req", "m", c.Method(), "p", c.Path(), "s", c.Response().StatusCode(), "d", time.Since(start))
+\t\treturn err
+\t}
 }
 
 ${config.rateLimit ? "func rateLimit() fiber.Handler { return func(c *fiber.Ctx) error { return c.Next() } }\n" : ""}${config.tracing ? "func tracing() fiber.Handler { return func(c *fiber.Ctx) error { return c.Next() } }\n" : ""}func authRequired(c *fiber.Ctx) error {
-	if c.Get("Authorization") == "" { return c.SendStatus(401) }
-	return c.Next()
+\tif c.Get("Authorization") == "" { return c.SendStatus(401) }
+\treturn c.Next()
 }
 `;
   }
@@ -557,44 +1030,44 @@ ${config.rateLimit ? "func rateLimit() fiber.Handler { return func(c *fiber.Ctx)
     return `package server
 
 import (
-	"log/slog"
-	"time"
+\t"log/slog"
+\t"time"
 
-	"github.com/labstack/echo/v4"
+\t"github.com/labstack/echo/v4"
 )
 
 func recoverer(log *slog.Logger) echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) (err error) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Error("panic", "err", r)
-					err = c.NoContent(500)
-				}
-			}()
-			return next(c)
-		}
-	}
+\treturn func(next echo.HandlerFunc) echo.HandlerFunc {
+\t\treturn func(c echo.Context) (err error) {
+\t\t\tdefer func() {
+\t\t\t\tif r := recover(); r != nil {
+\t\t\t\t\tlog.Error("panic", "err", r)
+\t\t\t\t\terr = c.NoContent(500)
+\t\t\t\t}
+\t\t\t}()
+\t\t\treturn next(c)
+\t\t}
+\t}
 }
 
 func requestLog(log *slog.Logger) echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error {
-			start := time.Now()
-			err := next(c)
-			log.Info("req", "m", c.Request().Method, "p", c.Path(), "s", c.Response().Status, "d", time.Since(start))
-			return err
-		}
-	}
+\treturn func(next echo.HandlerFunc) echo.HandlerFunc {
+\t\treturn func(c echo.Context) error {
+\t\t\tstart := time.Now()
+\t\t\terr := next(c)
+\t\t\tlog.Info("req", "m", c.Request().Method, "p", c.Path(), "s", c.Response().Status, "d", time.Since(start))
+\t\t\treturn err
+\t\t}
+\t}
 }
 
 ${config.rateLimit ? "func rateLimit() echo.MiddlewareFunc { return func(next echo.HandlerFunc) echo.HandlerFunc { return next } }\n" : ""}${config.tracing ? "func tracing() echo.MiddlewareFunc { return func(next echo.HandlerFunc) echo.HandlerFunc { return next } }\n" : ""}func authRequired(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		if c.Request().Header.Get("Authorization") == "" {
-			return c.NoContent(401)
-		}
-		return next(c)
-	}
+\treturn func(c echo.Context) error {
+\t\tif c.Request().Header.Get("Authorization") == "" {
+\t\t\treturn c.NoContent(401)
+\t\t}
+\t\treturn next(c)
+\t}
 }
 `;
   }
@@ -602,40 +1075,40 @@ ${config.rateLimit ? "func rateLimit() echo.MiddlewareFunc { return func(next ec
   return `package server
 
 import (
-	"log/slog"
-	"net/http"
-	"time"
+\t"log/slog"
+\t"net/http"
+\t"time"
 )
 
 func recoverer(log *slog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
-				if rec := recover(); rec != nil {
-					log.Error("panic", "err", rec)
-					w.WriteHeader(500)
-				}
-			}()
-			next.ServeHTTP(w, r)
-		})
-	}
+\treturn func(next http.Handler) http.Handler {
+\t\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+\t\t\tdefer func() {
+\t\t\t\tif rec := recover(); rec != nil {
+\t\t\t\t\tlog.Error("panic", "err", rec)
+\t\t\t\t\tw.WriteHeader(500)
+\t\t\t\t}
+\t\t\t}()
+\t\t\tnext.ServeHTTP(w, r)
+\t\t})
+\t}
 }
 
 func requestLog(log *slog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-			next.ServeHTTP(w, r)
-			log.Info("req", "m", r.Method, "p", r.URL.Path, "d", time.Since(start))
-		})
-	}
+\treturn func(next http.Handler) http.Handler {
+\t\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+\t\t\tstart := time.Now()
+\t\t\tnext.ServeHTTP(w, r)
+\t\t\tlog.Info("req", "m", r.Method, "p", r.URL.Path, "d", time.Since(start))
+\t\t})
+\t}
 }
 
 ${config.rateLimit ? "func rateLimit() func(http.Handler) http.Handler { return func(next http.Handler) http.Handler { return next } }\n" : ""}${config.tracing ? "func tracing() func(http.Handler) http.Handler { return func(next http.Handler) http.Handler { return next } }\n" : ""}func authRequired(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") == "" { w.WriteHeader(401); return }
-		next.ServeHTTP(w, r)
-	})
+\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+\t\tif r.Header.Get("Authorization") == "" { w.WriteHeader(401); return }
+\t\tnext.ServeHTTP(w, r)
+\t})
 }
 `;
 }
@@ -647,7 +1120,7 @@ function goHealth(framework: string) {
 import "github.com/gin-gonic/gin"
 
 func healthHandler(c *gin.Context) {
-	c.JSON(200, gin.H{"ok": true})
+\tc.JSON(200, gin.H{"ok": true})
 }
 `;
   }
@@ -679,25 +1152,25 @@ function goSQLDB(db: string) {
   return `package db
 
 import (
-	"context"
-	"time"
+\t"context"
+\t"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-	"database/sql"
+\t_ "github.com/jackc/pgx/v5/stdlib"
+\t"database/sql"
 )
 
 func Open(dsn string) (*sql.DB, error) {
-	// db: ${db}
-	conn, err := sql.Open("pgx", dsn)
-	if err != nil { return nil, err }
-	conn.SetMaxOpenConns(25)
-	conn.SetMaxIdleConns(10)
-	conn.SetConnMaxLifetime(30 * time.Minute)
+\t// db: ${db}
+\tconn, err := sql.Open("pgx", dsn)
+\tif err != nil { return nil, err }
+\tconn.SetMaxOpenConns(25)
+\tconn.SetMaxIdleConns(10)
+\tconn.SetConnMaxLifetime(30 * time.Minute)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := conn.PingContext(ctx); err != nil { return nil, err }
-	return conn, nil
+\tctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+\tdefer cancel()
+\tif err := conn.PingContext(ctx); err != nil { return nil, err }
+\treturn conn, nil
 }
 `;
 }
@@ -706,17 +1179,17 @@ function goRedis() {
   return `package cache
 
 import (
-	"context"
+\t"context"
 
-	"github.com/redis/go-redis/v9"
+\t"github.com/redis/go-redis/v9"
 )
 
 func Open(url string) (*redis.Client, error) {
-	opt, err := redis.ParseURL(url)
-	if err != nil { return nil, err }
-	c := redis.NewClient(opt)
-	if err := c.Ping(context.Background()).Err(); err != nil { return nil, err }
-	return c, nil
+\topt, err := redis.ParseURL(url)
+\tif err != nil { return nil, err }
+\tc := redis.NewClient(opt)
+\tif err := c.Ping(context.Background()).Err(); err != nil { return nil, err }
+\treturn c, nil
 }
 `;
 }

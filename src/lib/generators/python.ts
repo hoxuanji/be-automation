@@ -1,4 +1,5 @@
-import type { Endpoint, Entity, FieldType, GeneratedFile, StackConfig } from "./types";
+import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
+import { toPascal, toSnake, toKebab } from "./types";
 
 export function pythonFiles(
   config: StackConfig,
@@ -6,14 +7,12 @@ export function pythonFiles(
   entities: Entity[] = []
 ): GeneratedFile[] {
   const files: GeneratedFile[] = [];
+  const hasEntities = entities.length > 0;
+  const isMongo = /mongo/.test(config.database);
 
-  files.push({ path: "pyproject.toml", content: pyproject(config, entities.length > 0) });
+  files.push({ path: "pyproject.toml", content: pyproject(config, hasEntities) });
   files.push({ path: "Dockerfile", content: pyDockerfile() });
   files.push({ path: "app/__init__.py", content: "" });
-  files.push({
-    path: "app/main.py",
-    content: appMain(config, endpoints),
-  });
   files.push({
     path: "app/config.py",
     content: `from pydantic_settings import BaseSettings
@@ -32,11 +31,127 @@ settings = Settings()
 `,
   });
 
-  if (entities.length > 0) {
+  if (hasEntities && !isMongo && config.framework === "fastapi") {
+    files.push({ path: "app/db.py", content: dbFile(config) });
+    files.push({ path: "app/models.py", content: sqlalchemyModels(config, entities) });
+    files.push({ path: "app/routers/__init__.py", content: "" });
+    for (const entity of entities) {
+      const snake = toSnake(entity.name);
+      const pascal = toPascal(entity.name);
+      const kebab = toKebab(entity.name);
+      const nonPkFields = entity.fields.filter((f) => !f.primaryKey);
+      files.push({
+        path: `app/routers/${snake}.py`,
+        content: entityRouterFile(pascal, snake, kebab, nonPkFields),
+      });
+    }
+  } else if (hasEntities) {
     files.push({ path: "app/models.py", content: sqlalchemyModels(config, entities) });
   }
 
+  files.push({
+    path: "app/main.py",
+    content: appMain(config, endpoints, hasEntities && !isMongo ? entities : []),
+  });
+
   return files;
+}
+
+function dbFile(config: StackConfig): string {
+  const isSqlite = /sqlite/.test(config.database);
+  const connectArgs = isSqlite
+    ? `\nconnect_args = {"check_same_thread": False} if "sqlite" in (settings.database_url or "") else {}`
+    : "";
+  return `from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from .config import settings
+${connectArgs ? connectArgs + "\n" : ""}
+_url = settings.database_url or "sqlite:///./app.db"
+engine = create_engine(_url${isSqlite ? ', connect_args={"check_same_thread": False}' : ""})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+`;
+}
+
+function entityRouterFile(
+  pascal: string,
+  snake: string,
+  kebab: string,
+  nonPkFields: EntityField[]
+): string {
+  const inputFields = nonPkFields
+    .map((f) => {
+      const t = pyType(f.type);
+      return f.required ? `    ${f.name}: ${t}` : `    ${f.name}: ${t} | None = None`;
+    })
+    .join("\n");
+
+  const assignFields = nonPkFields.map((f) => `        ${f.name}=body.${f.name},`).join("\n");
+
+  return `from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from pydantic import BaseModel
+from ..db import get_db
+from ..models import ${pascal}
+
+router = APIRouter(prefix="/${kebab}s", tags=["${kebab}s"])
+
+
+class ${pascal}Input(BaseModel):
+${inputFields || "    pass"}
+
+
+@router.get("/")
+def list_${snake}s(db: Session = Depends(get_db)):
+    return db.query(${pascal}).all()
+
+
+@router.get("/{id}")
+def get_${snake}(id: str, db: Session = Depends(get_db)):
+    item = db.query(${pascal}).filter(${pascal}.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="${pascal} not found")
+    return item
+
+
+@router.post("/", status_code=201)
+def create_${snake}(body: ${pascal}Input, db: Session = Depends(get_db)):
+    item = ${pascal}(
+${assignFields}
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/{id}")
+def update_${snake}(id: str, body: ${pascal}Input, db: Session = Depends(get_db)):
+    item = db.query(${pascal}).filter(${pascal}.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="${pascal} not found")
+    for k, v in body.model_dump(exclude_none=True).items():
+        setattr(item, k, v)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.delete("/{id}", status_code=204)
+def delete_${snake}(id: str, db: Session = Depends(get_db)):
+    item = db.query(${pascal}).filter(${pascal}.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="${pascal} not found")
+    db.delete(item)
+    db.commit()
+`;
 }
 
 function sqlalchemyModels(config: StackConfig, entities: Entity[]): string {
@@ -64,7 +179,7 @@ ${docs}
 
   const models = entities
     .map((e) => {
-      const tableName = e.name.toLowerCase() + "s";
+      const tableName = toSnake(e.name) + "s";
       const cols = e.fields.map((f) => {
         const colType = saColType(f.type, isPostgres);
         const pk = f.primaryKey ? ", primary_key=True" : "";
@@ -125,7 +240,7 @@ function saColType(t: FieldType, isPostgres: boolean): string {
 function pyproject(config: StackConfig, withModels = false) {
   const isPostgres = /postgres|neon|supabase|cockroach/.test(config.database);
   const sqlDeps = withModels && !(/mongo/.test(config.database))
-    ? `\nsqlalchemy = "^2.0.0"\n${isPostgres ? `psycopg2-binary = "^2.9.0"\n` : ""}`
+    ? `\nsqlalchemy = "^2.0.0"\nalembic = "^1.13.0"\n${isPostgres ? `psycopg2-binary = "^2.9.0"\n` : `aiosqlite = "^0.20.0"\n`}`
     : "";
   const deps =
     config.framework === "fastapi"
@@ -161,7 +276,7 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
 `;
 }
 
-function appMain(config: StackConfig, endpoints: Endpoint[]) {
+function appMain(config: StackConfig, endpoints: Endpoint[], entities: Entity[]) {
   if (config.framework === "fastapi") {
     const routes = endpoints
       .map((e) => {
@@ -174,14 +289,51 @@ async def ${handlerName(e)}(${paramsDecl}):
     return {"ok": True, "op": "${e.method} ${e.path}"}`;
       })
       .join("\n\n");
+
+    if (entities.length > 0) {
+      const routerImports = entities
+        .map((e) => `from .routers import ${toSnake(e.name)}`)
+        .join("\n");
+      const routerIncludes = entities
+        .map((e) => `app.include_router(${toSnake(e.name)}.router)`)
+        .join("\n");
+
+      return `from fastapi import FastAPI, Depends, HTTPException, Header
+from .config import settings
+from .db import engine
+from .models import Base
+${routerImports}
+
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title=settings.app_name)
+
+${routerIncludes}
+
+
+async def auth_required(authorization: str | None = Header(default=None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+@app.get("/health")
+async def health():
+    return {"ok": True}
+
+${routes}
+`;
+    }
+
     return `from fastapi import FastAPI, Depends, HTTPException, Header
 from .config import settings
 
 app = FastAPI(title=settings.app_name)
 
+
 async def auth_required(authorization: str | None = Header(default=None)):
     if not authorization:
         raise HTTPException(status_code=401, detail="unauthorized")
+
 
 @app.get("/health")
 async def health():

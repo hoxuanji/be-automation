@@ -1,5 +1,5 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
-import { safeName, toPascal } from "./types";
+import { safeName, toPascal, toKebab, toCamel } from "./types";
 
 export function typescriptFiles(
   config: StackConfig,
@@ -15,19 +15,443 @@ export function typescriptFiles(
 
   if (entities.length > 0) {
     files.push(...prismaFiles(config, entities));
+    files.push(...entityCrudFiles(config, entities));
   }
 
   if (config.framework === "nestjs") {
-    files.push(...nestjsFiles(config, endpoints));
+    files.push(...nestjsFiles(config, endpoints, entities));
   } else if (config.framework === "express") {
-    files.push(...expressFiles(config, endpoints));
+    files.push(...expressFiles(config, endpoints, entities));
   } else if (config.framework === "fastify") {
-    files.push(...fastifyFiles(config, endpoints));
+    files.push(...fastifyFiles(config, endpoints, entities));
   } else {
-    files.push(...honoFiles(config, endpoints));
+    files.push(...honoFiles(config, endpoints, entities));
   }
 
   return files;
+}
+
+function entityCrudFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
+  const files: GeneratedFile[] = [];
+  const isMongo = /mongo/.test(config.database);
+
+  for (const entity of entities) {
+    const pascal = entity.name;
+    const kebab = toKebab(entity.name);
+    const camel = toCamel(entity.name);
+    const nonPkFields = entity.fields.filter((f) => !f.primaryKey);
+
+    files.push({
+      path: `src/validators/${kebab}.validator.ts`,
+      content: validatorFile(pascal, camel, kebab, nonPkFields),
+    });
+
+    files.push({
+      path: `src/repositories/${kebab}.repository.ts`,
+      content: repositoryFile(pascal, camel, kebab, nonPkFields, isMongo),
+    });
+
+    files.push({
+      path: `src/services/${kebab}.service.ts`,
+      content: serviceFile(pascal, camel, kebab),
+    });
+
+    if (config.framework === "nestjs") {
+      files.push({
+        path: `src/modules/${kebab}/${kebab}.controller.ts`,
+        content: nestControllerFile(pascal, camel, kebab),
+      });
+      files.push({
+        path: `src/modules/${kebab}/${kebab}.service.ts`,
+        content: nestServiceFile(pascal, camel, kebab),
+      });
+      files.push({
+        path: `src/modules/${kebab}/${kebab}.module.ts`,
+        content: nestModuleFile(pascal, kebab),
+      });
+    } else if (config.framework === "express") {
+      files.push({
+        path: `src/routes/${kebab}.router.ts`,
+        content: expressRouterFile(pascal, camel, kebab),
+      });
+    } else if (config.framework === "fastify") {
+      files.push({
+        path: `src/routes/${kebab}.route.ts`,
+        content: fastifyRouteFile(pascal, camel, kebab),
+      });
+    } else {
+      files.push({
+        path: `src/routes/${kebab}.route.ts`,
+        content: honoRouteFile(pascal, camel, kebab),
+      });
+    }
+  }
+
+  return files;
+}
+
+function zodType(t: FieldType, required: boolean): string {
+  const base = (() => {
+    switch (t) {
+      case "uuid":    return "z.string().uuid()";
+      case "string":  return "z.string().min(1)";
+      case "text":    return "z.string()";
+      case "number":  return "z.number()";
+      case "boolean": return "z.boolean()";
+      case "date":    return "z.string().datetime()";
+      case "json":    return "z.record(z.unknown())";
+    }
+  })();
+  return required ? base : `${base}.optional()`;
+}
+
+function validatorFile(pascal: string, _camel: string, _kebab: string, nonPkFields: EntityField[]): string {
+  const fieldLines = nonPkFields
+    .map((f) => `  ${f.name}: ${zodType(f.type, f.required)},`)
+    .join("\n");
+
+  return `import { z } from "zod";
+
+const ${pascal}Schema = z.object({
+${fieldLines}
+});
+
+export type ${pascal}Input = z.infer<typeof ${pascal}Schema>;
+
+export function validate${pascal}Body(data: unknown): ${pascal}Input {
+  return ${pascal}Schema.parse(data);
+}
+
+export function validate${pascal}Query(data: unknown) {
+  return z.object({
+    page: z.coerce.number().int().positive().optional(),
+    pageSize: z.coerce.number().int().positive().max(100).optional(),
+    search: z.string().optional(),
+  }).parse(data);
+}
+`;
+}
+
+function repositoryFile(pascal: string, _camel: string, _kebab: string, nonPkFields: EntityField[], isMongo: boolean): string {
+  if (isMongo) {
+    const initLines = nonPkFields.map((f) => `    ${f.name}: data.${f.name},`).join("\n");
+    return `import type { ${pascal}Input } from "../validators/${toKebab(pascal)}.validator";
+import { randomUUID } from "crypto";
+
+type ${pascal}Record = ${pascal}Input & { id: string; createdAt: Date; updatedAt: Date };
+
+const store = new Map<string, ${pascal}Record>();
+
+export async function findMany(opts: { page?: number; pageSize?: number; search?: string }) {
+  const page = opts.page ?? 1;
+  const pageSize = opts.pageSize ?? 20;
+  const items = Array.from(store.values());
+  const total = items.length;
+  const start = (page - 1) * pageSize;
+  return { items: items.slice(start, start + pageSize), total, page, pageSize };
+}
+
+export async function findById(id: string): Promise<${pascal}Record | null> {
+  return store.get(id) ?? null;
+}
+
+export async function create(data: ${pascal}Input): Promise<${pascal}Record> {
+  const record: ${pascal}Record = {
+    id: randomUUID(),
+${initLines}
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  store.set(record.id, record);
+  return record;
+}
+
+export async function update(id: string, data: Partial<${pascal}Input>): Promise<${pascal}Record | null> {
+  const existing = store.get(id);
+  if (!existing) return null;
+  const updated = { ...existing, ...data, updatedAt: new Date() };
+  store.set(id, updated);
+  return updated;
+}
+
+export async function remove(id: string): Promise<void> {
+  store.delete(id);
+}
+`;
+  }
+
+  return `import { PrismaClient } from "@prisma/client";
+import type { ${pascal}Input } from "../validators/${toKebab(pascal)}.validator";
+
+const prisma = new PrismaClient();
+
+export async function findMany(opts: { page?: number; pageSize?: number; search?: string }) {
+  const page = opts.page ?? 1;
+  const pageSize = opts.pageSize ?? 20;
+  const skip = (page - 1) * pageSize;
+  const [items, total] = await Promise.all([
+    prisma.${toCamel(pascal)}.findMany({ skip, take: pageSize }),
+    prisma.${toCamel(pascal)}.count(),
+  ]);
+  return { items, total, page, pageSize };
+}
+
+export async function findById(id: string) {
+  return prisma.${toCamel(pascal)}.findUnique({ where: { id } });
+}
+
+export async function create(data: ${pascal}Input) {
+  return prisma.${toCamel(pascal)}.create({ data });
+}
+
+export async function update(id: string, data: Partial<${pascal}Input>) {
+  return prisma.${toCamel(pascal)}.update({ where: { id }, data }).catch(() => null);
+}
+
+export async function remove(id: string): Promise<void> {
+  await prisma.${toCamel(pascal)}.delete({ where: { id } }).catch(() => null);
+}
+`;
+}
+
+function serviceFile(pascal: string, camel: string, kebab: string): string {
+  return `import * as repo from "../repositories/${kebab}.repository";
+import type { ${pascal}Input } from "../validators/${kebab}.validator";
+
+export async function list${pascal}(q: { page?: number; pageSize?: number; search?: string }) {
+  return repo.findMany(q);
+}
+
+export async function get${pascal}ById(id: string) {
+  return repo.findById(id);
+}
+
+export async function create${pascal}(data: ${pascal}Input) {
+  return repo.create(data);
+}
+
+export async function update${pascal}(id: string, data: Partial<${pascal}Input>) {
+  return repo.update(id, data);
+}
+
+export async function delete${pascal}(id: string): Promise<void> {
+  return repo.remove(id);
+}
+`;
+}
+
+function expressRouterFile(pascal: string, camel: string, kebab: string): string {
+  return `import { Router } from "express";
+import { validate${pascal}Body, validate${pascal}Query } from "../validators/${kebab}.validator";
+import * as service from "../services/${kebab}.service";
+
+export function create${pascal}Router(): Router {
+  const router = Router();
+
+  router.get("/", async (req, res) => {
+    try {
+      const q = validate${pascal}Query(req.query);
+      const result = await service.list${pascal}(q);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: String(err) });
+    }
+  });
+
+  router.get("/:id", async (req, res) => {
+    const item = await service.get${pascal}ById(req.params.id);
+    if (!item) return res.status(404).json({ error: "not found" });
+    res.json(item);
+  });
+
+  router.post("/", async (req, res) => {
+    try {
+      const data = validate${pascal}Body(req.body);
+      const item = await service.create${pascal}(data);
+      res.status(201).json(item);
+    } catch (err) {
+      res.status(400).json({ error: String(err) });
+    }
+  });
+
+  router.patch("/:id", async (req, res) => {
+    try {
+      const data = validate${pascal}Body(req.body);
+      const item = await service.update${pascal}(req.params.id, data);
+      if (!item) return res.status(404).json({ error: "not found" });
+      res.json(item);
+    } catch (err) {
+      res.status(400).json({ error: String(err) });
+    }
+  });
+
+  router.delete("/:id", async (req, res) => {
+    await service.delete${pascal}(req.params.id);
+    res.status(204).end();
+  });
+
+  return router;
+}
+`;
+}
+
+function fastifyRouteFile(pascal: string, _camel: string, kebab: string): string {
+  return `import type { FastifyInstance } from "fastify";
+import { validate${pascal}Body, validate${pascal}Query } from "../validators/${kebab}.validator";
+import * as service from "../services/${kebab}.service";
+
+export async function ${toCamel(pascal)}Routes(app: FastifyInstance) {
+  app.get("/", async (req, reply) => {
+    const q = validate${pascal}Query(req.query);
+    return service.list${pascal}(q);
+  });
+
+  app.get<{ Params: { id: string } }>("/:id", async (req, reply) => {
+    const item = await service.get${pascal}ById(req.params.id);
+    if (!item) return reply.status(404).send({ error: "not found" });
+    return item;
+  });
+
+  app.post("/", async (req, reply) => {
+    try {
+      const data = validate${pascal}Body(req.body);
+      const item = await service.create${pascal}(data);
+      return reply.status(201).send(item);
+    } catch (err) {
+      return reply.status(400).send({ error: String(err) });
+    }
+  });
+
+  app.patch<{ Params: { id: string } }>("/:id", async (req, reply) => {
+    try {
+      const data = validate${pascal}Body(req.body);
+      const item = await service.update${pascal}(req.params.id, data);
+      if (!item) return reply.status(404).send({ error: "not found" });
+      return item;
+    } catch (err) {
+      return reply.status(400).send({ error: String(err) });
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>("/:id", async (req, reply) => {
+    await service.delete${pascal}(req.params.id);
+    return reply.status(204).send();
+  });
+}
+`;
+}
+
+function honoRouteFile(pascal: string, _camel: string, kebab: string): string {
+  return `import { Hono } from "hono";
+import { validate${pascal}Body, validate${pascal}Query } from "../validators/${kebab}.validator";
+import * as service from "../services/${kebab}.service";
+
+export const ${toCamel(pascal)}Routes = new Hono();
+
+${toCamel(pascal)}Routes.get("/", async (c) => {
+  const q = validate${pascal}Query(c.req.query());
+  return c.json(await service.list${pascal}(q));
+});
+
+${toCamel(pascal)}Routes.get("/:id", async (c) => {
+  const item = await service.get${pascal}ById(c.req.param("id"));
+  if (!item) return c.json({ error: "not found" }, 404);
+  return c.json(item);
+});
+
+${toCamel(pascal)}Routes.post("/", async (c) => {
+  try {
+    const data = validate${pascal}Body(await c.req.json());
+    const item = await service.create${pascal}(data);
+    return c.json(item, 201);
+  } catch (err) {
+    return c.json({ error: String(err) }, 400);
+  }
+});
+
+${toCamel(pascal)}Routes.patch("/:id", async (c) => {
+  try {
+    const data = validate${pascal}Body(await c.req.json());
+    const item = await service.update${pascal}(c.req.param("id"), data);
+    if (!item) return c.json({ error: "not found" }, 404);
+    return c.json(item);
+  } catch (err) {
+    return c.json({ error: String(err) }, 400);
+  }
+});
+
+${toCamel(pascal)}Routes.delete("/:id", async (c) => {
+  await service.delete${pascal}(c.req.param("id"));
+  return c.body(null, 204);
+});
+`;
+}
+
+function nestControllerFile(pascal: string, _camel: string, kebab: string): string {
+  return `import { Controller, Get, Post, Patch, Delete, Param, Body, Query, HttpCode } from "@nestjs/common";
+import { ${pascal}NestService } from "./${kebab}.service";
+import { validate${pascal}Body, validate${pascal}Query } from "../../validators/${kebab}.validator";
+
+@Controller("${kebab}s")
+export class ${pascal}Controller {
+  constructor(private readonly svc: ${pascal}NestService) {}
+
+  @Get()
+  list(@Query() q: unknown) {
+    return this.svc.list(validate${pascal}Query(q));
+  }
+
+  @Get(":id")
+  getById(@Param("id") id: string) {
+    return this.svc.getById(id);
+  }
+
+  @Post()
+  create(@Body() body: unknown) {
+    return this.svc.create(validate${pascal}Body(body));
+  }
+
+  @Patch(":id")
+  update(@Param("id") id: string, @Body() body: unknown) {
+    return this.svc.update(id, validate${pascal}Body(body));
+  }
+
+  @Delete(":id")
+  @HttpCode(204)
+  remove(@Param("id") id: string) {
+    return this.svc.remove(id);
+  }
+}
+`;
+}
+
+function nestServiceFile(pascal: string, _camel: string, kebab: string): string {
+  return `import { Injectable } from "@nestjs/common";
+import * as service from "../../services/${kebab}.service";
+import type { ${pascal}Input } from "../../validators/${kebab}.validator";
+
+@Injectable()
+export class ${pascal}NestService {
+  list(q: Parameters<typeof service.list${pascal}>[0]) { return service.list${pascal}(q); }
+  getById(id: string) { return service.get${pascal}ById(id); }
+  create(data: ${pascal}Input) { return service.create${pascal}(data); }
+  update(id: string, data: Partial<${pascal}Input>) { return service.update${pascal}(id, data); }
+  remove(id: string) { return service.delete${pascal}(id); }
+}
+`;
+}
+
+function nestModuleFile(pascal: string, kebab: string): string {
+  return `import { Module } from "@nestjs/common";
+import { ${pascal}Controller } from "./${kebab}.controller";
+import { ${pascal}NestService } from "./${kebab}.service";
+
+@Module({
+  controllers: [${pascal}Controller],
+  providers: [${pascal}NestService],
+})
+export class ${pascal}Module {}
+`;
 }
 
 function prismaFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
@@ -106,10 +530,12 @@ function pkgJson(name: string, framework: string, withPrisma = false, _db = "") 
     fastify: {
       fastify: "^5.0.0",
       "@fastify/helmet": "^12.0.0",
+      zod: "^3.24.1",
     },
     hono: {
       hono: "^4.6.0",
       "@hono/node-server": "^1.13.0",
+      zod: "^3.24.1",
     },
   };
   const dep = {
@@ -190,7 +616,7 @@ CMD ["node", "dist/main.js"]
 `;
 }
 
-function nestjsFiles(config: StackConfig, endpoints: Endpoint[]): GeneratedFile[] {
+function nestjsFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
   const routes = endpoints
     .map(
       (e) => `  @${capMethod(e.method)}(${JSON.stringify(nestPath(e.path))})
@@ -199,6 +625,12 @@ function nestjsFiles(config: StackConfig, endpoints: Endpoint[]): GeneratedFile[
   }`
     )
     .join("\n\n");
+
+  const entityModuleImports = entities
+    .map((e) => `import { ${e.name}Module } from "./modules/${toKebab(e.name)}/${toKebab(e.name)}.module";`)
+    .join("\n");
+  const entityModuleList = entities.map((e) => `${e.name}Module`).join(", ");
+
   return [
     {
       path: "src/main.ts",
@@ -220,8 +652,9 @@ bootstrap();
       path: "src/app.module.ts",
       content: `import { Module } from "@nestjs/common";
 import { AppController } from "./app.controller";
+${entityModuleImports}
 
-@Module({ controllers: [AppController] })
+@Module({ controllers: [AppController]${entities.length > 0 ? `, imports: [${entityModuleList}]` : ""} })
 export class AppModule {}
 `,
     },
@@ -241,27 +674,35 @@ ${routes}
   ];
 }
 
-function expressFiles(config: StackConfig, endpoints: Endpoint[]): GeneratedFile[] {
+function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
   const routes = endpoints
     .map(
       (e) =>
         `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, ${e.auth ? "authRequired, " : ""}(req, res) => res.json({ ok: true, op: "${e.method} ${e.path}" }));`
     )
     .join("\n");
+
+  const entityImports = entities
+    .map((e) => `import { create${e.name}Router } from "./routes/${toKebab(e.name)}.router";`)
+    .join("\n");
+  const entityMounts = entities
+    .map((e) => `app.use("/${toKebab(e.name)}s", create${e.name}Router());`)
+    .join("\n");
+
   return [
     {
       path: "src/main.ts",
       content: `import express from "express";
 import pinoHttp from "pino-http";
 ${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}import { authRequired } from "./middleware/auth";
-
+${entityImports ? entityImports + "\n" : ""}
 const app = express();
 app.use(express.json());
 app.use(pinoHttp());
 ${config.rateLimit ? "app.use(rateLimit);\n" : ""}
 app.get("/health", (_, res) => res.json({ ok: true }));
 ${routes}
-
+${entityMounts}
 const port = Number(process.env.PORT ?? 8080);
 app.listen(port, () => console.log(\`listening on \${port}\`));
 `,
@@ -306,25 +747,33 @@ export function rateLimit(req: Request, res: Response, next: NextFunction) {
   ];
 }
 
-function fastifyFiles(config: StackConfig, endpoints: Endpoint[]): GeneratedFile[] {
+function fastifyFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
   const routes = endpoints
     .map(
       (e) =>
         `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, async () => ({ ok: true, op: "${e.method} ${e.path}" }));`
     )
     .join("\n");
+
+  const entityImports = entities
+    .map((e) => `import { ${toCamel(e.name)}Routes } from "./routes/${toKebab(e.name)}.route";`)
+    .join("\n");
+  const entityRegistrations = entities
+    .map((e) => `await app.register(${toCamel(e.name)}Routes, { prefix: "/${toKebab(e.name)}s" });`)
+    .join("\n");
+
   return [
     {
       path: "src/main.ts",
       content: `import Fastify from "fastify";
 import helmet from "@fastify/helmet";
-
+${entityImports ? entityImports + "\n" : ""}
 const app = Fastify({ logger: true });
 await app.register(helmet);
 
 app.get("/health", async () => ({ ok: true }));
 ${routes}
-
+${entityRegistrations}
 const port = Number(process.env.PORT ?? 8080);
 app.listen({ port, host: "0.0.0.0" }).catch((err) => { app.log.error(err); process.exit(1); });
 `,
@@ -332,23 +781,31 @@ app.listen({ port, host: "0.0.0.0" }).catch((err) => { app.log.error(err); proce
   ];
 }
 
-function honoFiles(config: StackConfig, endpoints: Endpoint[]): GeneratedFile[] {
+function honoFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
   const routes = endpoints
     .map(
       (e) =>
         `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, (c) => c.json({ ok: true, op: "${e.method} ${e.path}" }));`
     )
     .join("\n");
+
+  const entityImports = entities
+    .map((e) => `import { ${toCamel(e.name)}Routes } from "./routes/${toKebab(e.name)}.route";`)
+    .join("\n");
+  const entityMounts = entities
+    .map((e) => `app.route("/${toKebab(e.name)}s", ${toCamel(e.name)}Routes);`)
+    .join("\n");
+
   return [
     {
       path: "src/main.ts",
       content: `import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-
+${entityImports ? entityImports + "\n" : ""}
 const app = new Hono();
 app.get("/health", (c) => c.json({ ok: true }));
 ${routes}
-
+${entityMounts}
 const port = Number(process.env.PORT ?? 8080);
 serve({ fetch: app.fetch, port });
 console.log(\`listening on \${port}\`);
