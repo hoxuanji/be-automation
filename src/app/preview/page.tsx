@@ -24,9 +24,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useStackStore } from "@/lib/store";
-import { cn } from "@/lib/utils";
+import { cn, formatBytes } from "@/lib/utils";
 import { DownloadRepoButton } from "@/components/shared/download-repo-button";
 import { toast } from "@/components/ui/toast";
+import { generate } from "@/lib/generators";
+import type { GeneratedFile } from "@/lib/generators";
+import type { StackConfig as GeneratorStackConfig } from "@/lib/generators/types";
 
 type TreeNode = {
   name: string;
@@ -36,221 +39,57 @@ type TreeNode = {
   lang?: string;
 };
 
-const tree: TreeNode[] = [
-  {
-    name: "cmd",
-    kind: "dir",
-    children: [
-      {
-        name: "api",
-        kind: "dir",
-        children: [
-          {
-            name: "main.go",
-            kind: "file",
-            lang: "go",
-            content: `package main
+function extToLang(ext: string): string {
+  const map: Record<string, string> = {
+    go: "go",
+    ts: "typescript",
+    tsx: "tsx",
+    js: "javascript",
+    py: "python",
+    rs: "rust",
+    java: "java",
+    kt: "kotlin",
+    yaml: "yaml",
+    yml: "yaml",
+    json: "json",
+    toml: "toml",
+    md: "markdown",
+    sql: "sql",
+    env: "dotenv",
+    mod: "go.mod",
+    txt: "text",
+    sh: "shell",
+    dockerfile: "dockerfile",
+  };
+  return map[ext.toLowerCase()] ?? "text";
+}
 
-import (
-    "context"
-    "log/slog"
-    "os"
-
-    "helios/internal/server"
-    "helios/internal/config"
-)
-
-func main() {
-    cfg := config.MustLoad()
-    logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-
-    srv := server.New(cfg, logger)
-    if err := srv.Run(context.Background()); err != nil {
-        logger.Error("server exited", "err", err)
-        os.Exit(1)
+function buildTree(files: GeneratedFile[]): TreeNode[] {
+  const root: TreeNode[] = [];
+  for (const f of files) {
+    const parts = f.path.split("/");
+    let level = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      let dir = level.find((n) => n.name === parts[i] && n.kind === "dir");
+      if (!dir) {
+        dir = { name: parts[i], kind: "dir", children: [] };
+        level.push(dir);
+      }
+      level = dir.children!;
     }
+    const filename = parts[parts.length - 1];
+    // Handle filenames like "Dockerfile" that have no extension
+    const dotIdx = filename.lastIndexOf(".");
+    const ext = dotIdx > 0 ? filename.slice(dotIdx + 1) : filename.toLowerCase();
+    level.push({
+      name: filename,
+      kind: "file",
+      content: f.content,
+      lang: extToLang(ext),
+    });
+  }
+  return root;
 }
-`,
-          },
-        ],
-      },
-    ],
-  },
-  {
-    name: "internal",
-    kind: "dir",
-    children: [
-      {
-        name: "server",
-        kind: "dir",
-        children: [
-          {
-            name: "server.go",
-            kind: "file",
-            lang: "go",
-            content: `package server
-
-import (
-    "context"
-    "net/http"
-
-    "github.com/gin-gonic/gin"
-)
-
-type Server struct {
-    r *gin.Engine
-}
-
-func New(cfg *Config, log *slog.Logger) *Server {
-    r := gin.New()
-    r.Use(middleware.Recover(), middleware.Trace(), middleware.Auth(cfg))
-    r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
-    return &Server{r: r}
-}
-`,
-          },
-          { name: "middleware.go", kind: "file", lang: "go", content: `// rate-limit, auth, tracing middleware` },
-        ],
-      },
-      {
-        name: "db",
-        kind: "dir",
-        children: [
-          { name: "postgres.go", kind: "file", lang: "go", content: `// pgxpool with Prometheus hooks` },
-          { name: "migrations", kind: "dir", children: [{ name: "0001_init.sql", kind: "file", lang: "sql", content: `-- users table etc.` }] },
-        ],
-      },
-    ],
-  },
-  {
-    name: "api",
-    kind: "dir",
-    children: [
-      {
-        name: "openapi.yaml",
-        kind: "file",
-        lang: "yaml",
-        content: `openapi: 3.1.0
-info:
-  title: helios-api
-  version: 0.1.0
-paths:
-  /users/{id}:
-    get:
-      summary: Get user
-      security: [{ bearerAuth: [] }]
-      responses:
-        "200":
-          description: OK
-`,
-      },
-    ],
-  },
-  {
-    name: "deploy",
-    kind: "dir",
-    children: [
-      {
-        name: "Dockerfile",
-        kind: "file",
-        lang: "dockerfile",
-        content: `FROM golang:1.23-alpine AS build
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -o /out/api ./cmd/api
-
-FROM gcr.io/distroless/static:nonroot
-COPY --from=build /out/api /api
-USER nonroot:nonroot
-EXPOSE 8080
-ENTRYPOINT ["/api"]
-`,
-      },
-      {
-        name: "helm",
-        kind: "dir",
-        children: [
-          {
-            name: "values.yaml",
-            kind: "file",
-            lang: "yaml",
-            content: `replicaCount: 3
-image:
-  repository: ghcr.io/acme/helios-api
-  tag: 0.1.0
-autoscaling:
-  enabled: true
-  minReplicas: 3
-  maxReplicas: 20
-  targetCPUUtilizationPercentage: 65
-`,
-          },
-        ],
-      },
-      {
-        name: "k8s",
-        kind: "dir",
-        children: [
-          {
-            name: "deployment.yaml",
-            kind: "file",
-            lang: "yaml",
-            content: `apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: helios-api
-spec:
-  replicas: 3
-  template:
-    spec:
-      containers:
-        - name: api
-          image: ghcr.io/acme/helios-api:0.1.0
-          ports:
-            - containerPort: 8080
-          resources:
-            requests: { cpu: 250m, memory: 256Mi }
-            limits: { cpu: 1, memory: 512Mi }
-`,
-          },
-        ],
-      },
-    ],
-  },
-  {
-    name: ".github",
-    kind: "dir",
-    children: [
-      {
-        name: "workflows",
-        kind: "dir",
-        children: [
-          {
-            name: "ci.yml",
-            kind: "file",
-            lang: "yaml",
-            content: `name: ci
-on: [push, pull_request]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.23' }
-      - run: go test ./... -race -cover
-`,
-          },
-        ],
-      },
-    ],
-  },
-  { name: ".env.example", kind: "file", lang: "dotenv", content: `DATABASE_URL=postgres://user:pass@db:5432/helios\nREDIS_URL=redis://cache:6379\nJWT_SECRET=change-me\nLOG_LEVEL=info\n` },
-  { name: "README.md", kind: "file", lang: "md", content: `# helios-api\n\nGenerated by Helios — a production-ready backend.\n\n## Run\n\n\`\`\`\ndocker compose up --build\n\`\`\`\n` },
-  { name: "go.mod", kind: "file", lang: "go", content: `module helios\n\ngo 1.23\n` },
-];
 
 function flatten(n: TreeNode, path = ""): { path: string; node: TreeNode }[] {
   const p = path ? `${path}/${n.name}` : n.name;
@@ -258,15 +97,44 @@ function flatten(n: TreeNode, path = ""): { path: string; node: TreeNode }[] {
   return (n.children ?? []).flatMap((c) => flatten(c, p));
 }
 
-const allFiles = tree.flatMap((n) => flatten(n));
-
 export default function PreviewPage() {
-  const { config } = useStackStore();
-  const [selected, setSelected] = React.useState(
-    allFiles.find((f) => f.node.name === "main.go")?.path ?? allFiles[0].path
+  const { config, endpoints, entities } = useStackStore();
+
+  const generatedFiles = React.useMemo(
+    () => generate(config as unknown as GeneratorStackConfig, endpoints, entities),
+    [config, endpoints, entities]
   );
 
-  const selectedNode = allFiles.find((f) => f.path === selected)?.node;
+  const tree = React.useMemo(() => buildTree(generatedFiles), [generatedFiles]);
+
+  const flatFiles = React.useMemo(
+    () => tree.flatMap((n) => flatten(n)),
+    [tree]
+  );
+
+  const totalBytes = React.useMemo(
+    () => generatedFiles.reduce((sum, f) => sum + f.content.length, 0),
+    [generatedFiles]
+  );
+
+  const defaultSelected = React.useMemo(() => {
+    const preferred = flatFiles.find(
+      (f) =>
+        f.node.name === "main.go" ||
+        f.node.name === "main.ts" ||
+        f.node.name.startsWith("main.")
+    );
+    return preferred?.path ?? flatFiles[0]?.path ?? "";
+  }, [flatFiles]);
+
+  const [selected, setSelected] = React.useState(defaultSelected);
+
+  // Keep selected in sync when generated files change (e.g. config change)
+  React.useEffect(() => {
+    setSelected(defaultSelected);
+  }, [defaultSelected]);
+
+  const selectedNode = flatFiles.find((f) => f.path === selected)?.node;
 
   async function copyPath() {
     try {
@@ -307,7 +175,7 @@ export default function PreviewPage() {
       }
     >
       <div className="max-w-[1280px] mx-auto p-6 md:p-8 space-y-6">
-        <HeaderBlock />
+        <HeaderBlock fileCount={flatFiles.length} totalBytes={totalBytes} />
 
         <div className="grid gap-6 lg:grid-cols-[320px,1fr]">
           <FileTree
@@ -338,7 +206,7 @@ export default function PreviewPage() {
                   <Badge variant="outline">
                     <GitBranch className="h-3 w-3" /> main
                   </Badge>
-                  <Badge variant="success">48 files</Badge>
+                  <Badge variant="success">{flatFiles.length} files</Badge>
                   <Button variant="secondary" size="sm" onClick={copyPath}>
                     <Copy className="h-3.5 w-3.5" /> Copy path
                   </Button>
@@ -357,7 +225,7 @@ export default function PreviewPage() {
               </TabsContent>
 
               <TabsContent value="manifests">
-                <ManifestsGrid />
+                <ManifestsGrid generatedFiles={generatedFiles} />
               </TabsContent>
 
               <TabsContent value="audit">
@@ -371,7 +239,13 @@ export default function PreviewPage() {
   );
 }
 
-function HeaderBlock() {
+function HeaderBlock({
+  fileCount,
+  totalBytes,
+}: {
+  fileCount: number;
+  totalBytes: number;
+}) {
   return (
     <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
       <div>
@@ -385,8 +259,8 @@ function HeaderBlock() {
           Generated repository
         </h1>
         <p className="text-xs text-muted-foreground mt-0.5">
-          48 files · 172KB · inspected by 12 static analyzers · 0 high-severity
-          findings
+          {fileCount} files · {formatBytes(totalBytes)} · inspected by 12 static
+          analyzers · 0 high-severity findings
         </p>
       </div>
     </div>
@@ -587,34 +461,65 @@ function EnvPreview() {
   );
 }
 
-function ManifestsGrid() {
-  const items = [
-    { name: "Dockerfile", lang: "dockerfile", size: "612 B", color: "from-brand-500/30 to-brand-500/5" },
-    { name: "helm/values.yaml", lang: "yaml", size: "1.4 KB", color: "from-emerald-500/30 to-brand-500/5" },
-    { name: "k8s/deployment.yaml", lang: "yaml", size: "2.1 KB", color: "from-purple-500/30 to-brand-500/5" },
-    { name: "terraform/main.tf", lang: "hcl", size: "3.8 KB", color: "from-amber-500/30 to-brand-500/5" },
-    { name: ".github/workflows/ci.yml", lang: "yaml", size: "820 B", color: "from-white/10 to-white/5" },
-    { name: "openapi.yaml", lang: "yaml", size: "5.2 KB", color: "from-red-500/30 to-brand-500/5" },
-  ];
+const MANIFEST_COLORS: Record<string, string> = {
+  Dockerfile: "from-brand-500/30 to-brand-500/5",
+  helm: "from-emerald-500/30 to-brand-500/5",
+  k8s: "from-purple-500/30 to-brand-500/5",
+  terraform: "from-amber-500/30 to-brand-500/5",
+  ".github": "from-white/10 to-white/5",
+  openapi: "from-red-500/30 to-brand-500/5",
+};
+
+function manifestColor(path: string): string {
+  for (const [key, color] of Object.entries(MANIFEST_COLORS)) {
+    if (path.includes(key)) return color;
+  }
+  return "from-white/10 to-white/5";
+}
+
+function ManifestsGrid({ generatedFiles }: { generatedFiles: GeneratedFile[] }) {
+  const manifests = generatedFiles.filter(
+    (f) =>
+      f.path.includes("Dockerfile") ||
+      f.path.includes("helm/") ||
+      f.path.includes("k8s/") ||
+      f.path.includes(".github/") ||
+      f.path.includes("openapi.yaml")
+  );
+
   return (
     <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-      {items.map((m) => (
-        <Card key={m.name} className="group relative overflow-hidden hover-raise">
-          <div
-            className={`pointer-events-none absolute -inset-10 bg-gradient-to-br ${m.color} opacity-0 blur-3xl group-hover:opacity-100 transition-opacity`}
-          />
-          <div className="relative p-4">
-            <div className="flex items-center gap-2">
-              <FileCog className="h-4 w-4 text-muted-foreground" />
-              <span className="text-sm font-mono truncate">{m.name}</span>
+      {manifests.map((m) => {
+        const dotIdx = m.path.lastIndexOf(".");
+        const filename = m.path.split("/").pop() ?? m.path;
+        const extRaw = dotIdx > 0 ? m.path.slice(dotIdx + 1) : filename.toLowerCase();
+        const lang = extToLang(extRaw);
+        const color = manifestColor(m.path);
+        return (
+          <Card key={m.path} className="group relative overflow-hidden hover-raise">
+            <div
+              className={`pointer-events-none absolute -inset-10 bg-gradient-to-br ${color} opacity-0 blur-3xl group-hover:opacity-100 transition-opacity`}
+            />
+            <div className="relative p-4">
+              <div className="flex items-center gap-2">
+                <FileCog className="h-4 w-4 text-muted-foreground" />
+                <span className="text-sm font-mono truncate">{m.path}</span>
+              </div>
+              <div className="mt-3 flex items-center justify-between">
+                <Badge variant="outline">{lang}</Badge>
+                <span className="text-[11px] text-muted-foreground">
+                  {formatBytes(m.content.length)}
+                </span>
+              </div>
             </div>
-            <div className="mt-3 flex items-center justify-between">
-              <Badge variant="outline">{m.lang}</Badge>
-              <span className="text-[11px] text-muted-foreground">{m.size}</span>
-            </div>
-          </div>
-        </Card>
-      ))}
+          </Card>
+        );
+      })}
+      {manifests.length === 0 && (
+        <p className="col-span-3 text-xs text-muted-foreground py-4">
+          No deployment manifests in the current configuration.
+        </p>
+      )}
     </div>
   );
 }
