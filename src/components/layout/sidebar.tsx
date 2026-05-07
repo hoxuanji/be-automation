@@ -8,7 +8,7 @@ import {
   Network,
   FolderGit2,
   Rocket,
-  BookOpen,
+  Star,
   Settings,
   Sparkles,
   HelpCircle,
@@ -32,12 +32,12 @@ const nav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutGrid },
   { href: "/builder", label: "Stack Builder", icon: Boxes, badge: "AI" },
   { href: "/api-builder", label: "API Contracts", icon: Network },
+  { href: "/templates", label: "Templates", icon: Star },
   { href: "/preview", label: "Repository", icon: FolderGit2 },
   { href: "/deploy", label: "Deploy", icon: Rocket },
 ];
 
 const secondary = [
-  { label: "Templates", icon: BookOpen, action: "templates" as const },
   { label: "Team", icon: Users, action: "team" as const },
 ];
 
@@ -178,10 +178,7 @@ export function Sidebar() {
                   onClick={() =>
                     toast({
                       title: item.label,
-                      description:
-                        item.action === "templates"
-                          ? "Browse production templates from the Dashboard."
-                          : "Invite teammates — coming soon.",
+                      description: "Invite teammates — coming soon.",
                       kind: "info",
                     })
                   }
