@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Plus, Trash2, Database, ChevronDown, ChevronUp, Check } from "lucide-react";
+import { Plus, Trash2, Database, ChevronDown, ChevronUp, Check, Upload, GitBranch } from "lucide-react";
 import {
   Card,
   CardHeader,
@@ -12,8 +12,16 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useStackStore, type Entity, type EntityField, type FieldType } from "@/lib/store";
 import { toast } from "@/components/ui/toast";
+import { detectAndParse } from "@/lib/schema-import";
+import dynamic from "next/dynamic";
+
+const ErdCanvas = dynamic(
+  () => import("@/components/builder/erd-canvas").then((m) => ({ default: m.ErdCanvas })),
+  { ssr: false, loading: () => <div className="h-[400px] flex items-center justify-center text-xs text-muted-foreground">Loading diagram…</div> }
+);
 
 const FIELD_TYPES: FieldType[] = [
   "uuid",
@@ -53,10 +61,30 @@ export function EntityBuilder() {
     addEntityField,
     removeEntityField,
     updateEntityField,
+    setEntities,
   } = useStackStore();
 
   const [newEntityName, setNewEntityName] = React.useState("");
   const [collapsed, setCollapsed] = React.useState<Record<string, boolean>>({});
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const content = ev.target?.result as string;
+      const parsed = detectAndParse(file.name, content);
+      if (parsed.length === 0) {
+        toast({ title: "No entities found", description: "Ensure the file is a valid Prisma schema or Helios JSON", kind: "error" });
+        return;
+      }
+      setEntities([...entities, ...parsed]);
+      toast({ title: `Imported ${parsed.length} model${parsed.length !== 1 ? "s" : ""}`, description: parsed.map((e) => e.name).join(", "), kind: "success" });
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }
 
   function handleAddEntity() {
     const name = newEntityName.trim();
@@ -93,24 +121,38 @@ export function EntityBuilder() {
     setCollapsed((prev) => ({ ...prev, [id]: !prev[id] }));
   }
 
+  const uploadButton = (
+    <>
+      <input ref={fileInputRef} type="file" accept=".prisma,.json" className="hidden" onChange={handleFileUpload} />
+      <Button variant="secondary" size="sm" onClick={() => fileInputRef.current?.click()}>
+        <Upload className="h-3.5 w-3.5" /> Import schema
+      </Button>
+    </>
+  );
+
   if (entities.length === 0) {
     return (
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Database className="h-4 w-4" /> Data Models
-          </CardTitle>
-          <CardDescription>
-            Define your entities — Helios generates Prisma schemas, GORM structs,
-            or SQLAlchemy models depending on your language.
-          </CardDescription>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <Database className="h-4 w-4" /> Data Models
+              </CardTitle>
+              <CardDescription>
+                Define your entities — Helios generates Prisma schemas, GORM structs,
+                or SQLAlchemy models depending on your language.
+              </CardDescription>
+            </div>
+            {uploadButton}
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="rounded-xl border border-dashed border-white/[0.08] bg-white/[0.01] p-8 text-center space-y-3">
             <Database className="h-8 w-8 text-muted-foreground mx-auto" />
             <p className="text-sm font-medium">No data models yet</p>
             <p className="text-xs text-muted-foreground">
-              Use the AI prompt above or add a model manually.
+              Use the AI prompt above, import a Prisma schema, or add a model manually.
             </p>
           </div>
           <AddEntityRow
@@ -125,39 +167,48 @@ export function EntityBuilder() {
 
   return (
     <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Database className="h-4 w-4" /> Data Models
-          </CardTitle>
-          <CardDescription>
-            {entities.length} model{entities.length !== 1 ? "s" : ""}. Helios generates
-            ORM schemas (Prisma, GORM, SQLAlchemy) and Pydantic/Zod types.
-          </CardDescription>
-        </CardHeader>
-      </Card>
+      <Tabs defaultValue="models">
+        <div className="flex items-center justify-between gap-3">
+          <TabsList>
+            <TabsTrigger value="models">
+              <Database className="h-3.5 w-3.5" />
+              Models ({entities.length})
+            </TabsTrigger>
+            <TabsTrigger value="relations">
+              <GitBranch className="h-3.5 w-3.5" />
+              Relations
+            </TabsTrigger>
+          </TabsList>
+          {uploadButton}
+        </div>
 
-      {entities.map((entity) => (
-        <EntityCard
-          key={entity.id}
-          entity={entity}
-          collapsed={collapsed[entity.id] ?? false}
-          onToggle={() => toggleCollapse(entity.id)}
-          onRemove={() => {
-            removeEntity(entity.id);
-            toast({ title: `Removed ${entity.name}`, kind: "info" });
-          }}
-          onAddField={() => handleAddField(entity.id)}
-          onRemoveField={(fid) => removeEntityField(entity.id, fid)}
-          onUpdateField={(fid, updates) => updateEntityField(entity.id, fid, updates)}
-        />
-      ))}
+        <TabsContent value="models" className="space-y-4 mt-4">
+          {entities.map((entity) => (
+            <EntityCard
+              key={entity.id}
+              entity={entity}
+              collapsed={collapsed[entity.id] ?? false}
+              onToggle={() => toggleCollapse(entity.id)}
+              onRemove={() => {
+                removeEntity(entity.id);
+                toast({ title: `Removed ${entity.name}`, kind: "info" });
+              }}
+              onAddField={() => handleAddField(entity.id)}
+              onRemoveField={(fid) => removeEntityField(entity.id, fid)}
+              onUpdateField={(fid, updates) => updateEntityField(entity.id, fid, updates)}
+            />
+          ))}
+          <AddEntityRow
+            name={newEntityName}
+            setName={setNewEntityName}
+            onAdd={handleAddEntity}
+          />
+        </TabsContent>
 
-      <AddEntityRow
-        name={newEntityName}
-        setName={setNewEntityName}
-        onAdd={handleAddEntity}
-      />
+        <TabsContent value="relations" className="mt-4">
+          <ErdCanvas />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

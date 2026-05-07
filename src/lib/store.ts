@@ -61,6 +61,16 @@ export type Entity = {
   fields: EntityField[];
 };
 
+export type RelationType = "one-to-many" | "many-to-many" | "one-to-one";
+
+export type Relation = {
+  id: string;
+  fromEntity: string;
+  toEntity: string;
+  type: RelationType;
+  label?: string;
+};
+
 export type SavedProject = {
   id: string;
   name: string;
@@ -68,6 +78,7 @@ export type SavedProject = {
   config: StackConfig;
   endpoints: Endpoint[];
   entities: Entity[];
+  relations?: Relation[];
 };
 
 export type AuthUser = {
@@ -101,6 +112,7 @@ type State = {
   config: StackConfig;
   endpoints: Endpoint[];
   entities: Entity[];
+  relations: Relation[];
   workspace: string;
   workspaces: string[];
   savedProjects: SavedProject[];
@@ -133,6 +145,11 @@ type State = {
     fieldId: string,
     updates: Partial<EntityField>
   ) => void;
+
+  // Relation mutations
+  setRelations: (relations: Relation[]) => void;
+  addRelation: (relation: Relation) => void;
+  removeRelation: (id: string) => void;
 
   // Auth
   loadAuth: () => Promise<void>;
@@ -244,6 +261,7 @@ export const useStackStore = create<State>((set, get) => ({
   },
   endpoints: initialEndpoints,
   entities: initialEntities,
+  relations: [],
 
   set: (k, v) =>
     set((s) => ({ config: { ...s.config, [k]: v } })),
@@ -314,6 +332,12 @@ export const useStackStore = create<State>((set, get) => ({
       ),
     })),
 
+  setRelations: (relations) => set({ relations }),
+  addRelation: (relation) =>
+    set((s) => ({ relations: [...s.relations, relation] })),
+  removeRelation: (id) =>
+    set((s) => ({ relations: s.relations.filter((r) => r.id !== id) })),
+
   loadAuth: async () => {
     try {
       const res = await fetch("/api/auth/me");
@@ -370,6 +394,7 @@ export const useStackStore = create<State>((set, get) => ({
         config: s.config,
         endpoints: s.endpoints,
         entities: s.entities,
+        relations: s.relations,
       },
     };
 
@@ -413,6 +438,7 @@ export const useStackStore = create<State>((set, get) => ({
       config: project.config,
       endpoints: project.endpoints,
       entities: project.entities,
+      relations: project.relations ?? [],
     });
   },
 

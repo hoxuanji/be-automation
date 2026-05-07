@@ -1,9 +1,12 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
+import "swagger-ui-react/swagger-ui.css";
 import {
   Code2,
   FileCode2,
+  Globe,
   Lock,
   Plus,
   Search,
@@ -24,6 +27,8 @@ import { useStackStore, type Endpoint } from "@/lib/store";
 import { shortId } from "@/lib/utils";
 import { toast } from "@/components/ui/toast";
 
+const SwaggerUI = dynamic(() => import("swagger-ui-react"), { ssr: false });
+
 const methodTones: Record<Endpoint["method"], string> = {
   GET: "text-emerald-300 bg-emerald-500/10 border-emerald-500/20",
   POST: "text-brand-300 bg-brand-500/10 border-brand-500/20",
@@ -40,6 +45,12 @@ export default function ApiBuilderPage() {
     config.api === "grpc" ? "grpc" : "rest"
   );
   const [filter, setFilter] = React.useState("");
+  const [view, setView] = React.useState<"editor" | "explorer">("editor");
+
+  const openApiSpec = React.useMemo(
+    () => buildOpenAPI(config.name, endpoints),
+    [config.name, endpoints]
+  );
 
   const filtered = React.useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -198,6 +209,20 @@ export default function ApiBuilderPage() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
+                <div className="inline-flex items-center rounded-lg border border-white/[0.06] bg-white/[0.02] p-0.5">
+                  <button
+                    onClick={() => setView("editor")}
+                    className={`rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${view === "editor" ? "bg-white/[0.08] text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                  >
+                    Editor
+                  </button>
+                  <button
+                    onClick={() => setView("explorer")}
+                    className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${view === "explorer" ? "bg-white/[0.08] text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                  >
+                    <Globe className="h-3 w-3" /> Explorer
+                  </button>
+                </div>
                 <Button variant="secondary" size="sm" onClick={downloadOpenAPI}>
                   <FileCode2 className="h-3.5 w-3.5" /> Download OpenAPI
                 </Button>
@@ -207,7 +232,9 @@ export default function ApiBuilderPage() {
               </div>
             </div>
 
-            {selected ? (
+            {view === "explorer" ? (
+              <ApiExplorer spec={openApiSpec} />
+            ) : selected ? (
               <EndpointEditor
                 endpoint={selected}
                 onUpdate={(patch) => updateEndpoint(selected.id, patch)}
@@ -492,6 +519,60 @@ function ToggleRow({
         <div className="text-xs text-muted-foreground">{desc}</div>
       </div>
       <Switch checked={v} onCheckedChange={setV} />
+    </div>
+  );
+}
+
+function ApiExplorer({ spec }: { spec: string }) {
+  const specObj = React.useMemo(() => {
+    try {
+      const lines = spec.split("\n");
+      const obj: Record<string, unknown> = {};
+      let currentPath = "";
+      let currentMethod = "";
+      const paths: Record<string, Record<string, unknown>> = {};
+      for (const line of lines) {
+        if (line.match(/^  [/]/)) {
+          currentPath = line.trim().replace(/:$/, "");
+          paths[currentPath] = {};
+        } else if (line.match(/^    (get|post|put|patch|delete):/)) {
+          currentMethod = line.trim().replace(/:$/, "");
+          if (currentPath) paths[currentPath][currentMethod] = { summary: "", responses: { "200": { description: "OK" } } };
+        } else if (line.includes("summary:") && currentPath && currentMethod) {
+          const summary = line.split("summary:")[1]?.trim().replace(/^"|"$/g, "") ?? "";
+          (paths[currentPath][currentMethod] as Record<string, unknown>).summary = summary;
+        } else if (line.includes("security:") && currentPath && currentMethod) {
+          (paths[currentPath][currentMethod] as Record<string, unknown>).security = [{ bearerAuth: [] }];
+        }
+      }
+      obj.openapi = "3.1.0";
+      obj.info = { title: spec.match(/title: (.+)/)?.[1] ?? "API", version: "0.1.0" };
+      obj.components = { securitySchemes: { bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" } } };
+      obj.paths = paths;
+      return obj;
+    } catch {
+      return { openapi: "3.1.0", info: { title: "API", version: "0.1.0" }, paths: {} };
+    }
+  }, [spec]);
+
+  return (
+    <div className="rounded-xl border border-white/[0.06] overflow-hidden [&_.swagger-ui]:text-foreground [&_.swagger-ui_.info]:text-foreground [&_.swagger-ui_.scheme-container]:bg-transparent [&_.swagger-ui_.opblock-summary-description]:text-muted-foreground [&_.swagger-ui_input]:bg-white/[0.05] [&_.swagger-ui_select]:bg-zinc-900 [&_.swagger-ui_textarea]:bg-white/[0.05] swagger-dark">
+      <div className="border-b border-white/[0.06] px-4 py-2.5 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Globe className="h-3.5 w-3.5 text-brand-300" />
+          <span className="text-xs font-medium">API Explorer</span>
+          <Badge variant="brand">Interactive</Badge>
+        </div>
+        <Badge variant="outline">OpenAPI 3.1</Badge>
+      </div>
+      <div className="bg-zinc-950 p-4 overflow-auto max-h-[720px]">
+        <SwaggerUI
+          spec={specObj}
+          defaultModelsExpandDepth={-1}
+          docExpansion="list"
+          filter
+        />
+      </div>
     </div>
   );
 }

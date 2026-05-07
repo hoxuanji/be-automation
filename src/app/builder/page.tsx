@@ -48,6 +48,7 @@ import { ArchitecturePreview } from "@/components/builder/architecture-preview";
 import { StackSummary } from "@/components/builder/stack-summary";
 import { NLPrompt } from "@/components/builder/nl-prompt";
 import { EntityBuilder } from "@/components/builder/entity-builder";
+import { OnboardingWizard } from "@/components/builder/onboarding-wizard";
 import { AIAssistant } from "@/components/shared/ai-assistant";
 import { useStackStore } from "@/lib/store";
 import { toast } from "@/components/ui/toast";
@@ -96,6 +97,8 @@ export default function BuilderPage() {
   }
 
   return (
+    <>
+    <OnboardingWizard />
     <WorkspaceShell
       breadcrumb={[
         { label: "Projects", href: "/dashboard" },
@@ -226,6 +229,7 @@ export default function BuilderPage() {
         <GenerateCTA />
       </div>
     </WorkspaceShell>
+    </>
   );
 }
 

@@ -183,3 +183,29 @@
     scrollbar-width: none;
   }
 }
+
+/* Swagger UI dark mode overrides */
+.swagger-ui .topbar { display: none; }
+.swagger-ui { color: hsl(210 40% 98%); background: transparent; font-family: inherit; }
+.swagger-ui .info .title, .swagger-ui .info h1, .swagger-ui .info h2 { color: hsl(210 40% 98%); }
+.swagger-ui .info .base-url, .swagger-ui .info p { color: hsl(215 20% 65%); }
+.swagger-ui .scheme-container { background: transparent; box-shadow: none; padding: 0; }
+.swagger-ui .opblock { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; margin-bottom: 6px; }
+.swagger-ui .opblock.opblock-get .opblock-summary { border-color: rgba(52,211,153,0.2); }
+.swagger-ui .opblock.opblock-post .opblock-summary { border-color: rgba(99,102,241,0.3); }
+.swagger-ui .opblock.opblock-put .opblock-summary { border-color: rgba(245,158,11,0.3); }
+.swagger-ui .opblock.opblock-delete .opblock-summary { border-color: rgba(239,68,68,0.3); }
+.swagger-ui .opblock.opblock-patch .opblock-summary { border-color: rgba(168,85,247,0.3); }
+.swagger-ui .opblock-summary-method { border-radius: 4px; font-size: 10px; font-weight: 700; min-width: 52px; }
+.swagger-ui .opblock-summary-path, .swagger-ui .opblock-summary-description { color: hsl(210 40% 98%); }
+.swagger-ui .opblock-description-wrapper p, .swagger-ui .response-col_description p { color: hsl(215 20% 65%); }
+.swagger-ui table thead tr th, .swagger-ui table thead tr td { color: hsl(215 20% 65%); border-bottom: 1px solid rgba(255,255,255,0.06); }
+.swagger-ui .parameter__name { color: hsl(210 40% 98%); }
+.swagger-ui .parameter__type { color: hsl(215 20% 65%); }
+.swagger-ui input[type=text], .swagger-ui textarea, .swagger-ui select { background: rgba(255,255,255,0.05) !important; color: hsl(210 40% 98%) !important; border: 1px solid rgba(255,255,255,0.1) !important; border-radius: 6px; }
+.swagger-ui .btn { background: rgba(255,255,255,0.05); color: hsl(210 40% 98%); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; }
+.swagger-ui .btn.execute { background: hsl(var(--brand-500)); border: none; color: white; }
+.swagger-ui .response-col_status { color: hsl(210 40% 98%); }
+.swagger-ui .model-box { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; }
+.swagger-ui section.models { background: transparent; border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; }
+.swagger-ui .filter .operation-filter-input { background: rgba(255,255,255,0.04) !important; border: 1px solid rgba(255,255,255,0.08) !important; color: hsl(210 40% 98%) !important; }
