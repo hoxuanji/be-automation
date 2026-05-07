@@ -7,7 +7,7 @@ import { useStackStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
 export function DownloadRepoButton({ className }: { className?: string }) {
-  const { config, endpoints } = useStackStore();
+  const { config, endpoints, entities } = useStackStore();
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -18,7 +18,7 @@ export function DownloadRepoButton({ className }: { className?: string }) {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ config, endpoints }),
+        body: JSON.stringify({ config, endpoints, entities }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));

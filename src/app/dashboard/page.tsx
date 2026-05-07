@@ -19,6 +19,7 @@ import {
   Database,
   Cloud,
   Search,
+  Trash2,
 } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import { Card } from "@/components/ui/card";
@@ -26,24 +27,16 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { AIAssistant } from "@/components/shared/ai-assistant";
 import { toast } from "@/components/ui/toast";
-import { useStackStore } from "@/lib/store";
+import { useStackStore, type SavedProject } from "@/lib/store";
 import type { StackConfig } from "@/lib/generators/types";
 
-type Project = {
-  name: string;
-  stack: string;
-  env: string;
-  region: string;
-  updated: string;
-  status: string;
-};
-
-const projects: Project[] = [
-  { name: "helios-api", stack: "Go · Postgres · Redis", env: "production", region: "us-east-1", updated: "2m ago", status: "healthy" },
-  { name: "ledger-svc", stack: "Rust · CockroachDB · Kafka", env: "staging", region: "eu-west-2", updated: "1h ago", status: "healthy" },
-  { name: "notifier", stack: "TypeScript · Redis · NATS", env: "production", region: "us-west-2", updated: "yesterday", status: "degraded" },
-  { name: "search-index", stack: "Python · Postgres · OpenSearch", env: "staging", region: "us-east-1", updated: "3d ago", status: "healthy" },
-];
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 60_000) return "just now";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
 
 type Template = {
   id: string;
@@ -137,12 +130,19 @@ const quickActions = [
 ];
 
 export default function DashboardPage() {
+  const { savedProjects, loadSavedProjects, deleteProject } = useStackStore();
   const [filter, setFilter] = React.useState("");
-  const filtered = projects.filter(
+
+  React.useEffect(() => {
+    loadSavedProjects();
+  }, [loadSavedProjects]);
+
+  const filtered = savedProjects.filter(
     (p) =>
       !filter.trim() ||
       p.name.toLowerCase().includes(filter.toLowerCase()) ||
-      p.stack.toLowerCase().includes(filter.toLowerCase())
+      p.config.language.toLowerCase().includes(filter.toLowerCase()) ||
+      p.config.database.toLowerCase().includes(filter.toLowerCase())
   );
 
   return (
@@ -246,15 +246,25 @@ export default function DashboardPage() {
           </div>
 
           <div className="mt-4 grid gap-3 md:grid-cols-2">
-            {filtered.length === 0 ? (
+            {savedProjects.length === 0 ? (
+              <div className="md:col-span-2 rounded-xl border border-dashed border-white/[0.08] bg-white/[0.01] p-8 text-center space-y-2">
+                <FolderGit2 className="h-8 w-8 text-muted-foreground mx-auto" />
+                <div className="text-sm font-medium">No saved projects yet</div>
+                <p className="text-xs text-muted-foreground">
+                  Open the builder, configure your stack, and hit Save.
+                </p>
+              </div>
+            ) : filtered.length === 0 ? (
               <div className="md:col-span-2 rounded-xl border border-white/[0.06] bg-white/[0.02] p-8 text-center">
                 <div className="text-sm font-medium">No matches</div>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Try another search term or create a new stack.
+                  Try another search term.
                 </p>
               </div>
             ) : (
-              filtered.map((p) => <ProjectCard key={p.name} {...p} />)
+              filtered.map((p) => (
+                <SavedProjectCard key={p.id} project={p} onDelete={() => deleteProject(p.id)} />
+              ))
             )}
           </div>
         </section>
@@ -381,66 +391,77 @@ function SectionHeader({
   );
 }
 
-function ProjectCard({
-  name,
-  stack,
-  env,
-  region,
-  updated,
-  status,
-}: Project) {
-  const { patch } = useStackStore();
+function SavedProjectCard({
+  project,
+  onDelete,
+}: {
+  project: SavedProject;
+  onDelete: () => void;
+}) {
+  const { loadProject } = useStackStore();
   const router = useRouter();
+
   function open() {
-    patch({ name });
+    loadProject(project.id);
     toast({
-      title: "Opening project",
-      description: `${name} · ${stack}`,
-      kind: "info",
+      title: `Loaded "${project.name}"`,
+      description: `${project.config.language} · ${project.config.framework} · ${project.config.database}`,
+      kind: "success",
     });
     router.push("/builder");
   }
+
+  const stackLine = [
+    project.config.language,
+    project.config.framework,
+    project.config.database,
+    project.config.cache !== "none" ? project.config.cache : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
-    <button
-      type="button"
-      onClick={open}
-      className="group relative block w-full text-left rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 hover-raise"
-    >
+    <div className="group relative block w-full text-left rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 hover-raise">
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
+        <button type="button" onClick={open} className="min-w-0 flex-1 text-left">
           <div className="flex items-center gap-2">
             <div className="h-7 w-7 rounded-md bg-gradient-to-br from-brand-500/30 to-purple-500/30 border border-white/10 grid place-items-center">
               <Database className="h-3.5 w-3.5 text-muted-foreground" />
             </div>
-            <span className="text-sm font-medium truncate">{name}</span>
-            <Badge variant={env === "production" ? "brand" : "outline"} className="ml-1">
-              {env}
-            </Badge>
+            <span className="text-sm font-medium truncate">{project.name}</span>
+            {project.entities.length > 0 && (
+              <Badge variant="outline" className="ml-1 text-[10px]">
+                {project.entities.length} model{project.entities.length !== 1 ? "s" : ""}
+              </Badge>
+            )}
           </div>
-          <p className="mt-1.5 text-xs text-muted-foreground font-mono">
-            {stack}
-          </p>
-        </div>
-        <Badge
-          variant={status === "healthy" ? "success" : "warning"}
-          className="shrink-0"
+          <p className="mt-1.5 text-xs text-muted-foreground font-mono">{stackLine}</p>
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+            toast({ title: `Deleted "${project.name}"`, kind: "info" });
+          }}
+          className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-300 transition-opacity"
+          aria-label="Delete project"
         >
-          <span className="h-1.5 w-1.5 rounded-full bg-current" />
-          {status}
-        </Badge>
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
       </div>
-      <div className="mt-4 flex items-center gap-3 text-[11px] text-muted-foreground">
+      <button type="button" onClick={open} className="mt-4 w-full flex items-center gap-3 text-[11px] text-muted-foreground">
         <span className="flex items-center gap-1.5">
-          <Cloud className="h-3 w-3" /> {region}
+          <Cloud className="h-3 w-3" /> {project.config.region}
         </span>
         <span className="flex items-center gap-1.5">
-          <Clock className="h-3 w-3" /> {updated}
+          <Clock className="h-3 w-3" /> {relativeTime(project.savedAt)}
         </span>
         <span className="ml-auto flex items-center gap-1 text-muted-foreground/80 group-hover:text-brand-300 transition-colors">
           Open <ArrowRight className="h-3 w-3" />
         </span>
-      </div>
-    </button>
+      </button>
+    </div>
   );
 }
 

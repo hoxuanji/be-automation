@@ -9,6 +9,7 @@ import {
   Cpu,
   Database,
   HardDrive,
+  LayoutGrid,
   Lock,
   Network,
   Rocket,
@@ -45,6 +46,8 @@ import {
 } from "@/components/ui/dropdown";
 import { ArchitecturePreview } from "@/components/builder/architecture-preview";
 import { StackSummary } from "@/components/builder/stack-summary";
+import { NLPrompt } from "@/components/builder/nl-prompt";
+import { EntityBuilder } from "@/components/builder/entity-builder";
 import { AIAssistant } from "@/components/shared/ai-assistant";
 import { useStackStore } from "@/lib/store";
 import { toast } from "@/components/ui/toast";
@@ -67,6 +70,7 @@ const tabs = [
   { id: "database", label: "Database", icon: Database },
   { id: "cache", label: "Cache", icon: Zap },
   { id: "queue", label: "Queue", icon: Workflow },
+  { id: "models", label: "Data Models", icon: LayoutGrid },
   { id: "apis", label: "APIs", icon: Network },
   { id: "security", label: "Security", icon: Lock },
   { id: "deploy", label: "Deployment", icon: Rocket },
@@ -76,17 +80,14 @@ const tabs = [
 ];
 
 export default function BuilderPage() {
-  const { config, endpoints, set } = useStackStore();
+  const { config, endpoints, entities, set, saveCurrentProject } = useStackStore();
 
   function saveStack() {
     try {
-      localStorage.setItem(
-        "helios:stack",
-        JSON.stringify({ config, endpoints, savedAt: new Date().toISOString() })
-      );
+      saveCurrentProject();
       toast({
-        title: "Stack saved",
-        description: `${config.name} · ${endpoints.length} endpoint${endpoints.length === 1 ? "" : "s"}`,
+        title: "Project saved",
+        description: `${config.name} · ${endpoints.length} endpoint${endpoints.length === 1 ? "" : "s"} · ${entities.length} model${entities.length === 1 ? "" : "s"}`,
         kind: "success",
       });
     } catch {
@@ -117,6 +118,8 @@ export default function BuilderPage() {
     >
       <div className="mx-auto max-w-[1200px] p-6 md:p-8 space-y-6">
         <BuilderHeader />
+
+        <NLPrompt />
 
         <ArchitecturePreview />
 
@@ -168,6 +171,9 @@ export default function BuilderPage() {
                 onSelect={(id) => set("queue", id)}
                 icon={<Workflow className="h-4 w-4" />}
               />
+            </TabsContent>
+            <TabsContent value="models">
+              <EntityBuilder />
             </TabsContent>
             <TabsContent value="apis">
               <ApiPanel />

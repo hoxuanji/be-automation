@@ -3,24 +3,25 @@ import { goFiles } from "./go";
 import { typescriptFiles } from "./typescript";
 import { pythonFiles } from "./python";
 import { rustFiles, javaFiles, kotlinFiles } from "./others";
-import type { Endpoint, GeneratedFile, StackConfig } from "./types";
+import type { Endpoint, Entity, GeneratedFile, StackConfig } from "./types";
 
 export function generate(
   config: StackConfig,
-  endpoints: Endpoint[]
+  endpoints: Endpoint[],
+  entities: Entity[] = []
 ): GeneratedFile[] {
   const files: GeneratedFile[] = [];
   files.push(...commonFiles(config, endpoints));
 
   switch (config.language) {
     case "go":
-      files.push(...goFiles(config, endpoints));
+      files.push(...goFiles(config, endpoints, entities));
       break;
     case "typescript":
-      files.push(...typescriptFiles(config, endpoints));
+      files.push(...typescriptFiles(config, endpoints, entities));
       break;
     case "python":
-      files.push(...pythonFiles(config, endpoints));
+      files.push(...pythonFiles(config, endpoints, entities));
       break;
     case "rust":
       files.push(...rustFiles(config, endpoints));

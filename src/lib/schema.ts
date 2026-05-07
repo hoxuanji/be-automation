@@ -6,6 +6,39 @@ export const envVarSchema = z.object({
   secret: z.boolean().optional(),
 });
 
+export const fieldTypeSchema = z.enum([
+  "string",
+  "text",
+  "number",
+  "boolean",
+  "date",
+  "uuid",
+  "json",
+]);
+
+export const entityFieldSchema = z.object({
+  id: z.string(),
+  name: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[a-zA-Z][a-zA-Z0-9_]*$/, "must start with a letter"),
+  type: fieldTypeSchema,
+  required: z.boolean(),
+  unique: z.boolean(),
+  primaryKey: z.boolean().optional(),
+});
+
+export const entitySchema = z.object({
+  id: z.string(),
+  name: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Z][a-zA-Z0-9]*$/, "must be PascalCase"),
+  fields: z.array(entityFieldSchema).min(1).max(32),
+});
+
 export const stackConfigSchema = z.object({
   name: z
     .string()
@@ -59,6 +92,7 @@ export const endpointSchema = z.object({
 export const generateRequestSchema = z.object({
   config: stackConfigSchema,
   endpoints: z.array(endpointSchema).max(200),
+  entities: z.array(entitySchema).max(50).optional(),
 });
 
 export const aiChatRequestSchema = z.object({
@@ -74,5 +108,12 @@ export const aiChatRequestSchema = z.object({
   config: stackConfigSchema.optional(),
 });
 
+export const aiSuggestRequestSchema = z.object({
+  prompt: z.string().min(1).max(2000),
+});
+
 export type GenerateRequest = z.infer<typeof generateRequestSchema>;
 export type AiChatRequest = z.infer<typeof aiChatRequestSchema>;
+export type AiSuggestRequest = z.infer<typeof aiSuggestRequestSchema>;
+export type Entity = z.infer<typeof entitySchema>;
+export type EntityField = z.infer<typeof entityFieldSchema>;

@@ -2,10 +2,16 @@ import type { z } from "zod";
 import type {
   stackConfigSchema,
   endpointSchema,
+  entitySchema,
+  entityFieldSchema,
+  fieldTypeSchema,
 } from "@/lib/schema";
 
 export type StackConfig = z.infer<typeof stackConfigSchema>;
 export type Endpoint = z.infer<typeof endpointSchema>;
+export type Entity = z.infer<typeof entitySchema>;
+export type EntityField = z.infer<typeof entityFieldSchema>;
+export type FieldType = z.infer<typeof fieldTypeSchema>;
 
 export type GeneratedFile = {
   path: string;

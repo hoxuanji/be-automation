@@ -3,11 +3,16 @@ import archiver from "archiver";
 import { generateRequestSchema } from "@/lib/schema";
 import { generate } from "@/lib/generators";
 import { safeName } from "@/lib/generators/types";
+import { checkRateLimit, getRateLimitKey } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
+  if (!checkRateLimit(getRateLimitKey(req), 20)) {
+    return Response.json({ error: "rate_limited" }, { status: 429 });
+  }
+
   let body: unknown;
   try {
     body = await req.json();
@@ -23,8 +28,8 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { config, endpoints } = parsed.data;
-  const files = generate(config, endpoints);
+  const { config, endpoints, entities } = parsed.data;
+  const files = generate(config, endpoints, entities ?? []);
 
   const archive = archiver("zip", { zlib: { level: 9 } });
 
