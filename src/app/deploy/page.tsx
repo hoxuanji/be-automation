@@ -10,9 +10,9 @@ import {
   CloudCog,
   Copy,
   Cpu,
+  FileText,
   Globe2,
   Key,
-  Loader2,
   Rocket,
   Server,
   Shield,
@@ -27,7 +27,6 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Separator } from "@/components/ui/separator";
-import { Terminal } from "@/components/shared/terminal";
 import { useStackStore } from "@/lib/store";
 import { deployments } from "@/data/stack-options";
 import { toast } from "@/components/ui/toast";
@@ -44,25 +43,7 @@ const regions = [
 
 export default function DeployPage() {
   const { config, patch } = useStackStore();
-  const [step, setStep] = React.useState<"configure" | "deploying" | "live">(
-    "configure"
-  );
-  const [progress, setProgress] = React.useState(0);
-
-  function deploy() {
-    setStep("deploying");
-    setProgress(0);
-    const i = setInterval(() => {
-      setProgress((p) => {
-        if (p >= 100) {
-          clearInterval(i);
-          setStep("live");
-          return 100;
-        }
-        return p + 4;
-      });
-    }, 140);
-  }
+  const [step, setStep] = React.useState<"configure" | "guide">("configure");
 
   return (
     <WorkspaceShell
@@ -168,32 +149,11 @@ export default function DeployPage() {
           {/* right column */}
           <div className="space-y-4">
             <DeploySummary />
-            {step === "deploying" ? (
-              <DeployingPanel progress={progress} />
-            ) : step === "live" ? (
-              <LivePanel />
+            {step === "guide" ? (
+              <DeployGuide onBack={() => setStep("configure")} />
             ) : (
-              <DeployCTA onDeploy={deploy} />
+              <DeployCTA onGenerate={() => setStep("guide")} />
             )}
-
-            {step === "deploying" || step === "live" ? (
-              <Terminal
-                animate={step === "deploying"}
-                title="deploy.log"
-                lines={[
-                  { kind: "prompt", text: "helios deploy --provider railway --region us-east-1" },
-                  { kind: "info", text: "→ authenticating workspace…" },
-                  { kind: "ok", text: "✓ credentials verified" },
-                  { kind: "out", text: "→ building multi-arch image (linux/amd64,arm64)" },
-                  { kind: "ok", text: "✓ image 47.2MB pushed to registry" },
-                  { kind: "out", text: "→ applying terraform plan (12 resources)" },
-                  { kind: "ok", text: "✓ 12 created · 0 changed · 0 destroyed" },
-                  { kind: "out", text: "→ rolling out 3 replicas (rolling)" },
-                  { kind: "ok", text: "✓ health checks passing (12.4k rps)" },
-                  { kind: "info", text: "→ https://helios-api.up.railway.app" },
-                ]}
-              />
-            ) : null}
           </div>
         </div>
       </div>
@@ -201,15 +161,10 @@ export default function DeployPage() {
   );
 }
 
-function HeaderBlock({
-  step,
-}: {
-  step: "configure" | "deploying" | "live";
-}) {
+function HeaderBlock({ step }: { step: "configure" | "guide" }) {
   const steps = [
     { id: "configure", label: "Configure" },
-    { id: "deploying", label: "Deploying" },
-    { id: "live", label: "Live" },
+    { id: "guide", label: "Guide" },
   ];
   return (
     <div className="relative overflow-hidden rounded-2xl border border-white/[0.06] bg-gradient-to-b from-white/[0.04] to-transparent p-6">
@@ -220,20 +175,13 @@ function HeaderBlock({
             <Badge variant="brand">
               <Sparkles className="h-3 w-3" /> Deployment center
             </Badge>
-            {step === "live" ? (
-              <Badge variant="success">
-                <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                live
-              </Badge>
-            ) : null}
           </div>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight">
             Ship your stack to production
           </h1>
           <p className="text-xs text-muted-foreground mt-1 max-w-lg">
-            Pick a provider, wire credentials, and we&apos;ll provision
-            infrastructure, roll out replicas and run smoke tests — all in one
-            tap.
+            Pick a provider, configure your deployment settings, then generate a
+            step-by-step guide to deploy the generated code yourself.
           </p>
         </div>
 
@@ -509,7 +457,7 @@ function SummaryRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function DeployCTA({ onDeploy }: { onDeploy: () => void }) {
+function DeployCTA({ onGenerate }: { onGenerate: () => void }) {
   return (
     <Card className="relative overflow-hidden">
       <div className="pointer-events-none absolute -inset-20 aurora animate-aurora opacity-30" />
@@ -519,96 +467,292 @@ function DeployCTA({ onDeploy }: { onDeploy: () => void }) {
           Ready to ship
         </div>
         <div className="mt-2 text-sm">
-          Rolls out a zero-downtime deploy with health checks, log drain and
-          alerting pre-wired.
+          Get a step-by-step deployment guide for your chosen provider with the
+          exact CLI commands to go live.
         </div>
-        <Button onClick={onDeploy} variant="glow" size="lg" className="mt-4 w-full">
-          <Rocket className="h-4 w-4" />
-          Deploy now
+        <Button onClick={onGenerate} variant="glow" size="lg" className="mt-4 w-full">
+          <FileText className="h-4 w-4" />
+          Generate deployment guide
         </Button>
       </div>
     </Card>
   );
 }
 
-function DeployingPanel({ progress }: { progress: number }) {
-  return (
-    <Card>
-      <div className="p-5">
-        <div className="flex items-center gap-2 text-xs">
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-300" />
-          <span className="text-muted-foreground">Deploying… this usually takes 20–30s</span>
-        </div>
-        <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/[0.06]">
-          <div
-            className="h-full rounded-full bg-gradient-to-r from-brand-400 to-purple-400"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-        <div className="mt-2 flex justify-between text-[11px] font-mono text-muted-foreground">
-          <span>{progress}% · rolling 3 replicas</span>
-          <span>p99 42ms</span>
-        </div>
-      </div>
-    </Card>
-  );
+// ─── Provider-specific step definitions ──────────────────────────────────────
+
+type GuideStep = {
+  text: string;
+  code?: string;
+};
+
+function getGuideSteps(provider: string, name: string, region: string, envVars: { key: string; value: string; secret?: boolean }[], database: string): GuideStep[] {
+  const firstEnvVar = envVars[0]?.key ?? "DATABASE_URL";
+  const extraEnvVars = envVars.slice(1).map((v) => v.key);
+
+  switch (provider) {
+    case "vercel":
+      return [
+        { text: "Install Vercel CLI and log in", code: "npm i -g vercel && vercel login" },
+        { text: "Link your project in the project root", code: "vercel link" },
+        {
+          text: `Set environment variables: add each one via the CLI`,
+          code: [`vercel env add ${firstEnvVar}`, ...extraEnvVars.map((k) => `vercel env add ${k}`)].join("\n"),
+        },
+        { text: "Deploy to production", code: "vercel deploy --prod" },
+        { text: "Your app will be live at https://your-project.vercel.app" },
+      ];
+
+    case "railway":
+      return [
+        { text: "Install Railway CLI and log in", code: "npm i -g @railway/cli && railway login" },
+        { text: "Link your project in the project root", code: "railway link" },
+        ...(database === "postgres"
+          ? [{ text: "From the Railway dashboard: add a Postgres plugin, then copy the DATABASE_URL it provides" }]
+          : []),
+        {
+          text: "Set environment variables",
+          code: [`railway variables set ${firstEnvVar}=...`, ...extraEnvVars.map((k) => `railway variables set ${k}=...`)].join("\n"),
+        },
+        { text: "Deploy your app", code: "railway up" },
+        { text: "Your app will be live at https://your-project.up.railway.app" },
+      ];
+
+    case "render":
+      return [
+        { text: "Push your code to a GitHub repository" },
+        { text: "Go to render.com → New → Web Service → connect your repo" },
+        {
+          text: "Set the Build Command",
+          code: database === "postgres" || database === "mysql" || database === "mongodb"
+            ? "npm install && npm run build"
+            : "go build ./...",
+        },
+        {
+          text: "Set the Start Command — use the binary or entry point for your language (e.g. ./server or node dist/index.js)",
+        },
+        { text: "Add environment variables from the Environment tab in the Render dashboard" },
+        ...(database === "postgres"
+          ? [{ text: "Add a Postgres service from the Render dashboard and copy the connection string to DATABASE_URL" }]
+          : database === "redis"
+          ? [{ text: "Add a Redis service from the Render dashboard and copy the connection string" }]
+          : []),
+        { text: "Click Deploy — Render will build and start your service automatically" },
+      ];
+
+    case "fly":
+      return [
+        { text: "Install flyctl and authenticate", code: `brew install flyctl && flyctl auth login` },
+        { text: `Launch your app — flyctl will create fly.toml and let you choose a region near ${region}`, code: "flyctl launch" },
+        {
+          text: "Set secrets for your environment variables",
+          code: [`flyctl secrets set ${firstEnvVar}=...`, ...extraEnvVars.map((k) => `flyctl secrets set ${k}=...`)].join("\n"),
+        },
+        { text: "Deploy your app", code: "flyctl deploy" },
+        { text: "Your app will be live at https://your-app.fly.dev" },
+      ];
+
+    case "aws":
+      return [
+        { text: "Configure your AWS CLI credentials", code: "aws configure" },
+        { text: "Create an ECR repository for your image", code: `aws ecr create-repository --repository-name ${name}` },
+        {
+          text: "Build and push your Docker image",
+          code: [
+            `docker build -t ${name} .`,
+            `docker tag ${name}:latest {account}.dkr.ecr.${region}.amazonaws.com/${name}:latest`,
+            `docker push {account}.dkr.ecr.${region}.amazonaws.com/${name}:latest`,
+          ].join("\n"),
+        },
+        {
+          text: "Deploy to AWS App Runner or ECS — visit the AWS Console to create a service pointing to your ECR image",
+        },
+        {
+          text: "Set environment variables as ECS task secrets or App Runner environment variables in the service configuration",
+        },
+      ];
+
+    case "gcp":
+      return [
+        { text: "Authenticate with Google Cloud", code: "gcloud auth login" },
+        { text: "Set your project", code: "gcloud config set project YOUR_PROJECT_ID" },
+        { text: "Build and push your container image", code: `gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/${name}` },
+        {
+          text: "Deploy to Cloud Run",
+          code: `gcloud run deploy ${name} --image gcr.io/YOUR_PROJECT_ID/${name} --platform managed --region ${region} --allow-unauthenticated`,
+        },
+        {
+          text: "Set environment variables on the Cloud Run service",
+          code: `gcloud run services update ${name} --set-env-vars ${firstEnvVar}=...`,
+        },
+      ];
+
+    case "azure":
+      return [
+        { text: "Log in to Azure", code: "az login" },
+        { text: "Create an Azure Container Registry", code: `az acr create --name ${name}acr --resource-group myRG --sku Basic` },
+        { text: "Build and push your image to ACR", code: `az acr build --registry ${name}acr --image ${name}:latest .` },
+        {
+          text: "Deploy to Azure Container Apps",
+          code: `az containerapp up --name ${name} --resource-group myRG --image ${name}acr.azurecr.io/${name}:latest`,
+        },
+      ];
+
+    case "k8s":
+      return [
+        { text: "Build and push your Docker image to your container registry" },
+        { text: `Update the image field in deploy/k8s/deployment.yaml with your actual image URL` },
+        { text: "Create a Kubernetes secret from your .env file", code: `kubectl create secret generic ${name}-env --from-env-file=.env` },
+        { text: "Apply all Kubernetes manifests", code: "kubectl apply -f deploy/k8s/" },
+        { text: "Verify your pods are running", code: "kubectl get pods -n default" },
+      ];
+
+    default:
+      // Safe default: railway steps
+      return [
+        { text: "Install Railway CLI and log in", code: "npm i -g @railway/cli && railway login" },
+        { text: "Link your project in the project root", code: "railway link" },
+        ...(database === "postgres"
+          ? [{ text: "From the Railway dashboard: add a Postgres plugin, then copy the DATABASE_URL it provides" }]
+          : []),
+        {
+          text: "Set environment variables",
+          code: [`railway variables set ${firstEnvVar}=...`, ...extraEnvVars.map((k) => `railway variables set ${k}=...`)].join("\n"),
+        },
+        { text: "Deploy your app", code: "railway up" },
+        { text: "Your app will be live at https://your-project.up.railway.app" },
+      ];
+  }
 }
 
-function LivePanel() {
-  const { config } = useStackStore();
-  const url = `https://${config.name}.up.railway.app`;
+// ─── DeployGuide component ───────────────────────────────────────────────────
 
-  async function copyUrl(e: React.MouseEvent) {
-    e.preventDefault();
+function DeployGuide({ onBack }: { onBack: () => void }) {
+  const { config } = useStackStore();
+  const provider = config.deployment;
+  const providerLabel = deployments.find((d) => d.id === provider)?.label ?? provider;
+  const steps = getGuideSteps(provider, config.name, config.region, config.envVars, config.database);
+
+  async function copyAllSteps() {
+    const text = steps
+      .map((s, i) => {
+        const lines = [`${i + 1}. ${s.text}`];
+        if (s.code) {
+          lines.push("");
+          lines.push(s.code.split("\n").map((l) => `   ${l}`).join("\n"));
+          lines.push("");
+        }
+        return lines.join("\n");
+      })
+      .join("\n");
     try {
-      await navigator.clipboard.writeText(url);
-      toast({ title: "URL copied", description: url, kind: "success" });
+      await navigator.clipboard.writeText(text);
+      toast({ title: "Copied all steps", kind: "success" });
+    } catch {
+      toast({ title: "Copy failed", kind: "error" });
+    }
+  }
+
+  async function copySnippet(code: string) {
+    try {
+      await navigator.clipboard.writeText(code);
+      toast({ title: "Copied to clipboard", kind: "success" });
     } catch {
       toast({ title: "Copy failed", kind: "error" });
     }
   }
 
   return (
-    <Card className="relative overflow-hidden border-emerald-500/30 bg-emerald-500/[0.05]">
-      <div className="p-5">
+    <Card>
+      <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-          <span className="text-sm font-semibold text-emerald-200">
-            Deployment successful
-          </span>
+          <BrandIcon id={provider} size={28} rounded="md" />
+          <CardTitle className="text-base">
+            Your {providerLabel} deployment guide
+          </CardTitle>
         </div>
-        <a
-          href={url}
-          onClick={copyUrl}
-          className="mt-3 block rounded-md border border-white/10 bg-black/30 px-2.5 py-2 font-mono text-xs text-brand-300 hover:text-brand-200"
-        >
-          {url}
-        </a>
-        <div className="mt-4 grid grid-cols-3 gap-2 text-center">
-          {[
-            { label: "Replicas", value: `${config.replicas}/${config.replicas}` },
-            { label: "p99", value: "42ms" },
-            { label: "Uptime", value: "100%" },
-          ].map((s) => (
-            <div key={s.label} className="rounded-md border border-white/[0.06] bg-white/[0.02] p-2">
-              <div className="text-[10px] uppercase text-muted-foreground tracking-wide">
-                {s.label}
-              </div>
-              <div className="mt-0.5 text-sm font-semibold">{s.value}</div>
-            </div>
-          ))}
+        <div className="flex items-center gap-2 pt-1">
+          <Badge variant="purple">
+            <FileText className="h-2.5 w-2.5" />
+            Download included in your zip as DEPLOY.md
+          </Badge>
         </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {steps.map((s, i) => (
+          <GuideStepRow
+            key={i}
+            index={i + 1}
+            text={s.text}
+            code={s.code}
+            onCopy={copySnippet}
+          />
+        ))}
+
+        <Separator className="my-4" />
+
         <Button
-          asChild
-          variant="glow"
+          variant="secondary"
           size="sm"
-          className="mt-4 w-full"
+          className="w-full"
+          onClick={copyAllSteps}
         >
-          <Link href="/dashboard">
-            Open dashboard <ArrowRight className="h-3.5 w-3.5" />
+          <Copy className="h-3.5 w-3.5" />
+          Copy all steps
+        </Button>
+
+        <Button asChild variant="glow" size="sm" className="w-full">
+          <Link href="/preview">
+            <Rocket className="h-3.5 w-3.5" />
+            Download your code
+            <ArrowRight className="h-3.5 w-3.5 ml-1" />
           </Link>
         </Button>
-      </div>
+
+        <button
+          onClick={onBack}
+          className="w-full text-center text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
+        >
+          ← Back to configure
+        </button>
+      </CardContent>
     </Card>
+  );
+}
+
+function GuideStepRow({
+  index,
+  text,
+  code,
+  onCopy,
+}: {
+  index: number;
+  text: string;
+  code?: string;
+  onCopy: (code: string) => void;
+}) {
+  return (
+    <div className="flex gap-3">
+      <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-brand-500/20 text-[10px] font-semibold text-brand-300">
+        {index}
+      </span>
+      <div className="flex-1 space-y-1.5">
+        <p className="text-sm leading-relaxed">{text}</p>
+        {code ? (
+          <div className="group relative rounded-lg border border-white/[0.06] bg-black/40 px-3 py-2">
+            <pre className="overflow-x-auto font-mono text-[11px] text-emerald-300 whitespace-pre-wrap break-all">
+              {code}
+            </pre>
+            <button
+              onClick={() => onCopy(code)}
+              className="absolute right-2 top-2 hidden rounded p-1 text-muted-foreground hover:text-foreground hover:bg-white/[0.06] group-hover:flex"
+              title="Copy"
+            >
+              <Copy className="h-3 w-3" />
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
