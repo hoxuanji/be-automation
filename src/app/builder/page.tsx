@@ -82,16 +82,16 @@ const tabs = [
 export default function BuilderPage() {
   const { config, endpoints, entities, set, saveCurrentProject } = useStackStore();
 
-  function saveStack() {
+  async function saveStack() {
     try {
-      saveCurrentProject();
+      await saveCurrentProject();
       toast({
         title: "Project saved",
         description: `${config.name} · ${endpoints.length} endpoint${endpoints.length === 1 ? "" : "s"} · ${entities.length} model${entities.length === 1 ? "" : "s"}`,
         kind: "success",
       });
     } catch {
-      toast({ title: "Couldn't save locally", kind: "error" });
+      toast({ title: "Couldn't save", kind: "error" });
     }
   }
 

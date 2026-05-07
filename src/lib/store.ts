@@ -70,6 +70,13 @@ export type SavedProject = {
   entities: Entity[];
 };
 
+export type AuthUser = {
+  id: string;
+  email: string;
+  name: string;
+  hasApiKey: boolean;
+};
+
 const STORAGE_KEY = "helios:projects";
 
 function readStoredProjects(): SavedProject[] {
@@ -97,6 +104,7 @@ type State = {
   workspace: string;
   workspaces: string[];
   savedProjects: SavedProject[];
+  authUser: AuthUser | null;
 
   // Config mutations
   setWorkspace: (w: string) => void;
@@ -126,11 +134,15 @@ type State = {
     updates: Partial<EntityField>
   ) => void;
 
+  // Auth
+  loadAuth: () => Promise<void>;
+  logout: () => Promise<void>;
+
   // Project persistence
-  loadSavedProjects: () => void;
-  saveCurrentProject: () => void;
+  loadSavedProjects: () => Promise<void>;
+  saveCurrentProject: () => Promise<void>;
   loadProject: (id: string) => void;
-  deleteProject: (id: string) => void;
+  deleteProject: (id: string) => Promise<void>;
 };
 
 const initialEndpoints: Endpoint[] = [
@@ -200,6 +212,7 @@ export const useStackStore = create<State>((set, get) => ({
   workspaces: ["Acme Co.", "Helios Labs", "Personal"],
   setWorkspace: (w) => set({ workspace: w }),
   savedProjects: [],
+  authUser: null,
   config: {
     name: "helios-api",
     language: "go",
@@ -301,12 +314,80 @@ export const useStackStore = create<State>((set, get) => ({
       ),
     })),
 
-  loadSavedProjects: () => {
+  loadAuth: async () => {
+    try {
+      const res = await fetch("/api/auth/me");
+      const data = await res.json();
+      set({ authUser: data.user ?? null });
+    } catch {
+      set({ authUser: null });
+    }
+  },
+
+  logout: async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {}
+    set({ authUser: null, savedProjects: [] });
+    window.location.href = "/login";
+  },
+
+  loadSavedProjects: async () => {
+    try {
+      const res = await fetch("/api/projects");
+      if (res.ok) {
+        const data = await res.json();
+        const projects: SavedProject[] = (data.projects ?? []).map(
+          (p: {
+            id: string;
+            name: string;
+            savedAt: string;
+            config: StackConfig;
+            endpoints: Endpoint[];
+            entities?: Entity[];
+          }) => ({
+            id: p.id,
+            name: p.name,
+            savedAt: p.savedAt,
+            config: p.config,
+            endpoints: p.endpoints,
+            entities: p.entities ?? [],
+          })
+        );
+        set({ savedProjects: projects });
+        return;
+      }
+    } catch {}
+    // 401 or network error → fall back to localStorage
     set({ savedProjects: readStoredProjects() });
   },
 
-  saveCurrentProject: () => {
+  saveCurrentProject: async () => {
     const s = get();
+    const payload = {
+      name: s.config.name,
+      data: {
+        config: s.config,
+        endpoints: s.endpoints,
+        entities: s.entities,
+      },
+    };
+
+    if (s.authUser) {
+      const existing = s.savedProjects.find((p) => p.name === s.config.name);
+      const url = existing ? `/api/projects/${existing.id}` : "/api/projects";
+      const method = existing ? "PATCH" : "POST";
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error("Server save failed");
+      await get().loadSavedProjects();
+      return;
+    }
+
+    // localStorage path
     const existing = readStoredProjects();
     const id = `proj-${Date.now()}`;
     const project: SavedProject = {
@@ -326,8 +407,7 @@ export const useStackStore = create<State>((set, get) => ({
   },
 
   loadProject: (id) => {
-    const projects = readStoredProjects();
-    const project = projects.find((p) => p.id === id);
+    const project = get().savedProjects.find((p) => p.id === id);
     if (!project) return;
     set({
       config: project.config,
@@ -336,7 +416,12 @@ export const useStackStore = create<State>((set, get) => ({
     });
   },
 
-  deleteProject: (id) => {
+  deleteProject: async (id) => {
+    if (get().authUser) {
+      await fetch(`/api/projects/${id}`, { method: "DELETE" });
+      set((s) => ({ savedProjects: s.savedProjects.filter((p) => p.id !== id) }));
+      return;
+    }
     const updated = readStoredProjects().filter((p) => p.id !== id);
     writeStoredProjects(updated);
     set({ savedProjects: updated });

@@ -130,11 +130,11 @@ const quickActions = [
 ];
 
 export default function DashboardPage() {
-  const { savedProjects, loadSavedProjects, deleteProject } = useStackStore();
+  const { savedProjects, loadSavedProjects, deleteProject, authUser } = useStackStore();
   const [filter, setFilter] = React.useState("");
 
   React.useEffect(() => {
-    loadSavedProjects();
+    void loadSavedProjects();
   }, [loadSavedProjects]);
 
   const filtered = savedProjects.filter(
@@ -151,7 +151,7 @@ export default function DashboardPage() {
       right={<AIAssistant />}
     >
       <div className="mx-auto max-w-6xl p-6 md:p-8 space-y-8">
-        <HeaderBlock />
+        <HeaderBlock name={authUser?.name} />
 
         <MetricsStrip />
 
@@ -287,13 +287,15 @@ export default function DashboardPage() {
   );
 }
 
-function HeaderBlock() {
+function HeaderBlock({ name }: { name?: string }) {
   return (
     <div className="relative overflow-hidden rounded-2xl border border-white/[0.06] bg-gradient-to-b from-white/[0.04] to-transparent p-6 md:p-8">
       <div className="pointer-events-none absolute -right-20 -top-20 h-[320px] w-[420px] aurora animate-aurora opacity-60" />
       <div className="relative flex flex-col md:flex-row md:items-end md:justify-between gap-5">
         <div>
-          <p className="text-xs text-muted-foreground">Welcome back, Jee</p>
+          <p className="text-xs text-muted-foreground">
+            Welcome back{name ? `, ${name.split(" ")[0]}` : ""}
+          </p>
           <h1 className="mt-1 text-2xl md:text-3xl font-semibold tracking-tight">
             What will you ship today?
           </h1>

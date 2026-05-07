@@ -112,6 +112,37 @@ export const aiSuggestRequestSchema = z.object({
   prompt: z.string().min(1).max(2000),
 });
 
+// ─── Auth schemas ─────────────────────────────────────────────────────────────
+
+export const signupSchema = z.object({
+  email: z.string().email(),
+  name: z.string().min(2).max(64),
+  password: z.string().min(8).max(128),
+});
+
+export const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1).max(128),
+});
+
+export const updateSettingsSchema = z.object({
+  name: z.string().min(2).max(64).optional(),
+  email: z.string().email().optional(),
+  password: z.string().min(8).max(128).optional(),
+  apiKey: z.string().max(200).optional().nullable(),
+});
+
+// ─── Project API schema ───────────────────────────────────────────────────────
+
+export const projectPayloadSchema = z.object({
+  name: z.string().min(1).max(128),
+  data: z.object({
+    config: stackConfigSchema,
+    endpoints: z.array(endpointSchema).max(200),
+    entities: z.array(entitySchema).max(50).optional(),
+  }),
+});
+
 export type GenerateRequest = z.infer<typeof generateRequestSchema>;
 export type AiChatRequest = z.infer<typeof aiChatRequestSchema>;
 export type AiSuggestRequest = z.infer<typeof aiSuggestRequestSchema>;

@@ -25,7 +25,16 @@ export function Topbar({
   actions?: React.ReactNode;
 }) {
   const router = useRouter();
-  const { config } = useStackStore();
+  const { config, authUser, logout } = useStackStore();
+
+  const initials = authUser
+    ? authUser.name
+        .split(/\s+/)
+        .map((p) => p[0])
+        .join("")
+        .slice(0, 2)
+        .toUpperCase()
+    : "??";
 
   function onGenerate() {
     toast({
@@ -107,12 +116,14 @@ export function Topbar({
               className="h-8 w-8 rounded-full bg-gradient-to-br from-brand-400 to-purple-500 ring-2 ring-white/10 grid place-items-center text-[10px] font-semibold"
               aria-label="Account menu"
             >
-              JJ
+              {initials}
             </button>
           </DropdownTrigger>
           <DropdownContent align="end">
             <DropdownLabel>Signed in as</DropdownLabel>
-            <div className="px-2.5 pb-2 text-xs font-medium">jee@helios.dev</div>
+            <div className="px-2.5 pb-2 text-xs font-medium">
+              {authUser?.email ?? "—"}
+            </div>
             <DropdownSeparator />
             <a
               href="/dashboard"
@@ -121,19 +132,15 @@ export function Topbar({
               Dashboard
             </a>
             <a
-              href="https://github.com/anthropics/claude-code"
-              target="_blank"
-              rel="noreferrer"
+              href="/settings"
               className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-white/[0.05] hover:text-foreground"
             >
-              Documentation
+              Settings
             </a>
             <DropdownSeparator />
             <button
               type="button"
-              onClick={() =>
-                toast({ title: "Signed out (demo)", kind: "success" })
-              }
+              onClick={() => void logout()}
               className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-white/[0.05] hover:text-foreground"
             >
               Sign out

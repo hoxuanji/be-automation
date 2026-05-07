@@ -2,6 +2,19 @@ import { NextRequest } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { aiSuggestRequestSchema } from "@/lib/schema";
 import { checkRateLimit, getRateLimitKey } from "@/lib/rate-limit";
+import { getCurrentUser } from "@/lib/auth";
+import { findUserById, decryptApiKey } from "@/lib/db";
+
+async function resolveApiKey(req: NextRequest): Promise<string | null> {
+  const claims = await getCurrentUser(req);
+  if (claims) {
+    const user = findUserById(claims.sub);
+    if (user?.llm_api_key_enc) {
+      return decryptApiKey(user.llm_api_key_enc);
+    }
+  }
+  return process.env.ANTHROPIC_API_KEY ?? null;
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -85,11 +98,13 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "rate_limited" }, { status: 429 });
   }
 
-  if (!process.env.ANTHROPIC_API_KEY) {
+  const apiKey = await resolveApiKey(req);
+  if (!apiKey) {
     return Response.json(
       {
         error: "missing_api_key",
-        detail: "Set ANTHROPIC_API_KEY in .env.local to enable AI suggestions.",
+        detail:
+          "No API key available. Set ANTHROPIC_API_KEY in .env.local or add your own key in Settings.",
       },
       { status: 503 }
     );
@@ -110,7 +125,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const client = new Anthropic();
+  const client = new Anthropic({ apiKey });
 
   try {
     const message = await client.messages.create({

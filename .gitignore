@@ -32,3 +32,8 @@ next-env.d.ts
 
 # local tooling
 .claude/
+
+# SQLite database
+data/*.db
+data/*.db-shm
+data/*.db-wal

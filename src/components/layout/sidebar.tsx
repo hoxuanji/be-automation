@@ -39,7 +39,6 @@ const nav = [
 const secondary = [
   { label: "Templates", icon: BookOpen, action: "templates" as const },
   { label: "Team", icon: Users, action: "team" as const },
-  { label: "Settings", icon: Settings, action: "settings" as const },
 ];
 
 export function Sidebar() {
@@ -182,9 +181,7 @@ export function Sidebar() {
                       description:
                         item.action === "templates"
                           ? "Browse production templates from the Dashboard."
-                          : item.action === "team"
-                          ? "Invite teammates — coming soon."
-                          : "Workspace settings — coming soon.",
+                          : "Invite teammates — coming soon.",
                       kind: "info",
                     })
                   }
@@ -196,6 +193,20 @@ export function Sidebar() {
               </li>
             );
           })}
+          <li>
+            <Link
+              href="/settings"
+              className={cn(
+                "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors",
+                pathname === "/settings"
+                  ? "bg-white/[0.06] text-foreground"
+                  : "text-muted-foreground hover:text-foreground hover:bg-white/[0.03]"
+              )}
+            >
+              <Settings className="h-[15px] w-[15px]" />
+              Settings
+            </Link>
+          </li>
         </ul>
       </nav>
 

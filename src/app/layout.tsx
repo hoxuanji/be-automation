@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/toast";
+import { AuthProvider } from "@/components/shared/auth-provider";
 
 export const metadata: Metadata = {
   title: "Helios — Infrastructure Generator",
@@ -29,7 +30,9 @@ export default function RootLayout({
       </head>
       <body className="font-sans">
         <TooltipProvider delayDuration={80}>
-          <div className="relative min-h-screen">{children}</div>
+          <AuthProvider>
+            <div className="relative min-h-screen">{children}</div>
+          </AuthProvider>
           <Toaster />
         </TooltipProvider>
       </body>
