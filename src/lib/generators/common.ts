@@ -35,6 +35,8 @@ export function commonFiles(
     content: readme(config, endpoints, meta),
   });
 
+  files.push({ path: "QUICKSTART.md", content: quickstart(config) });
+  files.push({ path: "DEPLOY.md", content: deployGuide(config) });
   files.push({ path: ".env.example", content: envExample(config) });
   files.push({ path: ".gitignore", content: gitignore(config.language) });
   files.push({
@@ -93,6 +95,28 @@ export function commonFiles(
     content: openapiSpec(config, endpoints),
   });
 
+  if (config.monitoring === "prometheus") {
+    files.push({ path: "deploy/prometheus.yml", content: prometheusConfig(name) });
+  }
+
+  if (config.monitoring === "grafana") {
+    files.push({ path: "deploy/prometheus.yml", content: prometheusConfig(name) });
+    files.push({ path: "deploy/grafana/datasource.yml", content: grafanaDatasource() });
+  }
+
+  if (config.monitoring === "datadog") {
+    files.push({ path: "deploy/datadog.yaml", content: datadogConfig(config) });
+    files.push({ path: "SETUP_MONITORING.md", content: datadogSetupGuide(config) });
+  }
+
+  if (config.monitoring === "sentry") {
+    files.push({ path: "SETUP_MONITORING.md", content: sentrySetupGuide(config) });
+  }
+
+  if (config.monitoring === "newrelic") {
+    files.push({ path: "deploy/newrelic.yml", content: newrelicConfig(name) });
+  }
+
   return files;
 }
 
@@ -145,6 +169,760 @@ ${config.monitoring} is wired in with sensible defaults.${config.tracing ? " Ope
 `;
 }
 
+function quickstart(config: StackConfig): string {
+  const name = safeName(config.name);
+  const meta = languageMeta[config.language];
+
+  const prerequisites: Record<StackConfig["language"], string> = {
+    go: `- [Go 1.23+](https://go.dev/dl/)
+- [Docker](https://docs.docker.com/get-docker/) (optional, for running dependencies)`,
+    typescript: `- [Node.js 22+](https://nodejs.org/)
+- [npm 10+](https://www.npmjs.com/) (bundled with Node)
+- [Docker](https://docs.docker.com/get-docker/) (optional, for running dependencies)`,
+    python: `- [Python 3.12+](https://www.python.org/downloads/)
+- [uv](https://docs.astral.sh/uv/) (recommended) or \`pip\`
+- [Docker](https://docs.docker.com/get-docker/) (optional, for running dependencies)`,
+    rust: `- [Rust (stable)](https://rustup.rs/)
+- [Docker](https://docs.docker.com/get-docker/) (optional, for running dependencies)`,
+    java: `- [Java 21+](https://adoptium.net/) (Eclipse Temurin recommended)
+- [Maven](https://maven.apache.org/) (or use the \`./mvnw\` wrapper)
+- [Docker](https://docs.docker.com/get-docker/) (optional, for running dependencies)`,
+    kotlin: `- [Java 21+](https://adoptium.net/) (Eclipse Temurin recommended)
+- [Gradle](https://gradle.org/) (or use the \`./gradlew\` wrapper)
+- [Docker](https://docs.docker.com/get-docker/) (optional, for running dependencies)`,
+  };
+
+  const migrationStep: Record<StackConfig["language"], string> = {
+    typescript: `npx prisma migrate dev`,
+    go: `go run ./cmd/migrate`,
+    python: `alembic upgrade head`,
+    rust: `cargo run --bin migrate`,
+    java: `./mvnw flyway:migrate`,
+    kotlin: `./gradlew flywayMigrate`,
+  };
+
+  const dbDependencies: string[] = [];
+  if (/postgres|neon|supabase|cockroach/.test(config.database)) {
+    dbDependencies.push("db");
+  } else if (config.database === "mysql" || config.database === "planetscale") {
+    dbDependencies.push("db");
+  } else if (config.database === "mongodb") {
+    dbDependencies.push("db");
+  }
+
+  if (config.cache === "redis" || config.cache === "upstash" || config.cache === "dragonfly") {
+    dbDependencies.push("cache");
+  } else if (config.cache === "memcached") {
+    dbDependencies.push("cache");
+  }
+
+  if (config.queue === "rabbitmq") {
+    dbDependencies.push("rabbit");
+  } else if (config.queue === "kafka") {
+    dbDependencies.push("kafka");
+  } else if (config.queue === "nats") {
+    dbDependencies.push("nats");
+  }
+
+  const step3Docker = config.docker && dbDependencies.length > 0
+    ? `\`\`\`bash
+docker compose up -d ${dbDependencies.join(" ")}
+\`\`\``
+    : manualDepsInstructions(config);
+
+  const envVarDocs = buildEnvVarDocs(config);
+
+  return `# Quickstart — ${config.name}
+
+Zero to running server in under 5 minutes.
+
+## Prerequisites
+
+${prerequisites[config.language]}
+
+---
+
+## Step 1: Unzip and enter the project
+
+\`\`\`bash
+unzip ${name}.zip
+cd ${name}
+\`\`\`
+
+---
+
+## Step 2: Set up environment variables
+
+\`\`\`bash
+cp .env.example .env
+\`\`\`
+
+Open \`.env\` and fill in the following values:
+
+${envVarDocs}
+
+---
+
+## Step 3: Start dependencies
+
+${step3Docker}
+
+---
+
+## Step 4: Run database migrations
+
+\`\`\`bash
+${migrationStep[config.language]}
+\`\`\`
+
+---
+
+## Step 5: Start the development server
+
+\`\`\`bash
+${meta.devCommand}
+\`\`\`
+
+The server will be available at **http://localhost:8080**.
+
+---
+
+## Step 6: Test the API
+
+\`\`\`bash
+curl http://localhost:8080/health
+\`\`\`
+
+Expected response: \`{"status":"ok"}\`
+
+---
+
+## Troubleshooting
+
+**Port 8080 already in use**
+Change \`PORT\` in your \`.env\` file, or find and stop the conflicting process:
+\`\`\`bash
+lsof -i :8080
+kill -9 <PID>
+\`\`\`
+
+**Database connection refused**
+${config.docker
+    ? "Make sure the database container is running: `docker compose ps`\nIf it exited, check logs: `docker compose logs db`"
+    : `Ensure your database is running and that \`DATABASE_URL\` (or the equivalent) in \`.env\` points to the correct host and port.`}
+
+**\`DATABASE_URL\` not found / missing env variable**
+Run \`cp .env.example .env\` and verify all required variables are set. The server will not start with missing required env vars.
+
+**Dependency install errors**
+${config.language === "typescript"
+    ? "Delete `node_modules` and `package-lock.json`, then run `npm install` again."
+    : config.language === "go"
+    ? "Run `go mod tidy` to synchronise the module graph, then retry."
+    : config.language === "python"
+    ? "Ensure you are using Python 3.12+. Run `uv sync` (or `pip install -e '.[dev]'`) in a clean virtual environment."
+    : config.language === "rust"
+    ? "Run `cargo clean && cargo build` to force a full rebuild."
+    : "Check that Java 21+ is on your PATH and that the wrapper script is executable (`chmod +x ./mvnw` or `chmod +x ./gradlew`)."}
+`;
+}
+
+function buildEnvVarDocs(config: StackConfig): string {
+  const lines: string[] = [];
+
+  if (/postgres|neon|supabase/.test(config.database)) {
+    lines.push(`| \`DATABASE_URL\` | \`postgres://user:pass@localhost:5432/${safeName(config.name)}\` | Connection string for your PostgreSQL database |`);
+  } else if (config.database === "cockroach") {
+    lines.push(`| \`DATABASE_URL\` | \`postgres://root@localhost:26257/${safeName(config.name)}?sslmode=disable\` | CockroachDB connection string |`);
+  } else if (config.database === "mysql" || config.database === "planetscale") {
+    lines.push(`| \`DATABASE_URL\` | \`mysql://user:pass@localhost:3306/${safeName(config.name)}\` | MySQL connection string |`);
+  } else if (config.database === "mongodb") {
+    lines.push(`| \`MONGODB_URI\` | \`mongodb://localhost:27017/${safeName(config.name)}\` | MongoDB connection URI |`);
+  } else if (config.database === "sqlite") {
+    lines.push(`| \`DATABASE_URL\` | \`file:./app.db\` | Path to the SQLite file |`);
+  }
+
+  if (config.cache === "redis" || config.cache === "upstash") {
+    lines.push(`| \`REDIS_URL\` | \`redis://localhost:6379\` | Redis connection URL. For Upstash, get from the Upstash console |`);
+  } else if (config.cache === "memcached") {
+    lines.push(`| \`MEMCACHED_URL\` | \`localhost:11211\` | Memcached server address |`);
+  }
+
+  if (config.queue === "rabbitmq") {
+    lines.push(`| \`RABBITMQ_URL\` | \`amqp://guest:guest@localhost:5672\` | RabbitMQ AMQP connection URL |`);
+  } else if (config.queue === "kafka" || config.queue === "redpanda") {
+    lines.push(`| \`KAFKA_BROKERS\` | \`localhost:9092\` | Comma-separated list of Kafka broker addresses |`);
+  } else if (config.queue === "nats") {
+    lines.push(`| \`NATS_URL\` | \`nats://localhost:4222\` | NATS server URL |`);
+  }
+
+  if (config.auth === "clerk") {
+    lines.push(`| \`CLERK_SECRET_KEY\` | \`sk_test_...\` | From the [Clerk dashboard](https://dashboard.clerk.com) → API Keys |`);
+  } else if (config.auth === "auth0") {
+    lines.push(`| \`AUTH0_DOMAIN\` | \`your-tenant.auth0.com\` | Your Auth0 tenant domain |`);
+    lines.push(`| \`AUTH0_CLIENT_SECRET\` | \`...\` | From the Auth0 application settings |`);
+  } else if (config.auth === "custom-jwt") {
+    lines.push(`| \`JWT_SECRET\` | \`change-me-in-production\` | A long random string — use \`openssl rand -hex 32\` to generate one |`);
+  }
+
+  if (config.monitoring === "sentry") {
+    lines.push(`| \`SENTRY_DSN\` | \`https://...@sentry.io/...\` | From your Sentry project → Settings → Client Keys |`);
+  } else if (config.monitoring === "datadog") {
+    lines.push(`| \`DD_API_KEY\` | \`...\` | From the [Datadog API keys page](https://app.datadoghq.com/organization-settings/api-keys) |`);
+  }
+
+  for (const v of config.envVars) {
+    lines.push(`| \`${toEnvKey(v.key)}\` | \`${v.secret ? "change-me" : v.value}\` | Custom variable |`);
+  }
+
+  if (lines.length === 0) {
+    return `| Variable | Example | Notes |
+| --- | --- | --- |
+| \`APP_NAME\` | \`${config.name}\` | Application name shown in logs |
+| \`PORT\` | \`8080\` | Port the server listens on |`;
+  }
+
+  return `| Variable | Example | Notes |
+| --- | --- | --- |
+| \`APP_NAME\` | \`${config.name}\` | Application name shown in logs |
+| \`PORT\` | \`8080\` | Port the server listens on |
+${lines.join("\n")}`;
+}
+
+function manualDepsInstructions(config: StackConfig): string {
+  const parts: string[] = [];
+
+  if (/postgres|neon|supabase|cockroach/.test(config.database)) {
+    parts.push(`**PostgreSQL**: Install and start PostgreSQL 16, then create the database:
+\`\`\`bash
+createdb ${safeName(config.name)}
+\`\`\``);
+  } else if (config.database === "mysql" || config.database === "planetscale") {
+    parts.push(`**MySQL**: Install and start MySQL 8, then create the database:
+\`\`\`bash
+mysql -u root -e "CREATE DATABASE IF NOT EXISTS ${safeName(config.name)};"
+\`\`\``);
+  } else if (config.database === "mongodb") {
+    parts.push(`**MongoDB**: Install and start MongoDB 7. The database will be created automatically on first write.`);
+  } else if (config.database === "sqlite") {
+    parts.push(`**SQLite**: No separate service needed — the database file will be created automatically.`);
+  }
+
+  if (config.cache === "redis" || config.cache === "upstash") {
+    parts.push(`**Redis**: Install and start Redis 7.`);
+  } else if (config.cache === "memcached") {
+    parts.push(`**Memcached**: Install and start Memcached 1.6.`);
+  }
+
+  if (config.queue === "rabbitmq") {
+    parts.push(`**RabbitMQ**: Install and start RabbitMQ 3.`);
+  } else if (config.queue === "kafka") {
+    parts.push(`**Kafka / Redpanda**: Install and start Redpanda or Kafka. The default broker address is \`localhost:9092\`.`);
+  } else if (config.queue === "nats") {
+    parts.push(`**NATS**: Install and start NATS 2 with JetStream enabled (\`nats-server -js\`).`);
+  }
+
+  return parts.length > 0 ? parts.join("\n\n") : "No external dependencies required.";
+}
+
+function deployGuide(config: StackConfig): string {
+  const name = safeName(config.name);
+
+  const envVarList = buildDeployEnvVarList(config);
+
+  switch (config.deployment) {
+    case "vercel":
+      return `# Deploy to Vercel
+
+## Prerequisites
+
+- [Vercel CLI](https://vercel.com/docs/cli): \`npm i -g vercel\`
+- A Vercel account
+
+## Steps
+
+### 1. Link the project
+
+\`\`\`bash
+vercel link
+\`\`\`
+
+Follow the prompts to connect to your Vercel account and project.
+
+### 2. Add environment variables
+
+\`\`\`bash
+${envVarList.map((v) => `vercel env add ${v}`).join("\n")}
+\`\`\`
+
+Repeat for \`preview\` and \`production\` environments as prompted.
+
+### 3. Deploy to production
+
+\`\`\`bash
+vercel deploy --prod
+\`\`\`
+
+### 4. Verify
+
+\`\`\`bash
+curl https://<your-vercel-url>/health
+\`\`\`
+
+## Notes
+
+- Vercel runs serverless functions; long-lived connections (WebSockets, persistent DB pools) need extra consideration.
+- Set \`VERCEL_REGION\` if you need a specific deployment region.
+`;
+
+    case "railway":
+      return `# Deploy to Railway
+
+## Prerequisites
+
+- [Railway CLI](https://docs.railway.app/develop/cli): \`npm i -g @railway/cli\`
+- A Railway account
+
+## Steps
+
+### 1. Login and initialise
+
+\`\`\`bash
+railway login
+railway link
+\`\`\`
+
+### 2. Add a Postgres plugin (if needed)
+
+In the Railway dashboard, open your project → **New** → **Database** → **PostgreSQL**.
+Copy the \`DATABASE_URL\` it generates and set it in the next step.
+
+### 3. Set environment variables
+
+\`\`\`bash
+${envVarList.map((v) => `railway variables set ${v}=<value>`).join("\n")}
+\`\`\`
+
+### 4. Deploy
+
+\`\`\`bash
+railway up
+\`\`\`
+
+Railway auto-detects the Dockerfile and builds it.
+
+### 5. Open the deployed service
+
+\`\`\`bash
+railway open
+\`\`\`
+
+## Notes
+
+- Railway uses the \`PORT\` env var automatically — make sure your app reads it.
+- Run \`railway logs\` to tail live logs.
+`;
+
+    case "render":
+      return `# Deploy to Render
+
+## Prerequisites
+
+- A [Render](https://render.com) account
+- Your repo pushed to GitHub or GitLab
+
+## Steps
+
+### 1. Create a Web Service
+
+1. Go to the Render dashboard → **New** → **Web Service**.
+2. Connect your GitHub repository.
+3. Set **Environment** to **Docker** (Render auto-detects the Dockerfile).
+4. Set **Region** to \`${config.region}\`.
+
+### 2. Add environment variables
+
+In the **Environment** tab of your Render service, add:
+
+${envVarList.map((v) => `- \`${v}\``).join("\n")}
+
+### 3. Add a Postgres / Redis instance (if needed)
+
+1. Render dashboard → **New** → **PostgreSQL** (or Redis).
+2. Copy the internal connection URL.
+3. Paste it as \`DATABASE_URL\` (or \`REDIS_URL\`) in your service's environment variables.
+
+### 4. Deploy
+
+Render auto-deploys on every push to \`main\`. To trigger manually:
+
+\`\`\`bash
+curl -X POST https://api.render.com/deploy/<service-id>?key=<deploy-hook-key>
+\`\`\`
+
+## Notes
+
+- Use Render's **Internal** connection strings for DB/cache to avoid egress charges.
+- Set health-check path to \`/health\` in the service settings.
+`;
+
+    case "fly":
+      return `# Deploy to Fly.io
+
+## Prerequisites
+
+- [flyctl](https://fly.io/docs/hands-on/install-flyctl/): \`curl -L https://fly.io/install.sh | sh\`
+- A Fly.io account
+
+## Steps
+
+### 1. Launch the app
+
+\`\`\`bash
+flyctl launch --name ${name} --region ${config.region} --no-deploy
+\`\`\`
+
+This creates a \`fly.toml\` at the repo root. Review and commit it.
+
+### 2. Create a Postgres cluster (if needed)
+
+\`\`\`bash
+flyctl postgres create --name ${name}-db --region ${config.region}
+flyctl postgres attach --app ${name} ${name}-db
+\`\`\`
+
+Fly sets \`DATABASE_URL\` in your app's secrets automatically.
+
+### 3. Set secrets
+
+\`\`\`bash
+${envVarList.map((v) => `flyctl secrets set ${v}=<value> --app ${name}`).join("\n")}
+\`\`\`
+
+### 4. Deploy
+
+\`\`\`bash
+flyctl deploy --app ${name}
+\`\`\`
+
+### 5. Verify
+
+\`\`\`bash
+flyctl status --app ${name}
+curl https://${name}.fly.dev/health
+\`\`\`
+
+## Notes
+
+- Scale replicas: \`flyctl scale count ${config.replicas} --app ${name}\`
+- View logs: \`flyctl logs --app ${name}\`
+`;
+
+    case "aws":
+      return `# Deploy to AWS (ECR + App Runner / ECS Fargate)
+
+## Prerequisites
+
+- [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) configured with appropriate credentials
+- Docker
+
+## Steps
+
+### 1. Create an ECR repository
+
+\`\`\`bash
+aws ecr create-repository --repository-name ${name} --region ${config.region}
+\`\`\`
+
+### 2. Build and push the image
+
+\`\`\`bash
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+REGISTRY=$ACCOUNT.dkr.ecr.${config.region}.amazonaws.com
+
+aws ecr get-login-password --region ${config.region} | \\
+  docker login --username AWS --password-stdin $REGISTRY
+
+docker build -t ${name} .
+docker tag ${name}:latest $REGISTRY/${name}:latest
+docker push $REGISTRY/${name}:latest
+\`\`\`
+
+### 3a. Deploy via App Runner (simpler)
+
+\`\`\`bash
+aws apprunner create-service \\
+  --service-name ${name} \\
+  --source-configuration "ImageRepository={ImageIdentifier=$REGISTRY/${name}:latest,ImageRepositoryType=ECR}" \\
+  --instance-configuration "Cpu=1 vCPU,Memory=2 GB"
+\`\`\`
+
+### 3b. Deploy via ECS Fargate (more control)
+
+1. Create an ECS cluster: \`aws ecs create-cluster --cluster-name ${name}\`
+2. Register a task definition pointing to your image.
+3. Create a service with desired count \`${config.replicas}\`.
+
+Refer to the [ECS Fargate docs](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/getting-started-fargate.html) for the full task definition JSON.
+
+### 4. Set environment variables
+
+Use AWS Secrets Manager or Parameter Store, then reference them in your task definition's \`secrets\` / \`environment\` blocks:
+
+${envVarList.map((v) => `- \`${v}\``).join("\n")}
+
+## Notes
+
+- Attach the \`AmazonECR_ReadOnly\` policy to your task execution role.
+- Use an Application Load Balancer in front of Fargate for HTTPS termination.
+`;
+
+    case "gcp":
+      return `# Deploy to GCP (Artifact Registry + Cloud Run)
+
+## Prerequisites
+
+- [gcloud CLI](https://cloud.google.com/sdk/docs/install) authenticated
+- Docker
+
+## Steps
+
+### 1. Enable required APIs
+
+\`\`\`bash
+gcloud services enable artifactregistry.googleapis.com run.googleapis.com
+\`\`\`
+
+### 2. Create an Artifact Registry repository
+
+\`\`\`bash
+gcloud artifacts repositories create ${name} \\
+  --repository-format=docker \\
+  --location=${config.region}
+\`\`\`
+
+### 3. Build and push the image
+
+\`\`\`bash
+PROJECT=$(gcloud config get-value project)
+REGISTRY=${config.region}-docker.pkg.dev/$PROJECT/${name}
+
+gcloud auth configure-docker ${config.region}-docker.pkg.dev
+docker build -t ${name} .
+docker tag ${name}:latest $REGISTRY/${name}:latest
+docker push $REGISTRY/${name}:latest
+\`\`\`
+
+### 4. Deploy to Cloud Run
+
+\`\`\`bash
+gcloud run deploy ${name} \\
+  --image $REGISTRY/${name}:latest \\
+  --platform managed \\
+  --region ${config.region} \\
+  --allow-unauthenticated \\
+  --min-instances ${config.replicas} \\
+  --set-env-vars="${envVarList.map((v) => `${v}=<value>`).join(",")}"
+\`\`\`
+
+### 5. Verify
+
+\`\`\`bash
+gcloud run services describe ${name} --region ${config.region} --format "value(status.url)"
+\`\`\`
+
+## Notes
+
+- Use Secret Manager for secrets: \`gcloud secrets create MY_SECRET --data-file=-\`
+- Reference secrets in Cloud Run: \`--set-secrets=MY_SECRET=MY_SECRET:latest\`
+`;
+
+    case "azure":
+      return `# Deploy to Azure (Container Registry + Container Apps)
+
+## Prerequisites
+
+- [Azure CLI](https://docs.microsoft.com/cli/azure/install-azure-cli) authenticated
+- Docker
+
+## Steps
+
+### 1. Create a resource group and Container Registry
+
+\`\`\`bash
+az group create --name ${name}-rg --location ${config.region}
+az acr create --resource-group ${name}-rg --name ${name}registry --sku Basic
+\`\`\`
+
+### 2. Build and push the image
+
+\`\`\`bash
+az acr login --name ${name}registry
+docker build -t ${name}:latest .
+docker tag ${name}:latest ${name}registry.azurecr.io/${name}:latest
+docker push ${name}registry.azurecr.io/${name}:latest
+\`\`\`
+
+### 3. Create a Container Apps environment
+
+\`\`\`bash
+az containerapp env create \\
+  --name ${name}-env \\
+  --resource-group ${name}-rg \\
+  --location ${config.region}
+\`\`\`
+
+### 4. Deploy the Container App
+
+\`\`\`bash
+az containerapp create \\
+  --name ${name} \\
+  --resource-group ${name}-rg \\
+  --environment ${name}-env \\
+  --image ${name}registry.azurecr.io/${name}:latest \\
+  --target-port 8080 \\
+  --ingress external \\
+  --min-replicas ${config.replicas} \\
+  --registry-server ${name}registry.azurecr.io
+\`\`\`
+
+### 5. Set environment variables
+
+\`\`\`bash
+az containerapp update --name ${name} --resource-group ${name}-rg \\
+  --set-env-vars ${envVarList.map((v) => `${v}=secretref:${v.toLowerCase()}`).join(" ")}
+\`\`\`
+
+## Notes
+
+- Use Azure Key Vault for secrets and reference them via Container Apps secrets.
+- Enable managed identity for seamless access to other Azure services.
+`;
+
+    case "k8s":
+      return `# Deploy to Kubernetes
+
+## Prerequisites
+
+- \`kubectl\` configured to point at your target cluster
+- Docker registry access (the manifests default to \`ghcr.io/your-org/${name}\`)
+
+## Steps
+
+### 1. Build and push your image
+
+\`\`\`bash
+docker build -t ghcr.io/your-org/${name}:latest .
+docker push ghcr.io/your-org/${name}:latest
+\`\`\`
+
+### 2. Create the namespace and secrets
+
+\`\`\`bash
+kubectl create namespace ${name}
+
+kubectl create secret generic ${name}-env \\
+  --namespace ${name} \\
+${envVarList.map((v) => `  --from-literal=${v}=<value> \\`).join("\n")}
+  --dry-run=client -o yaml | kubectl apply -f -
+\`\`\`
+
+### 3. Apply the manifests
+
+\`\`\`bash
+kubectl apply -f deploy/k8s/ --namespace ${name}
+\`\`\`
+
+### 4. Verify the rollout
+
+\`\`\`bash
+kubectl rollout status deployment/${name} --namespace ${name}
+kubectl get pods --namespace ${name}
+\`\`\`
+
+### 5. Port-forward to test locally
+
+\`\`\`bash
+kubectl port-forward svc/${name} 8080:80 --namespace ${name}
+curl http://localhost:8080/health
+\`\`\`
+
+${config.helm ? `### 6. Alternatively, deploy via Helm
+
+\`\`\`bash
+helm upgrade --install ${name} ./deploy/helm \\
+  --namespace ${name} \\
+  --create-namespace \\
+  --set image.tag=latest
+\`\`\`
+` : ""}
+## Notes
+
+- Update \`deploy/k8s/deployment.yaml\` to set the correct image tag before each deploy.
+- For ingress, add an \`Ingress\` resource or use your cluster's load balancer service type.
+- Enable HPA by applying \`deploy/k8s/hpa.yaml\` (${config.autoscale ? "already included" : "set `autoscale: true` in your config to generate it"}).
+`;
+
+    default:
+      return `# Deployment Guide
+
+Target: **${config.deployment}**
+
+Refer to your deployment provider's documentation. The generated \`Dockerfile\` and \`docker-compose.yml\` are the recommended starting points.
+
+Ensure all environment variables from \`.env.example\` are set in your target environment before deploying.
+`;
+  }
+}
+
+function buildDeployEnvVarList(config: StackConfig): string[] {
+  const vars: string[] = ["APP_NAME", "PORT"];
+
+  if (/postgres|neon|supabase|cockroach/.test(config.database)) {
+    vars.push("DATABASE_URL");
+  } else if (config.database === "mysql" || config.database === "planetscale") {
+    vars.push("DATABASE_URL");
+  } else if (config.database === "mongodb") {
+    vars.push("MONGODB_URI");
+  } else if (config.database === "sqlite") {
+    vars.push("DATABASE_URL");
+  }
+
+  if (config.cache === "redis" || config.cache === "upstash") {
+    vars.push("REDIS_URL");
+  } else if (config.cache === "memcached") {
+    vars.push("MEMCACHED_URL");
+  }
+
+  if (config.queue === "rabbitmq") {
+    vars.push("RABBITMQ_URL");
+  } else if (config.queue === "kafka" || config.queue === "redpanda") {
+    vars.push("KAFKA_BROKERS");
+  } else if (config.queue === "nats") {
+    vars.push("NATS_URL");
+  }
+
+  if (config.auth === "clerk") {
+    vars.push("CLERK_SECRET_KEY");
+  } else if (config.auth === "auth0") {
+    vars.push("AUTH0_DOMAIN", "AUTH0_CLIENT_SECRET");
+  } else if (config.auth === "custom-jwt") {
+    vars.push("JWT_SECRET");
+  }
+
+  if (config.monitoring === "sentry") {
+    vars.push("SENTRY_DSN");
+  } else if (config.monitoring === "datadog") {
+    vars.push("DD_API_KEY");
+  }
+
+  for (const v of config.envVars) {
+    vars.push(toEnvKey(v.key));
+  }
+
+  return vars;
+}
+
 function envExample(config: StackConfig) {
   const lines = [
     `# Runtime`,
@@ -153,9 +931,86 @@ function envExample(config: StackConfig) {
     `PORT=8080`,
     ``,
   ];
-  for (const v of config.envVars) {
-    lines.push(`${toEnvKey(v.key)}=${v.secret ? "change-me" : v.value}`);
+
+  if (/postgres|neon|supabase/.test(config.database)) {
+    lines.push(`# Database`);
+    lines.push(`DATABASE_URL=postgres://user:pass@localhost:5432/${safeName(config.name)}`);
+    lines.push(``);
+  } else if (config.database === "cockroach") {
+    lines.push(`# Database`);
+    lines.push(`DATABASE_URL=postgres://root@localhost:26257/${safeName(config.name)}?sslmode=disable`);
+    lines.push(``);
+  } else if (config.database === "mysql" || config.database === "planetscale") {
+    lines.push(`# Database`);
+    lines.push(`DATABASE_URL=mysql://user:pass@localhost:3306/${safeName(config.name)}`);
+    lines.push(``);
+  } else if (config.database === "mongodb") {
+    lines.push(`# Database`);
+    lines.push(`MONGODB_URI=mongodb://localhost:27017/${safeName(config.name)}`);
+    lines.push(``);
+  } else if (config.database === "sqlite") {
+    lines.push(`# Database`);
+    lines.push(`DATABASE_URL=file:./app.db`);
+    lines.push(``);
   }
+
+  if (config.cache === "redis" || config.cache === "upstash") {
+    lines.push(`# Cache`);
+    lines.push(`REDIS_URL=redis://localhost:6379`);
+    lines.push(``);
+  } else if (config.cache === "memcached") {
+    lines.push(`# Cache`);
+    lines.push(`MEMCACHED_URL=localhost:11211`);
+    lines.push(``);
+  }
+
+  if (config.queue === "rabbitmq") {
+    lines.push(`# Queue`);
+    lines.push(`RABBITMQ_URL=amqp://guest:guest@localhost:5672`);
+    lines.push(``);
+  } else if (config.queue === "kafka" || config.queue === "redpanda") {
+    lines.push(`# Queue`);
+    lines.push(`KAFKA_BROKERS=localhost:9092`);
+    lines.push(``);
+  } else if (config.queue === "nats") {
+    lines.push(`# Queue`);
+    lines.push(`NATS_URL=nats://localhost:4222`);
+    lines.push(``);
+  }
+
+  if (config.auth === "clerk") {
+    lines.push(`# Auth — Clerk (https://dashboard.clerk.com → API Keys)`);
+    lines.push(`CLERK_SECRET_KEY=sk_test_...`);
+    lines.push(``);
+  } else if (config.auth === "auth0") {
+    lines.push(`# Auth — Auth0`);
+    lines.push(`AUTH0_DOMAIN=your-tenant.auth0.com`);
+    lines.push(`AUTH0_CLIENT_SECRET=...`);
+    lines.push(``);
+  } else if (config.auth === "custom-jwt") {
+    lines.push(`# Auth — JWT`);
+    lines.push(`JWT_SECRET=change-me-in-production`);
+    lines.push(``);
+  }
+
+  if (config.monitoring === "sentry") {
+    lines.push(`# Monitoring — Sentry`);
+    lines.push(`SENTRY_DSN=https://...@sentry.io/...`);
+    lines.push(``);
+  } else if (config.monitoring === "datadog") {
+    lines.push(`# Monitoring — Datadog`);
+    lines.push(`DD_API_KEY=...`);
+    lines.push(``);
+  }
+
+  if (config.envVars.length > 0) {
+    lines.push(`# Application`);
+    for (const v of config.envVars) {
+      lines.push(`${toEnvKey(v.key)}=${v.secret ? "change-me" : v.value}`);
+    }
+    lines.push(``);
+  }
+
   return lines.join("\n") + "\n";
 }
 
@@ -427,83 +1282,447 @@ spec:
 
 function ciWorkflow(config: StackConfig) {
   const lang = config.language;
-  const common = `name: ci
+  const name = safeName(config.name);
+
+  const dockerBuildPush = config.docker
+    ? `
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: \${{ github.actor }}
+          password: \${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          push: \${{ github.ref == 'refs/heads/main' }}
+          tags: ghcr.io/your-org/${name}:\${{ github.sha }},ghcr.io/your-org/${name}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max`
+    : "";
+
+  const deploymentComment = (() => {
+    switch (config.deployment) {
+      case "fly":
+        return `      - name: Deploy to Fly.io
+        if: github.ref == 'refs/heads/main'
+        uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --remote-only
+        if: github.ref == 'refs/heads/main'
+        env:
+          FLY_API_TOKEN: \${{ secrets.FLY_API_TOKEN }}`;
+      case "railway":
+        return `      # Deploy to Railway — trigger via webhook
+      # - name: Deploy to Railway
+      #   if: github.ref == 'refs/heads/main'
+      #   run: curl -X POST "\${{ secrets.RAILWAY_DEPLOY_WEBHOOK }}"`;
+      case "render":
+        return `      # Deploy to Render — trigger via deploy hook
+      # - name: Deploy to Render
+      #   if: github.ref == 'refs/heads/main'
+      #   run: curl -X POST "\${{ secrets.RENDER_DEPLOY_HOOK }}"`;
+      case "vercel":
+        return `      # Deploy to Vercel — handled automatically via Vercel GitHub integration
+      # Remove this comment and configure the Vercel integration in your repo settings.`;
+      default:
+        return `      # Add your deployment step here for ${config.deployment}`;
+    }
+  })();
+
+  const header = `name: ci
 on:
   push:
     branches: [main]
   pull_request:
-jobs:
+`;
+
+  if (lang === "go") {
+    return (
+      header +
+      `jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-`;
-  const lint = `      - name: Lint
-        run: echo "run your linter here"
-`;
-  if (lang === "go") {
-    return (
-      common +
-      `      - uses: actions/setup-go@v5
-        with: { go-version: '1.23' }
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
       - name: Vet
         run: go vet ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
       - name: Test
-        run: go test ./... -race -cover
+        run: go test ./... -race -cover -coverprofile=coverage.out
       - name: Build
         run: go build ./...
+${dockerBuildPush}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+${deploymentComment}
 `
     );
   }
+
   if (lang === "typescript") {
     return (
-      common +
-      `      - uses: actions/setup-node@v4
+      header +
+      `jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: 'npm'
       - run: npm ci
-      - run: npm test --if-present
-      - run: npm run build --if-present
+      - name: Audit
+        run: npm audit --audit-level=high
+      - name: Type check
+        run: npx tsc --noEmit
+      - name: Test
+        run: npm test --if-present
+      - name: Build
+        run: npm run build --if-present
+${dockerBuildPush}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+${deploymentComment}
 `
     );
   }
+
   if (lang === "python") {
     return (
-      common +
-      `      - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
-      - run: pip install -e .[dev]
-      - run: pytest -q || true
+      header +
+      `jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        run: pip install uv
+      - name: Install dependencies
+        run: uv pip install -e ".[dev]" --system
+      - name: Lint
+        run: ruff check .
+      - name: Test
+        run: pytest -q --cov --cov-report=xml
+${dockerBuildPush}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+${deploymentComment}
 `
     );
   }
+
   if (lang === "rust") {
     return (
-      common +
-      `      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all
-      - run: cargo build --release
+      header +
+      `jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+      - name: Test
+        run: cargo test --all
+      - name: Build
+        run: cargo build --release
+${dockerBuildPush}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+${deploymentComment}
 `
     );
   }
+
   if (lang === "java") {
     return (
-      common +
-      `      - uses: actions/setup-java@v4
-        with: { distribution: 'temurin', java-version: '21' }
-      - run: ./mvnw -B test
+      header +
+      `jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+      - name: Test
+        run: ./mvnw -B test
+      - name: Build
+        run: ./mvnw -B package -DskipTests
+${dockerBuildPush}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+${deploymentComment}
 `
     );
   }
-  // kotlin
+
   return (
-    common +
-    `      - uses: actions/setup-java@v4
-        with: { distribution: 'temurin', java-version: '21' }
-      - run: ./gradlew test
+    header +
+    `jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'gradle'
+      - name: Test
+        run: ./gradlew test
+      - name: Build
+        run: ./gradlew build -x test
+${dockerBuildPush}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+${deploymentComment}
 `
   );
+}
+
+function prometheusConfig(name: string) {
+  return `global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: '${name}'
+    static_configs:
+      - targets: ['api:8080']
+    metrics_path: '/metrics'
+`;
+}
+
+function grafanaDatasource() {
+  return `apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    url: http://prometheus:9090
+    isDefault: true
+`;
+}
+
+function datadogConfig(config: StackConfig) {
+  const name = safeName(config.name);
+  return `init_config:
+
+instances: []
+
+logs_enabled: true
+
+apm_config:
+  enabled: true
+  env: production
+
+service: ${name}
+env: production
+version: "0.1.0"
+`;
+}
+
+function datadogSetupGuide(config: StackConfig) {
+  const name = safeName(config.name);
+  return `# Setting Up Datadog
+
+## 1. Add the DD Agent sidecar (Kubernetes)
+
+Add the following container to your pod spec in \`deploy/k8s/deployment.yaml\`:
+
+\`\`\`yaml
+- name: datadog-agent
+  image: datadog/agent:latest
+  env:
+    - name: DD_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: ${name}-env
+          key: DD_API_KEY
+    - name: DD_APM_ENABLED
+      value: "true"
+    - name: DD_LOGS_ENABLED
+      value: "true"
+    - name: DD_SERVICE
+      value: "${name}"
+    - name: DD_ENV
+      value: "production"
+  ports:
+    - containerPort: 8126
+      name: traceport
+\`\`\`
+
+## 2. Set your API key
+
+\`\`\`bash
+kubectl create secret generic ${name}-env --from-literal=DD_API_KEY=<your-key>
+\`\`\`
+
+Or add \`DD_API_KEY\` to your existing secret.
+
+## 3. Instrument your application
+
+${config.language === "typescript"
+    ? `Install the tracer: \`npm install dd-trace\`\n\nAdd to the top of your entry file (before any imports):\n\`\`\`ts\nimport 'dd-trace/init';\n\`\`\``
+    : config.language === "python"
+    ? `Install the tracer: \`pip install ddtrace\`\n\nRun your app with: \`ddtrace-run uvicorn app.main:app\``
+    : config.language === "go"
+    ? `Install: \`go get gopkg.in/DataDog/dd-trace-go.v1/ddtrace\`\n\nSee the [Go tracer docs](https://docs.datadoghq.com/tracing/setup_overview/setup/go/).`
+    : `See the [Datadog APM docs](https://docs.datadoghq.com/tracing/) for ${config.language}.`}
+
+## 4. Verify
+
+Open the [Datadog APM dashboard](https://app.datadoghq.com/apm) and confirm traces appear within ~2 minutes of starting your service.
+`;
+}
+
+function sentrySetupGuide(config: StackConfig) {
+  const sdkInstructions: Record<StackConfig["language"], string> = {
+    typescript: `Install the SDK:
+\`\`\`bash
+npm install @sentry/node
+\`\`\`
+
+Initialise in your entry file (before any other imports):
+\`\`\`ts
+import * as Sentry from "@sentry/node";
+Sentry.init({ dsn: process.env.SENTRY_DSN });
+\`\`\``,
+    python: `Install the SDK:
+\`\`\`bash
+pip install sentry-sdk[fastapi]
+\`\`\`
+
+Initialise in \`app/main.py\`:
+\`\`\`python
+import sentry_sdk
+sentry_sdk.init(dsn=os.environ["SENTRY_DSN"])
+\`\`\``,
+    go: `Install the SDK:
+\`\`\`bash
+go get github.com/getsentry/sentry-go
+\`\`\`
+
+Initialise in \`main.go\`:
+\`\`\`go
+sentry.Init(sentry.ClientOptions{Dsn: os.Getenv("SENTRY_DSN")})
+defer sentry.Flush(2 * time.Second)
+\`\`\``,
+    rust: `Install in \`Cargo.toml\`:
+\`\`\`toml
+sentry = "0.34"
+\`\`\`
+
+Initialise in \`main.rs\`:
+\`\`\`rust
+let _guard = sentry::init(std::env::var("SENTRY_DSN").unwrap());
+\`\`\``,
+    java: `Add to \`pom.xml\`:
+\`\`\`xml
+<dependency>
+  <groupId>io.sentry</groupId>
+  <artifactId>sentry-spring-boot-starter-jakarta</artifactId>
+  <version>7.x.x</version>
+</dependency>
+\`\`\`
+
+Set \`sentry.dsn=\${SENTRY_DSN}\` in \`application.properties\`.`,
+    kotlin: `Add to \`build.gradle.kts\`:
+\`\`\`kotlin
+implementation("io.sentry:sentry-spring-boot-starter-jakarta:7.x.x")
+\`\`\`
+
+Set \`sentry.dsn=\${SENTRY_DSN}\` in \`application.properties\`.`,
+  };
+
+  return `# Setting Up Sentry
+
+## 1. Create a Sentry project
+
+1. Go to [sentry.io](https://sentry.io) and create a new project.
+2. Select your platform: **${config.language}**.
+3. Copy the DSN from the project setup page.
+
+## 2. Set the DSN
+
+Add to your \`.env\`:
+\`\`\`
+SENTRY_DSN=https://...@sentry.io/...
+\`\`\`
+
+And set it as a secret in your deployment environment.
+
+## 3. Install and initialise the SDK
+
+${sdkInstructions[config.language]}
+
+## 4. Verify
+
+Trigger a test error and confirm it appears in your Sentry dashboard within ~30 seconds.
+`;
+}
+
+function newrelicConfig(name: string) {
+  return `app_name: ${name}
+license_key: "\${NEW_RELIC_LICENSE_KEY}"
+
+log_level: info
+
+distributed_tracing:
+  enabled: true
+
+transaction_tracer:
+  enabled: true
+  transaction_threshold: apdex_f
+
+error_collector:
+  enabled: true
+`;
 }
 
 function openapiSpec(config: StackConfig, endpoints: Endpoint[]) {
