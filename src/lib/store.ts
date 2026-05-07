@@ -50,6 +50,8 @@ type State = {
   updateEndpoint: (id: string, e: Partial<Endpoint>) => void;
   addEnvVar: (v: { key: string; value: string; secret?: boolean }) => void;
   removeEnvVar: (key: string) => void;
+  applyProposal: (config: StackConfig) => void;
+  lastProposalAt?: string;
 };
 
 const initialEndpoints: Endpoint[] = [
@@ -147,5 +149,10 @@ export const useStackStore = create<State>((set) => ({
         ...s.config,
         envVars: s.config.envVars.filter((v) => v.key !== key),
       },
+    })),
+  applyProposal: (config) =>
+    set(() => ({
+      config,
+      lastProposalAt: new Date().toISOString(),
     })),
 }));

@@ -14,6 +14,7 @@ import { Logo } from "@/components/shared/logo";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { HeroInfraPreview } from "@/components/landing/hero-infra-preview";
+import { LandingIntentInput } from "@/components/landing/landing-intent-input";
 import { FeaturesGrid } from "@/components/landing/features-grid";
 import { StackGenerationDemo } from "@/components/landing/stack-generation-demo";
 import { LogoWall } from "@/components/landing/logo-wall";
@@ -40,7 +41,7 @@ export default function LandingPage() {
           >
             <Badge variant="brand" className="mx-auto inline-flex">
               <Sparkles className="h-3 w-3" />
-              Introducing Helios 2.0 — AI-native infra builder
+              Your AI platform engineer
             </Badge>
           </motion.div>
 
@@ -50,10 +51,9 @@ export default function LandingPage() {
             transition={{ duration: 0.6, delay: 0.05 }}
             className="mt-6 text-5xl md:text-7xl font-semibold tracking-tight text-gradient"
           >
-            Generate production-ready
+            Describe what you&apos;re building.
             <br />
-            backends in{" "}
-            <span className="text-gradient-brand">minutes.</span>
+            <span className="text-gradient-brand">Ship the system.</span>
           </motion.h1>
 
           <motion.p
@@ -62,27 +62,35 @@ export default function LandingPage() {
             transition={{ duration: 0.6, delay: 0.12 }}
             className="mt-6 text-base md:text-lg text-muted-foreground max-w-2xl mx-auto"
           >
-            Visually configure your stack — language, database, cache, queues,
-            APIs, deployment, CI/CD — and ship a typed, tested, observable
-            repo. Vercel × Railway × Cursor, but for the backend.
+            Helios designs the architecture, picks the stack, predicts cost
+            and latency, and generates a deployable repo. One sentence in,
+            production system out.
           </motion.p>
 
           <motion.div
             initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.2 }}
+          >
+            <LandingIntentInput />
+          </motion.div>
+
+          <motion.div
+            initial={{ opacity: 0, y: 14 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.28 }}
             className="mt-8 flex flex-wrap items-center justify-center gap-3"
           >
-            <Button asChild variant="glow" size="xl">
+            <Button asChild variant="ghost" size="sm">
               <Link href="/builder">
-                Start building
-                <ArrowRight className="h-4 w-4" />
+                Or configure manually
+                <ArrowRight className="h-3.5 w-3.5" />
               </Link>
             </Button>
-            <Button asChild variant="secondary" size="xl">
+            <Button asChild variant="ghost" size="sm">
               <Link href="/dashboard">
-                <TerminalIcon className="h-4 w-4" />
-                Live demo
+                <TerminalIcon className="h-3.5 w-3.5" />
+                See dashboard
               </Link>
             </Button>
           </motion.div>
@@ -90,8 +98,8 @@ export default function LandingPage() {
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            transition={{ duration: 0.8, delay: 0.3 }}
-            className="mt-6 flex items-center justify-center gap-6 text-xs text-muted-foreground"
+            transition={{ duration: 0.8, delay: 0.36 }}
+            className="mt-8 flex items-center justify-center gap-6 text-xs text-muted-foreground"
           >
             <span className="flex items-center gap-1.5">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
