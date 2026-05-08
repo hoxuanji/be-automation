@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   LayoutGrid,
   Boxes,
+  Bot,
   Network,
   FolderGit2,
   Rocket,
@@ -30,8 +31,10 @@ import { toast } from "@/components/ui/toast";
 
 const nav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutGrid },
-  { href: "/builder", label: "Stack Builder", icon: Boxes, badge: "AI" },
+  { href: "/start", label: "Architect", icon: Sparkles, badge: "AI" },
+  { href: "/builder", label: "Stack Builder", icon: Boxes },
   { href: "/api-builder", label: "API Contracts", icon: Network },
+  { href: "/autopilot", label: "Autopilot", icon: Bot, badge: "Beta" },
   { href: "/preview", label: "Repository", icon: FolderGit2 },
   { href: "/deploy", label: "Deploy", icon: Rocket },
 ];

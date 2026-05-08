@@ -13,7 +13,7 @@ import {
   Clock,
   TrendingUp,
   Activity,
-  FolderGit2,
+  Bot,
   ArrowRight,
   FileCode2,
   Database,
@@ -130,10 +130,10 @@ const templates: Template[] = [
 ];
 
 const quickActions = [
-  { label: "New stack", desc: "Start from scratch", icon: Boxes, href: "/builder" },
+  { label: "Architect new", desc: "Describe, don't configure", icon: Sparkles, href: "/start" },
+  { label: "Stack Builder", desc: "Configure manually", icon: Boxes, href: "/builder" },
   { label: "API contract", desc: "Design endpoints", icon: FileCode2, href: "/api-builder" },
-  { label: "Connect cloud", desc: "AWS / GCP / Azure", icon: Cloud, href: "/deploy" },
-  { label: "Import repo", desc: "Analyze existing", icon: FolderGit2, action: "import" as const },
+  { label: "Autopilot PR", desc: "Audit a GitHub repo", icon: Bot, href: "/autopilot" },
 ];
 
 export default function DashboardPage() {
@@ -163,45 +163,25 @@ export default function DashboardPage() {
           <div className="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-4">
             {quickActions.map((a) => {
               const Icon = a.icon;
-              const card = (
-                <div className="flex items-center gap-3">
-                  <div className="grid h-9 w-9 place-items-center rounded-lg border border-white/10 bg-white/[0.03]">
-                    <Icon className="h-4 w-4" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium">{a.label}</div>
-                    <div className="text-xs text-muted-foreground">{a.desc}</div>
-                  </div>
-                  <ArrowUpRight className="ml-auto h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
-                </div>
-              );
-              if ("href" in a && a.href) {
-                return (
-                  <Link
-                    key={a.label}
-                    href={a.href}
-                    className="group relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 hover-raise"
-                  >
-                    {card}
-                  </Link>
-                );
-              }
               return (
-                <button
+                <Link
                   key={a.label}
-                  type="button"
-                  onClick={() =>
-                    toast({
-                      title: "Import coming soon",
-                      description:
-                        "Connect a GitHub repo to let Helios analyze and upgrade it.",
-                      kind: "info",
-                    })
-                  }
-                  className="group relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 hover-raise text-left"
+                  href={a.href}
+                  className="group relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 hover-raise"
                 >
-                  {card}
-                </button>
+                  <div className="flex items-center gap-3">
+                    <div className="grid h-9 w-9 place-items-center rounded-lg border border-white/10 bg-white/[0.03]">
+                      <Icon className="h-4 w-4" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium">{a.label}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {a.desc}
+                      </div>
+                    </div>
+                    <ArrowUpRight className="ml-auto h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                  </div>
+                </Link>
               );
             })}
           </div>

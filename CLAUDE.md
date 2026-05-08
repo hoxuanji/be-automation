@@ -40,14 +40,22 @@ The client is the source of truth for `StackConfig` and `Endpoint[]`. The server
 ## Directory map
 
 - `src/app/` — Next.js App Router. Each page is a route.
-  - `page.tsx` — Landing (marketing).
+  - `page.tsx` — Landing (marketing). Now leads with an **intent input** that routes to `/start`.
+  - `start/` — Intent-driven architect flow. Single text field → Claude proposes a complete `StackConfig` via forced tool use.
   - `dashboard/` — Workspace overview.
   - `builder/` — **Core surface.** 10 tabs (Runtime, Database, Cache, Queue, APIs, Security, Deployment, Scaling, CI/CD, Monitoring) + architecture preview + AI assistant + summary.
   - `api-builder/` — REST/gRPC endpoint editor.
+  - `autopilot/` — Connect a GitHub repo, audit it, open a PR with fixes.
   - `preview/` — Generated repository browser with Download zip CTA.
   - `deploy/` — Provider grid + credentials + simulated deploy flow.
+  - `show/[slug]/` — **Public**, server-rendered read-only architecture page with OG image + Fork CTA.
+  - `api/architect/route.ts` — intent → streaming SSE → `ArchitectureProposal`.
+  - `api/share/route.ts` — publish a proposal; returns `{slug, url}`.
   - `api/generate/route.ts` — zip stream endpoint.
   - `api/ai/chat/route.ts` — Anthropic SSE endpoint.
+  - `api/autopilot/analyze/route.ts` — static audit of a GitHub repo via Octokit.
+  - `api/autopilot/propose/route.ts` — Claude drafts the PR file contents.
+  - `api/autopilot/open-pr/route.ts` — commits + opens PR via GitHub Git Data API.
 - `src/components/`
   - `ui/` — shadcn-style primitives (Button, Card, Tabs, Switch, Slider, Badge, Input, Tooltip, ScrollArea, SelectableCard, Dropdown, Toast, Separator, Kbd).
   - `layout/` — Sidebar, Topbar, WorkspaceShell.
@@ -55,9 +63,18 @@ The client is the source of truth for `StackConfig` and `Endpoint[]`. The server
   - `builder/` — ArchitecturePreview, StackSummary.
   - `shared/` — Logo, Terminal, AIAssistant, DownloadRepoButton, BrandIcon.
 - `src/lib/`
-  - `store.ts` — Zustand: `config`, `endpoints`, `workspace[s]`. Mutators: `set`, `patch`, `addEndpoint`, `removeEndpoint`, `updateEndpoint`, `addEnvVar`, `removeEnvVar`, `setWorkspace`.
+  - `store.ts` — Zustand: `config`, `endpoints`, `workspace[s]`. Mutators: `set`, `patch`, `addEndpoint`, `removeEndpoint`, `updateEndpoint`, `addEnvVar`, `removeEnvVar`, `setWorkspace`, **`applyProposal(config)`**.
   - `schema.ts` — Zod schemas for API request validation. Mirrors store types.
+  - `architect-schema.ts` — Zod for `/api/architect`'s `ArchitectureProposal` (summary + decisions[] + config + predictions).
+  - `share-store.ts` — in-memory Map for published proposals, keyed by slug. MAX 1000. Swap for KV later.
+  - `proposal-from-config.ts` — synthesize a minimal valid `ArchitectureProposal` from a manual `StackConfig` (used by /builder + /preview publish flows).
+  - `sse.ts` — `readSSE(response)` async generator for client-side consumption of `text/event-stream` responses.
   - `utils.ts` — `cn()`, `formatBytes()`, `shortId()`.
+  - `autopilot/` — GitHub repo analyzer, Claude-driven PR proposer, committer.
+    - `schema.ts` — Zod for audit, findings, PR proposal.
+    - `analyzer.ts` — `auditRepo(token, ref)`: fetches key manifests via Octokit, infers stack, returns findings + score.
+    - `proposer.ts` — Claude tool-use call that generates full file contents for selected findings.
+    - `committer.ts` — creates blob → tree → commit → ref → PR via Git Data API (one commit for many files).
   - `generators/` — Templated file emitters.
     - `index.ts` — `generate(config, endpoints) → GeneratedFile[]`.
     - `common.ts` — README, env, Dockerfile, docker-compose, K8s, Helm, CI, OpenAPI.
