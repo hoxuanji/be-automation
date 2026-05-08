@@ -49,6 +49,8 @@ import { AIAssistant } from "@/components/shared/ai-assistant";
 import { useStackStore } from "@/lib/store";
 import { toast } from "@/components/ui/toast";
 import { BrandIcon } from "@/components/shared/brand-icon";
+import { PublishButton } from "@/components/shared/publish-button";
+import { proposalFromConfig } from "@/lib/proposal-from-config";
 import {
   authProviders,
   caches,
@@ -106,6 +108,11 @@ export default function BuilderPage() {
           <Button variant="ghost" size="sm" onClick={saveStack}>
             <Save className="h-3.5 w-3.5" /> Save
           </Button>
+          <PublishButton
+            proposal={proposalFromConfig(config)}
+            intent={`Manually configured: ${config.name}`}
+            variant="ghost"
+          />
           <Button asChild variant="secondary" size="sm">
             <Link href="/preview">
               <Eye className="h-3.5 w-3.5" /> Preview repo

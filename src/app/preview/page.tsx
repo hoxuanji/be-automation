@@ -26,6 +26,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useStackStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { DownloadRepoButton } from "@/components/shared/download-repo-button";
+import { PublishButton } from "@/components/shared/publish-button";
+import { proposalFromConfig } from "@/lib/proposal-from-config";
 import { toast } from "@/components/ui/toast";
 
 type TreeNode = {
@@ -295,6 +297,11 @@ export default function PreviewPage() {
       ]}
       actions={
         <>
+          <PublishButton
+            proposal={proposalFromConfig(config)}
+            intent={`Generated repository: ${config.name}`}
+            variant="ghost"
+          />
           <Button variant="secondary" size="sm" onClick={pushToGitHub}>
             <Github className="h-3.5 w-3.5" /> Push to GitHub
           </Button>
