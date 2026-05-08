@@ -39,18 +39,24 @@ export async function getDefaultTeamId(token: string): Promise<string | null> {
     const data = await gql<{ workspace: { id: string } }>(
       token, `query { workspace { id name } }`
     );
+    console.log("[railway] workspace query result:", JSON.stringify(data.workspace));
     if (data.workspace?.id) return data.workspace.id;
-  } catch {}
+  } catch (e) {
+    console.warn("[railway] workspace query failed:", e instanceof Error ? e.message : e);
+  }
 
   // Try 2: me.workspaces returns Workspace directly (not a connection)
   try {
     const data = await gql<{ me: { workspaces: { id: string }[] | { id: string } } }>(
       token, `query { me { workspaces { id name } } }`
     );
+    console.log("[railway] me.workspaces result:", JSON.stringify(data.me?.workspaces));
     const ws = data.me?.workspaces;
     if (Array.isArray(ws)) return ws[0]?.id ?? null;
     if (ws && typeof ws === "object" && "id" in ws) return (ws as { id: string }).id;
-  } catch {}
+  } catch (e) {
+    console.warn("[railway] me.workspaces query failed:", e instanceof Error ? e.message : e);
+  }
 
   return null;
 }
@@ -73,7 +79,9 @@ export async function createRailwayProject(
         { input: { name, teamId } }
       );
       return data.projectCreate;
-    } catch {}
+    } catch (e) {
+      console.warn("[railway] projectCreate(teamId) failed:", e instanceof Error ? e.message : e);
+    }
 
     // Fallback: older schema used workspaceId
     try {
@@ -85,7 +93,9 @@ export async function createRailwayProject(
         { input: { name, workspaceId: teamId } }
       );
       return data.projectCreate;
-    } catch {}
+    } catch (e) {
+      console.warn("[railway] projectCreate(workspaceId) failed:", e instanceof Error ? e.message : e);
+    }
   }
 
   // Last resort: create personal project with no team/workspace ID
