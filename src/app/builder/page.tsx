@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   ArrowRight,
   Boxes,
@@ -10,6 +11,7 @@ import {
   Database,
   HardDrive,
   LayoutGrid,
+  Loader2,
   Lock,
   Network,
   Rocket,
@@ -46,6 +48,7 @@ import {
 } from "@/components/ui/dropdown";
 import { ArchitecturePreview } from "@/components/builder/architecture-preview";
 import { StackSummary } from "@/components/builder/stack-summary";
+import { GitHubConnectPanel } from "@/components/builder/github-connect-panel";
 import { NLPrompt } from "@/components/builder/nl-prompt";
 import { EntityBuilder } from "@/components/builder/entity-builder";
 import { OnboardingWizard } from "@/components/builder/onboarding-wizard";
@@ -82,18 +85,37 @@ const tabs = [
 
 export default function BuilderPage() {
   const { config, endpoints, entities, set, saveCurrentProject } = useStackStore();
+  const router = useRouter();
+  const [saving, setSaving] = React.useState(false);
 
-  async function saveStack() {
+  // Auto-save when navigating away from the builder
+  const saveRef = React.useRef(saveCurrentProject);
+  React.useEffect(() => { saveRef.current = saveCurrentProject; });
+  React.useEffect(() => {
+    return () => { void saveRef.current().catch(() => {}); };
+  }, []);
+
+  async function saveStack(silent = false) {
+    setSaving(true);
     try {
       await saveCurrentProject();
-      toast({
-        title: "Project saved",
-        description: `${config.name} · ${endpoints.length} endpoint${endpoints.length === 1 ? "" : "s"} · ${entities.length} model${entities.length === 1 ? "" : "s"}`,
-        kind: "success",
-      });
+      if (!silent) {
+        toast({
+          title: "Project saved",
+          description: `${config.name} · ${endpoints.length} endpoint${endpoints.length === 1 ? "" : "s"} · ${entities.length} model${entities.length === 1 ? "" : "s"}`,
+          kind: "success",
+        });
+      }
     } catch {
-      toast({ title: "Couldn't save", kind: "error" });
+      if (!silent) toast({ title: "Couldn't save", kind: "error" });
+    } finally {
+      setSaving(false);
     }
+  }
+
+  async function previewRepo() {
+    await saveStack(true);
+    router.push("/preview");
   }
 
   return (
@@ -107,13 +129,12 @@ export default function BuilderPage() {
       ]}
       actions={
         <>
-          <Button variant="ghost" size="sm" onClick={saveStack}>
-            <Save className="h-3.5 w-3.5" /> Save
+          <Button variant="ghost" size="sm" onClick={() => saveStack()} disabled={saving}>
+            {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+            {saving ? "Saving…" : "Save"}
           </Button>
-          <Button asChild variant="secondary" size="sm">
-            <Link href="/preview">
-              <Eye className="h-3.5 w-3.5" /> Preview repo
-            </Link>
+          <Button variant="secondary" size="sm" onClick={previewRepo} disabled={saving}>
+            <Eye className="h-3.5 w-3.5" /> Preview repo
           </Button>
         </>
       }
@@ -176,7 +197,22 @@ export default function BuilderPage() {
               />
             </TabsContent>
             <TabsContent value="models">
-              <EntityBuilder />
+              <div className="space-y-3">
+                {config.language === "python" &&
+                  (config.framework === "django" || config.framework === "litestar") &&
+                  entities.length > 0 && (
+                  <div className="flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-xs">
+                    <span className="text-amber-400 mt-0.5">⚠</span>
+                    <div>
+                      <span className="font-medium text-amber-300">Full CRUD generation is FastAPI-only right now.</span>
+                      <span className="text-amber-300/70 ml-1">
+                        {config.framework === "django" ? "Django" : "Litestar"} will generate models but no route handlers. Switch to FastAPI for complete output.
+                      </span>
+                    </div>
+                  </div>
+                )}
+                <EntityBuilder />
+              </div>
             </TabsContent>
             <TabsContent value="apis">
               <ApiPanel />
@@ -197,7 +233,7 @@ export default function BuilderPage() {
             <TabsContent value="scaling">
               <ScalingPanel />
             </TabsContent>
-            <TabsContent value="ci">
+            <TabsContent value="ci" className="space-y-4">
               <OptionPanel
                 title="CI / CD"
                 description="Pipeline generated with security scans, matrix tests, and preview deploys."
@@ -206,6 +242,7 @@ export default function BuilderPage() {
                 onSelect={(id) => set("cicd", id)}
                 icon={<GitBranch className="h-4 w-4" />}
               />
+              {config.cicd === "gh-actions" && <GitHubConnectPanel />}
             </TabsContent>
             <TabsContent value="monitor">
               <OptionPanel

@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   ChevronRight,
   Copy,
@@ -13,6 +14,7 @@ import {
   FolderOpen,
   GitBranch,
   Github,
+  Loader2,
   Rocket,
   Search,
   ShieldCheck,
@@ -97,6 +99,33 @@ function flatten(n: TreeNode, path = ""): { path: string; node: TreeNode }[] {
   return (n.children ?? []).flatMap((c) => flatten(c, p));
 }
 
+type GhStatus = { connected: false } | { connected: true; login: string; avatar: string };
+
+function GithubParamHandler({
+  setGhStatus,
+}: {
+  setGhStatus: React.Dispatch<React.SetStateAction<GhStatus | null>>;
+}) {
+  const searchParams = useSearchParams();
+
+  React.useEffect(() => {
+    const param = searchParams.get("github");
+    if (param === "connected") {
+      toast({ title: "GitHub connected", kind: "success" });
+      fetch("/api/auth/github/status")
+        .then((r) => r.json())
+        .then((d) => setGhStatus(d as GhStatus))
+        .catch(() => {});
+      window.history.replaceState({}, "", "/preview");
+    } else if (param === "error") {
+      toast({ title: "GitHub auth failed", description: "Please try again.", kind: "error" });
+      window.history.replaceState({}, "", "/preview");
+    }
+  }, [searchParams, setGhStatus]);
+
+  return null;
+}
+
 export default function PreviewPage() {
   const { config, endpoints, entities } = useStackStore();
 
@@ -128,11 +157,21 @@ export default function PreviewPage() {
   }, [flatFiles]);
 
   const [selected, setSelected] = React.useState(defaultSelected);
+  const [ghStatus, setGhStatus] = React.useState<GhStatus | null>(null);
+  const [pushing, setPushing] = React.useState(false);
 
   // Keep selected in sync when generated files change (e.g. config change)
   React.useEffect(() => {
     setSelected(defaultSelected);
   }, [defaultSelected]);
+
+  // Check GitHub connection status on mount
+  React.useEffect(() => {
+    fetch("/api/auth/github/status")
+      .then((r) => r.json())
+      .then((d) => setGhStatus(d as GhStatus))
+      .catch(() => setGhStatus({ connected: false }));
+  }, []);
 
   const selectedNode = flatFiles.find((f) => f.path === selected)?.node;
 
@@ -145,13 +184,36 @@ export default function PreviewPage() {
     }
   }
 
-  function pushToGitHub() {
-    toast({
-      title: "Connect GitHub",
-      description:
-        "Add a GitHub token in Settings to push generated repos to your org.",
-      kind: "info",
-    });
+  async function pushToGitHub() {
+    if (!ghStatus?.connected) {
+      window.location.href = "/api/auth/github";
+      return;
+    }
+
+    setPushing(true);
+    try {
+      const repoName = config.name.toLowerCase().replace(/[^a-z0-9._-]/g, "-") || "helios-app";
+      const res = await fetch("/api/github/push", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config, endpoints, entities, repoName }),
+      });
+      const data = await res.json() as { url?: string; fullName?: string; fileCount?: number; error?: string };
+      if (!res.ok || data.error) {
+        toast({ title: "Push failed", description: data.error ?? "Unknown error", kind: "error" });
+      } else {
+        toast({
+          title: `Pushed to ${data.fullName}`,
+          description: `${data.fileCount} files · Open on GitHub`,
+          kind: "success",
+        });
+        window.open(data.url, "_blank", "noopener");
+      }
+    } catch {
+      toast({ title: "Push failed", description: "Network error", kind: "error" });
+    } finally {
+      setPushing(false);
+    }
   }
 
   return (
@@ -163,8 +225,13 @@ export default function PreviewPage() {
       ]}
       actions={
         <>
-          <Button variant="secondary" size="sm" onClick={pushToGitHub}>
-            <Github className="h-3.5 w-3.5" /> Push to GitHub
+          <Button variant="secondary" size="sm" onClick={pushToGitHub} disabled={pushing}>
+            {pushing ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Github className="h-3.5 w-3.5" />
+            )}
+            {ghStatus?.connected ? `Push as ${ghStatus.login}` : "Connect GitHub"}
           </Button>
           <Button asChild variant="glow" size="sm">
             <Link href="/deploy">
@@ -174,6 +241,21 @@ export default function PreviewPage() {
         </>
       }
     >
+      <React.Suspense fallback={null}><GithubParamHandler setGhStatus={setGhStatus} /></React.Suspense>
+
+      {entities.length === 0 && endpoints.length === 0 && (
+        <div className="border-b border-amber-500/20 bg-amber-500/[0.06] px-6 py-3">
+          <div className="max-w-[1280px] mx-auto flex items-center justify-between gap-4 flex-wrap">
+            <p className="text-sm text-amber-200/80">
+              Your repo has no entities or endpoints — the generated code is mostly empty.
+            </p>
+            <Button asChild variant="secondary" size="sm">
+              <Link href="/builder">Configure your stack</Link>
+            </Button>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-[1280px] mx-auto p-6 md:p-8 space-y-6">
         <HeaderBlock fileCount={flatFiles.length} totalBytes={totalBytes} />
 

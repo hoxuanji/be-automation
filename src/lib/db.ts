@@ -8,7 +8,24 @@ const DB_PATH = path.join(DATA_DIR, "helios.db");
 
 const globalForDb = global as unknown as { _heliosDb: Database.Database | undefined };
 
+let _envChecked = false;
+
 function openDb(): Database.Database {
+  if (!_envChecked) {
+    if (process.env.NODE_ENV === "production") {
+      const warn = (msg: string) => console.error(`[Helios] SECURITY WARNING: ${msg}`);
+      if (!process.env.JWT_SECRET || process.env.JWT_SECRET === "helios-dev-secret-change-in-production")
+        warn("JWT_SECRET is not set or uses the insecure default — sessions can be forged");
+      if (!process.env.ENCRYPTION_KEY)
+        warn("ENCRYPTION_KEY is not set — API keys are stored with weak encryption");
+      if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET)
+        warn("GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET not set — GitHub OAuth will fail");
+      if (!process.env.ANTHROPIC_API_KEY)
+        warn("ANTHROPIC_API_KEY not set — AI features will return 503");
+    }
+    _envChecked = true;
+  }
+
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
@@ -38,6 +55,21 @@ function openDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);
   `);
 
+  // Idempotent migration: add github_id if the column doesn't exist yet
+  try {
+    db.exec("ALTER TABLE users ADD COLUMN github_id TEXT");
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_github_id ON users(github_id) WHERE github_id IS NOT NULL");
+  } catch {
+    // Column already exists — no-op
+  }
+
+  // Idempotent migration: deploy provider credentials (AES-256-GCM encrypted JSON blob)
+  try {
+    db.exec("ALTER TABLE users ADD COLUMN deploy_creds_enc TEXT");
+  } catch {
+    // Column already exists — no-op
+  }
+
   return db;
 }
 
@@ -56,6 +88,7 @@ export type UserRow = {
   name: string;
   password_hash: string;
   llm_api_key_enc: string | null;
+  github_id: string | null;
   created_at: number;
 };
 
@@ -76,6 +109,39 @@ export function findUserByEmail(email: string): UserRow | undefined {
   return getDb()
     .prepare("SELECT * FROM users WHERE email = ?")
     .get(email) as UserRow | undefined;
+}
+
+export function findUserByGithubId(githubId: string): UserRow | undefined {
+  return getDb()
+    .prepare("SELECT * FROM users WHERE github_id = ?")
+    .get(githubId) as UserRow | undefined;
+}
+
+export function upsertUserByGithub(
+  githubId: string,
+  email: string,
+  name: string
+): UserRow {
+  const db = getDb();
+  // Link to existing email account if present
+  const existing =
+    (db.prepare("SELECT * FROM users WHERE github_id = ?").get(githubId) as UserRow | undefined) ??
+    (email ? (db.prepare("SELECT * FROM users WHERE email = ?").get(email.toLowerCase()) as UserRow | undefined) : undefined);
+
+  if (existing) {
+    if (!existing.github_id) {
+      db.prepare("UPDATE users SET github_id = ? WHERE id = ?").run(githubId, existing.id);
+    }
+    return { ...existing, github_id: githubId };
+  }
+
+  const id = require("crypto").randomUUID() as string;
+  // No real password — GitHub-only account
+  const passwordHash = require("crypto").randomBytes(32).toString("hex");
+  db.prepare(
+    "INSERT INTO users (id, email, name, password_hash, github_id) VALUES (?, ?, ?, ?, ?)"
+  ).run(id, email.toLowerCase(), name, passwordHash, githubId);
+  return db.prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow;
 }
 
 export function findUserById(id: string): UserRow | undefined {
@@ -167,6 +233,29 @@ export function deleteProjectById(id: string, userId: string): void {
   getDb()
     .prepare("DELETE FROM projects WHERE id = ? AND user_id = ?")
     .run(id, userId);
+}
+
+// ─── Deploy credentials helpers ──────────────────────────────────────────────
+
+export type DeployCredsMap = Record<string, Record<string, string>>;
+
+export function getDeployCreds(userId: string): DeployCredsMap {
+  const row = getDb()
+    .prepare("SELECT deploy_creds_enc FROM users WHERE id = ?")
+    .get(userId) as { deploy_creds_enc: string | null } | undefined;
+  if (!row?.deploy_creds_enc) return {};
+  try {
+    return JSON.parse(decryptApiKey(row.deploy_creds_enc)) as DeployCredsMap;
+  } catch {
+    return {};
+  }
+}
+
+export function setDeployCreds(userId: string, creds: DeployCredsMap): void {
+  const enc = encryptApiKey(JSON.stringify(creds));
+  getDb()
+    .prepare("UPDATE users SET deploy_creds_enc = ? WHERE id = ?")
+    .run(enc, userId);
 }
 
 // ─── Encryption helpers ──────────────────────────────────────────────────────

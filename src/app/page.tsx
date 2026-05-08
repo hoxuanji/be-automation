@@ -6,7 +6,6 @@ import {
   ArrowRight,
   Boxes,
   BrainCircuit,
-  Github,
   Sparkles,
   Terminal as TerminalIcon,
 } from "lucide-react";
@@ -140,39 +139,16 @@ function SiteHeader() {
           <nav className="hidden md:flex items-center gap-5 text-xs text-muted-foreground">
             <a href="#features" className="hover:text-foreground transition-colors">Features</a>
             <a href="#demo" className="hover:text-foreground transition-colors">Demo</a>
-            <Link href="/dashboard" className="hover:text-foreground transition-colors">Templates</Link>
-            <a
-              href="https://docs.anthropic.com/en/docs/claude-code/overview"
-              target="_blank"
-              rel="noreferrer"
-              className="hover:text-foreground transition-colors"
-            >
-              Docs
-            </a>
+            <Link href="/templates" className="hover:text-foreground transition-colors">Templates</Link>
             <a href="#cta" className="hover:text-foreground transition-colors">Pricing</a>
           </nav>
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            asChild
-            variant="ghost"
-            size="sm"
-            className="hidden md:inline-flex"
-          >
-            <a
-              href="https://github.com/anthropics/claude-code"
-              target="_blank"
-              rel="noreferrer"
-            >
-              <Github className="h-3.5 w-3.5" />
-              Star
-            </a>
-          </Button>
           <Button asChild variant="secondary" size="sm">
-            <Link href="/dashboard">Sign in</Link>
+            <Link href="/login">Sign in</Link>
           </Button>
           <Button asChild variant="glow" size="sm">
-            <Link href="/builder">
+            <Link href="/signup">
               Get started
               <ArrowRight className="h-3.5 w-3.5" />
             </Link>

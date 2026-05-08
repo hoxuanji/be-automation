@@ -2,7 +2,9 @@ import { commonFiles } from "./common";
 import { goFiles } from "./go";
 import { typescriptFiles } from "./typescript";
 import { pythonFiles } from "./python";
-import { rustFiles, javaFiles, kotlinFiles } from "./others";
+import { rustFiles } from "./rust";
+import { javaFiles } from "./java";
+import { kotlinFiles } from "./kotlin";
 import type { Endpoint, Entity, GeneratedFile, StackConfig } from "./types";
 
 export function generate(
@@ -24,13 +26,13 @@ export function generate(
       files.push(...pythonFiles(config, endpoints, entities));
       break;
     case "rust":
-      files.push(...rustFiles(config, endpoints));
+      files.push(...rustFiles(config, endpoints, entities));
       break;
     case "java":
-      files.push(...javaFiles(config, endpoints));
+      files.push(...javaFiles(config, endpoints, entities));
       break;
     case "kotlin":
-      files.push(...kotlinFiles(config, endpoints));
+      files.push(...kotlinFiles(config, endpoints, entities));
       break;
   }
 

@@ -369,6 +369,7 @@ export const useStackStore = create<State>((set, get) => ({
             config: StackConfig;
             endpoints: Endpoint[];
             entities?: Entity[];
+            relations?: Relation[];
           }) => ({
             id: p.id,
             name: p.name,
@@ -376,6 +377,7 @@ export const useStackStore = create<State>((set, get) => ({
             config: p.config,
             endpoints: p.endpoints,
             entities: p.entities ?? [],
+            relations: p.relations ?? [],
           })
         );
         set({ savedProjects: projects });
@@ -422,6 +424,7 @@ export const useStackStore = create<State>((set, get) => ({
       config: s.config,
       endpoints: s.endpoints,
       entities: s.entities,
+      relations: s.relations,
     };
     const updated = [
       project,

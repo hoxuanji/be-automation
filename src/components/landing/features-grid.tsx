@@ -43,9 +43,9 @@ const features = [
   },
   {
     icon: Gauge,
-    title: "Infra cost estimation",
-    desc: "See projected monthly spend per component before you provision. Optimize-as-you-type.",
-    tag: "Finops",
+    title: "Tests included",
+    desc: "Every generated repo ships with unit and integration tests wired to your chosen framework — no setup required.",
+    tag: "Testing",
     tone: "from-brand-500/20 to-emerald-500/20",
   },
   {

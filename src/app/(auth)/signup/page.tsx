@@ -2,11 +2,25 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Github } from "lucide-react";
 import { Logo } from "@/components/shared/logo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "@/components/ui/toast";
+
+function OAuthResultHandler() {
+  const searchParams = useSearchParams();
+
+  React.useEffect(() => {
+    if (searchParams.get("github") === "error") {
+      toast({ title: "GitHub sign-up failed", description: "Please try again.", kind: "error" });
+      window.history.replaceState({}, "", "/signup");
+    }
+  }, [searchParams]);
+
+  return null;
+}
 
 export default function SignupPage() {
   const router = useRouter();
@@ -48,6 +62,7 @@ export default function SignupPage() {
 
   return (
     <div className="space-y-6">
+      <React.Suspense fallback={null}><OAuthResultHandler /></React.Suspense>
       <div className="text-center">
         <div className="flex justify-center mb-5">
           <Logo />
@@ -56,6 +71,21 @@ export default function SignupPage() {
         <p className="text-sm text-muted-foreground mt-1">
           Get started with Helios for free
         </p>
+      </div>
+
+      {/* GitHub OAuth */}
+      <a
+        href="/api/auth/github?mode=login"
+        className="flex items-center justify-center gap-2.5 w-full rounded-lg border border-white/[0.1] bg-white/[0.04] px-4 py-2.5 text-sm font-medium hover:bg-white/[0.07] transition-colors"
+      >
+        <Github className="h-4 w-4" />
+        Continue with GitHub
+      </a>
+
+      <div className="flex items-center gap-3">
+        <div className="h-px flex-1 bg-white/[0.06]" />
+        <span className="text-[11px] text-muted-foreground">or</span>
+        <div className="h-px flex-1 bg-white/[0.06]" />
       </div>
 
       <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-6">

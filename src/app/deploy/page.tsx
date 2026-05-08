@@ -13,11 +13,13 @@ import {
   FileText,
   Globe2,
   Key,
+  Loader2,
   Rocket,
   Server,
   Shield,
   Sparkles,
   Zap,
+  X,
 } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -149,7 +151,9 @@ export default function DeployPage() {
           {/* right column */}
           <div className="space-y-4">
             <DeploySummary />
-            {step === "guide" ? (
+            {config.deployment === "railway" ? (
+              <RailwayDeployPanel />
+            ) : step === "guide" ? (
               <DeployGuide onBack={() => setStep("configure")} />
             ) : (
               <DeployCTA onGenerate={() => setStep("guide")} />
@@ -226,75 +230,62 @@ function HeaderBlock({ step }: { step: "configure" | "guide" }) {
 }
 
 function CredentialsPanel() {
-  const [creds, setCreds] = React.useState({
-    access: "",
-    project: "",
-    team: "",
-  });
-  const [testing, setTesting] = React.useState(false);
+  const { config } = useStackStore();
+  if (config.deployment === "railway") return <RailwayCredentialsPanel />;
+  return <GenericCredentialsPanel />;
+}
 
-  const fields = [
-    {
-      key: "access" as const,
-      label: "Access token",
-      type: "password",
-      placeholder: "rw_xxxxxxxxxxxxxxxx",
-    },
-    {
-      key: "project" as const,
-      label: "Project ID",
-      type: "text",
-      placeholder: "prj_9Zx2",
-    },
-    {
-      key: "team" as const,
-      label: "Team slug (optional)",
-      type: "text",
-      placeholder: "acme-co",
-    },
-  ];
+// Status-only panel — full token management lives in Settings → Integrations
+function RailwayCredentialsPanel() {
+  const [hasToken, setHasToken] = React.useState<boolean | null>(null);
 
-  async function pasteFromClipboard() {
-    try {
-      const text = (await navigator.clipboard.readText()).trim();
-      if (!text) {
-        toast({ title: "Clipboard empty", kind: "info" });
-        return;
-      }
-      // Heuristic: if it looks like a token, fill Access; else project id.
-      if (/^[a-z]{1,4}_[A-Za-z0-9]{8,}$/.test(text)) {
-        setCreds((c) => ({ ...c, access: text }));
-      } else {
-        setCreds((c) => ({ ...c, project: text }));
-      }
-      toast({ title: "Pasted from clipboard", kind: "success" });
-    } catch {
-      toast({
-        title: "Clipboard blocked",
-        description: "Allow clipboard access in your browser.",
-        kind: "error",
-      });
-    }
-  }
+  React.useEffect(() => {
+    fetch("/api/deploy/credentials")
+      .then((r) => r.json())
+      .then((d: { creds?: { railway?: { token?: string } } }) => {
+        setHasToken(!!d.creds?.railway?.token);
+      })
+      .catch(() => setHasToken(false));
+  }, []);
 
-  function testConnection() {
-    if (!creds.access.trim()) {
-      toast({ title: "Access token required", kind: "error" });
-      return;
-    }
-    setTesting(true);
-    setTimeout(() => {
-      setTesting(false);
-      toast({
-        title: "Connection OK",
-        description: creds.project
-          ? `Verified token · project ${creds.project}`
-          : "Verified token.",
-        kind: "success",
-      });
-    }, 900);
-  }
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Key className="h-4 w-4" /> Railway credentials
+        </CardTitle>
+        <CardDescription>
+          Manage your Railway API token in{" "}
+          <a href="/settings" className="underline hover:text-foreground">
+            Settings → Integrations
+          </a>
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {hasToken === null ? (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking…
+          </div>
+        ) : hasToken ? (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+            <span className="text-emerald-300">Token saved</span>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs text-muted-foreground">No token saved yet.</p>
+            <Button asChild variant="secondary" size="sm">
+              <a href="/settings">Add in Settings →</a>
+            </Button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
+// Placeholder panel for providers not yet wired up
+function GenericCredentialsPanel() {
   return (
     <Card>
       <CardHeader>
@@ -302,43 +293,268 @@ function CredentialsPanel() {
           <Key className="h-4 w-4" /> Credentials
         </CardTitle>
         <CardDescription>
-          End-to-end encrypted. Rotate anytime. We never log secret values.
+          Direct deployment is currently available for Railway. For other
+          providers, use the step-by-step guide generated below.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-3">
-        {fields.map((f) => (
-          <div key={f.label}>
-            <div className="mb-1.5 flex items-center justify-between">
-              <label className="text-xs text-muted-foreground">{f.label}</label>
-              <Badge variant="purple">
-                <Shield className="h-2.5 w-2.5" /> encrypted
-              </Badge>
-            </div>
-            <Input
-              type={f.type}
-              placeholder={f.placeholder}
-              value={creds[f.key]}
-              onChange={(e) =>
-                setCreds((c) => ({ ...c, [f.key]: e.target.value }))
+      <CardContent>
+        <p className="text-xs text-muted-foreground">
+          Switch to <strong className="text-foreground">Railway</strong> in the
+          provider selector above to connect your account and deploy directly from Helios.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ─── Railway direct deploy panel ─────────────────────────────────────────────
+
+type DeployPhase = "idle" | "deploying" | "done" | "error";
+
+type DeployResult = {
+  projectUrl: string;
+  domain: string | null;
+  fullName: string;
+  githubUrl: string;
+};
+
+function RailwayDeployPanel() {
+  const { config, endpoints, entities } = useStackStore();
+  const [phase, setPhase] = React.useState<DeployPhase>("idle");
+  const [result, setResult] = React.useState<DeployResult | null>(null);
+  const [errorMsg, setErrorMsg] = React.useState("");
+  const [hasToken, setHasToken] = React.useState<boolean | null>(null);
+  const [ghConnected, setGhConnected] = React.useState<boolean | null>(null);
+
+  React.useEffect(() => {
+    Promise.all([
+      fetch("/api/deploy/credentials").then((r) => r.json()) as Promise<{ creds?: { railway?: { token?: string } } }>,
+      fetch("/api/auth/github/status").then((r) => r.json()) as Promise<{ connected: boolean }>,
+    ])
+      .then(([creds, gh]) => {
+        setHasToken(!!creds.creds?.railway?.token);
+        setGhConnected(gh.connected);
+      })
+      .catch(() => { setHasToken(false); setGhConnected(false); });
+  }, []);
+
+  async function deploy() {
+    setPhase("deploying");
+    setErrorMsg("");
+    try {
+      const res = await fetch("/api/railway/deploy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config, endpoints, entities }),
+      });
+      const data = await res.json() as { projectUrl?: string; domain?: string | null; fullName?: string; githubUrl?: string; error?: string; hint?: string };
+      if (!res.ok || data.error) {
+        setPhase("error");
+        setErrorMsg(data.hint ?? data.error ?? "Deployment failed");
+        return;
+      }
+      setResult({
+        projectUrl: data.projectUrl!,
+        domain: data.domain ?? null,
+        fullName: data.fullName!,
+        githubUrl: data.githubUrl!,
+      });
+      setPhase("done");
+    } catch {
+      setPhase("error");
+      setErrorMsg("Network error — check your connection and try again");
+    }
+  }
+
+  const canDeploy = hasToken && ghConnected;
+
+  return (
+    <Card className="relative overflow-hidden">
+      <div className="pointer-events-none absolute -inset-20 aurora animate-aurora opacity-20" />
+      <div className="relative p-5 space-y-4">
+        <div className="flex items-center gap-2">
+          <BrandIcon id="railway" size={20} rounded="sm" />
+          <span className="text-sm font-semibold">Deploy to Railway</span>
+        </div>
+
+        {/* Prerequisites */}
+        {phase === "idle" && (
+          <div className="space-y-1.5">
+            <PrereqRow
+              label="GitHub connected"
+              ok={ghConnected === true}
+              loading={ghConnected === null}
+              action={
+                ghConnected === false ? (
+                  <a
+                    href="/api/auth/github?mode=connect&returnTo=/deploy"
+                    className="text-xs text-brand-300 hover:underline"
+                  >
+                    Connect →
+                  </a>
+                ) : null
+              }
+            />
+            <PrereqRow
+              label="Railway token saved"
+              ok={hasToken === true}
+              loading={hasToken === null}
+              action={
+                hasToken === false ? (
+                  <span className="text-xs text-muted-foreground">↑ Enter token above</span>
+                ) : null
               }
             />
           </div>
-        ))}
-        <div className="flex items-center gap-2">
-          <Button variant="secondary" size="sm" onClick={pasteFromClipboard}>
-            <Copy className="h-3.5 w-3.5" /> Paste from clipboard
-          </Button>
+        )}
+
+        {/* Idle state */}
+        {phase === "idle" && (
           <Button
-            variant="ghost"
-            size="sm"
-            onClick={testConnection}
-            disabled={testing}
+            variant="glow"
+            size="lg"
+            className="w-full"
+            onClick={() => void deploy()}
+            disabled={!canDeploy}
           >
-            {testing ? "Testing…" : "Test connection"}
+            <Rocket className="h-4 w-4" />
+            Deploy to Railway
           </Button>
-        </div>
-      </CardContent>
+        )}
+
+        {/* Deploying */}
+        {phase === "deploying" && (
+          <div className="space-y-3">
+            <DeployStepRow label="Pushing code to GitHub" state="active" />
+            <DeployStepRow label="Creating Railway project" state="active" />
+            <DeployStepRow label="Linking repository" state="active" />
+            <DeployStepRow label="Setting environment variables" state="active" />
+          </div>
+        )}
+
+        {/* Success */}
+        {phase === "done" && result && (
+          <div className="space-y-3">
+            <DeployStepRow label="Code pushed to GitHub" state="done" />
+            <DeployStepRow label="Railway project created" state="done" />
+            <DeployStepRow label="Repository linked" state="done" />
+            <DeployStepRow label="Environment variables set" state="done" />
+
+            <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] p-3 space-y-2.5">
+              <p className="text-xs font-medium text-emerald-300">Deployment started</p>
+              <p className="text-xs text-muted-foreground">
+                Railway is building your Docker image. Check the dashboard to follow build progress.
+              </p>
+              <div className="flex flex-col gap-1.5 pt-0.5">
+                <a
+                  href={result.projectUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs text-brand-300 hover:underline"
+                >
+                  <Rocket className="h-3 w-3" /> Open Railway dashboard
+                </a>
+                <a
+                  href={result.githubUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+                >
+                  <ArrowRight className="h-3 w-3" /> {result.fullName} on GitHub
+                </a>
+                {result.domain && (
+                  <a
+                    href={result.domain}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 text-xs text-emerald-300 hover:underline"
+                  >
+                    <Globe2 className="h-3 w-3" /> {result.domain}
+                  </a>
+                )}
+              </div>
+            </div>
+
+            <button
+              onClick={() => { setPhase("idle"); setResult(null); }}
+              className="w-full text-center text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
+            >
+              Deploy again
+            </button>
+          </div>
+        )}
+
+        {/* Error */}
+        {phase === "error" && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-red-500/20 bg-red-500/[0.06] p-3 flex items-start gap-2">
+              <X className="h-3.5 w-3.5 text-red-400 mt-0.5 shrink-0" />
+              <div>
+                <p className="text-xs font-medium text-red-300">Deployment failed</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">{errorMsg}</p>
+              </div>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="w-full"
+              onClick={() => setPhase("idle")}
+            >
+              Try again
+            </Button>
+          </div>
+        )}
+      </div>
     </Card>
+  );
+}
+
+function PrereqRow({
+  label,
+  ok,
+  loading,
+  action,
+}: {
+  label: string;
+  ok: boolean;
+  loading?: boolean;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between text-xs">
+      <div className="flex items-center gap-2">
+        {loading ? (
+          <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+        ) : ok ? (
+          <Check className="h-3 w-3 text-emerald-400" />
+        ) : (
+          <X className="h-3 w-3 text-red-400" />
+        )}
+        <span className={ok ? "text-foreground" : "text-muted-foreground"}>{label}</span>
+      </div>
+      {!ok && action}
+    </div>
+  );
+}
+
+function DeployStepRow({
+  label,
+  state,
+}: {
+  label: string;
+  state: "waiting" | "active" | "done";
+}) {
+  return (
+    <div className="flex items-center gap-2.5 text-xs">
+      {state === "done" ? (
+        <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+      ) : state === "active" ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-300 shrink-0" />
+      ) : (
+        <span className="h-3.5 w-3.5 rounded-full border border-white/20 shrink-0" />
+      )}
+      <span className={state === "waiting" ? "text-muted-foreground" : "text-foreground"}>{label}</span>
+    </div>
   );
 }
 

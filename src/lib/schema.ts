@@ -134,12 +134,21 @@ export const updateSettingsSchema = z.object({
 
 // ─── Project API schema ───────────────────────────────────────────────────────
 
+export const relationSchema = z.object({
+  id: z.string(),
+  fromEntity: z.string(),
+  toEntity: z.string(),
+  type: z.enum(["one-to-many", "many-to-many", "one-to-one"]),
+  label: z.string().optional(),
+});
+
 export const projectPayloadSchema = z.object({
   name: z.string().min(1).max(128),
   data: z.object({
     config: stackConfigSchema,
     endpoints: z.array(endpointSchema).max(200),
     entities: z.array(entitySchema).max(50).optional(),
+    relations: z.array(relationSchema).max(200).optional(),
   }),
 });
 

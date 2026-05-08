@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Eye, EyeOff, Key, Lock, User } from "lucide-react";
+import { Check, Eye, EyeOff, Github, Key, Link2, Loader2, Lock, Shield, User, X } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import {
   Card,
@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "@/components/ui/toast";
 import { useStackStore } from "@/lib/store";
+import { BrandIcon } from "@/components/shared/brand-icon";
 
 export default function SettingsPage() {
   const { authUser, loadAuth } = useStackStore();
@@ -128,7 +129,7 @@ export default function SettingsPage() {
         <div>
           <h1 className="text-xl font-semibold">Settings</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Manage your account and AI configuration.
+            Manage your account, integrations, and AI configuration.
           </p>
         </div>
 
@@ -223,6 +224,9 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
+        {/* Integrations */}
+        <IntegrationsCard />
+
         {/* BYOK */}
         <Card>
           <CardHeader>
@@ -302,5 +306,273 @@ export default function SettingsPage() {
         </Card>
       </div>
     </WorkspaceShell>
+  );
+}
+
+// ─── Integrations card ────────────────────────────────────────────────────────
+
+type GhStatus =
+  | { connected: false }
+  | { connected: true; login: string; avatar: string };
+
+function IntegrationsCard() {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Link2 className="h-4 w-4" /> Integrations
+        </CardTitle>
+        <CardDescription>
+          Connected accounts used for pushing code and deploying.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <GitHubIntegrationRow />
+        <div className="border-t border-white/[0.04]" />
+        <RailwayIntegrationRow />
+      </CardContent>
+    </Card>
+  );
+}
+
+function GitHubIntegrationRow() {
+  const [status, setStatus] = React.useState<GhStatus | null>(null);
+  const [disconnecting, setDisconnecting] = React.useState(false);
+
+  React.useEffect(() => {
+    fetch("/api/auth/github/status")
+      .then((r) => r.json())
+      .then((d) => setStatus(d as GhStatus))
+      .catch(() => setStatus({ connected: false }));
+  }, []);
+
+  async function disconnect() {
+    setDisconnecting(true);
+    try {
+      await fetch("/api/auth/github/status", { method: "DELETE" });
+      setStatus({ connected: false });
+      toast({ title: "GitHub push access removed", kind: "info" });
+    } catch {
+      toast({ title: "Failed to disconnect", kind: "error" });
+    } finally {
+      setDisconnecting(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div className="flex items-center gap-3">
+        <div className="grid h-9 w-9 place-items-center rounded-lg border border-white/10 bg-white/[0.03]">
+          <Github className="h-4 w-4" />
+        </div>
+        <div>
+          <div className="text-sm font-medium">GitHub</div>
+          <div className="text-xs text-muted-foreground">
+            {status === null ? (
+              "Checking…"
+            ) : status.connected ? (
+              <span className="flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                @{status.login}
+              </span>
+            ) : (
+              "Not connected"
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="shrink-0">
+        {status === null ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+        ) : status.connected ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground hover:text-red-300"
+            disabled={disconnecting}
+            onClick={() => void disconnect()}
+          >
+            {disconnecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Disconnect"}
+          </Button>
+        ) : (
+          <Button asChild variant="secondary" size="sm">
+            <a href="/api/auth/github?mode=connect&returnTo=/settings">
+              Connect
+            </a>
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RailwayIntegrationRow() {
+  const [maskedToken, setMaskedToken] = React.useState<string | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [expanded, setExpanded] = React.useState(false);
+  const [token, setToken] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [verifiedEmail, setVerifiedEmail] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    fetch("/api/deploy/credentials")
+      .then((r) => r.json())
+      .then((d: { creds?: { railway?: { token?: string } } }) => {
+        setMaskedToken(d.creds?.railway?.token ?? null);
+      })
+      .catch(() => setMaskedToken(null))
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function saveToken() {
+    const t = token.trim();
+    if (!t) { setError("Token required"); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      const vRes = await fetch("/api/railway/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: t }),
+      });
+      const vData = await vRes.json() as { email?: string; error?: string };
+      if (!vRes.ok) {
+        setError(vData.error ?? "Invalid token");
+        return;
+      }
+      setVerifiedEmail(vData.email ?? null);
+      await fetch("/api/deploy/credentials", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "railway", fields: { token: t } }),
+      });
+      setMaskedToken(`••••${t.slice(-4)}`);
+      setToken("");
+      setExpanded(false);
+      toast({ title: "Railway token saved", kind: "success" });
+    } catch {
+      setError("Request failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function remove() {
+    await fetch("/api/deploy/credentials?provider=railway", { method: "DELETE" });
+    setMaskedToken(null);
+    setVerifiedEmail(null);
+    toast({ title: "Railway token removed", kind: "info" });
+  }
+
+  const hasToken = !!maskedToken;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="grid h-9 w-9 place-items-center rounded-lg border border-white/10 bg-white/[0.03]">
+            <BrandIcon id="railway" size={20} />
+          </div>
+          <div>
+            <div className="text-sm font-medium">Railway</div>
+            <div className="text-xs text-muted-foreground">
+              {loading ? (
+                "Checking…"
+              ) : hasToken ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                  {verifiedEmail ?? maskedToken}
+                </span>
+              ) : (
+                "No token saved"
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          {loading ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+          ) : hasToken ? (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => { setExpanded((v) => !v); setError(null); }}
+              >
+                Replace
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground hover:text-red-300"
+                onClick={() => void remove()}
+              >
+                Remove
+              </Button>
+            </>
+          ) : (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => { setExpanded(true); setError(null); }}
+            >
+              Add token
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {/* Inline token form — shown when adding or replacing */}
+      {expanded && (
+        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-muted-foreground">
+              Personal API Token from{" "}
+              <a
+                href="https://railway.app/account/tokens"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-foreground"
+              >
+                railway.app/account/tokens
+              </a>
+            </label>
+            <Badge variant="purple"><Shield className="h-2.5 w-2.5" /> encrypted</Badge>
+          </div>
+          <Input
+            type="password"
+            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+            value={token}
+            onChange={(e) => { setToken(e.target.value); setError(null); }}
+            onKeyDown={(e) => { if (e.key === "Enter") void saveToken(); }}
+            autoFocus
+          />
+          {error && <p className="text-xs text-red-400">{error}</p>}
+          <div className="flex gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void saveToken()}
+              disabled={saving || !token.trim()}
+            >
+              {saving
+                ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Verifying…</>
+                : <><Check className="h-3.5 w-3.5" /> Verify &amp; save</>
+              }
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => { setExpanded(false); setToken(""); setError(null); }}
+            >
+              <X className="h-3.5 w-3.5" /> Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

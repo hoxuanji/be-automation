@@ -20,6 +20,7 @@ import {
   Cloud,
   Search,
   Trash2,
+  History,
 } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import { Card } from "@/components/ui/card";
@@ -132,6 +133,7 @@ const quickActions = [
 export default function DashboardPage() {
   const { savedProjects, loadSavedProjects, deleteProject, authUser } = useStackStore();
   const [filter, setFilter] = React.useState("");
+  const router = useRouter();
 
   React.useEffect(() => {
     void loadSavedProjects();
@@ -151,7 +153,7 @@ export default function DashboardPage() {
       right={<AIAssistant />}
     >
       <div className="mx-auto max-w-6xl p-6 md:p-8 space-y-8">
-        <HeaderBlock name={authUser?.name} />
+        <HeaderBlock name={authUser?.name} projectCount={savedProjects.length} />
 
         <MetricsStrip />
 
@@ -281,13 +283,13 @@ export default function DashboardPage() {
           </div>
         </section>
 
-        <ActivityFeed />
+        <RecentSaves />
       </div>
     </WorkspaceShell>
   );
 }
 
-function HeaderBlock({ name }: { name?: string }) {
+function HeaderBlock({ name, projectCount }: { name?: string; projectCount: number }) {
   return (
     <div className="relative overflow-hidden rounded-2xl border border-white/[0.06] bg-gradient-to-b from-white/[0.04] to-transparent p-6 md:p-8">
       <div className="pointer-events-none absolute -right-20 -top-20 h-[320px] w-[420px] aurora animate-aurora opacity-60" />
@@ -300,10 +302,9 @@ function HeaderBlock({ name }: { name?: string }) {
             What will you ship today?
           </h1>
           <p className="mt-1.5 max-w-lg text-sm text-muted-foreground">
-            You have 3 active projects and 2 pending deployments. The AI
-            copilot suggests upgrading{" "}
-            <span className="text-foreground">helios-api</span> to Postgres 16
-            — it could cut p99 by ~14%.
+            {projectCount > 0
+              ? `You have ${projectCount} saved project${projectCount !== 1 ? "s" : ""}. Configure a stack, download the generated repo, or push directly to GitHub.`
+              : "Get started by configuring your first stack in the builder."}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -513,50 +514,53 @@ function TemplateCard({ template }: { template: Template }) {
   );
 }
 
-function ActivityFeed() {
-  const items = [
-    { who: "Jee", what: "deployed", target: "helios-api", where: "production", when: "2 minutes ago", tone: "emerald" },
-    { who: "AI", what: "recommended", target: "Postgres 16 upgrade", where: "helios-api", when: "14 minutes ago", tone: "brand" },
-    { who: "Ana", what: "added endpoint", target: "POST /invoices", where: "ledger-svc", when: "1 hour ago", tone: "purple" },
-    { who: "CI", what: "passed", target: "148 tests", where: "notifier", when: "3 hours ago", tone: "emerald" },
-  ];
-  const toneMap: Record<string, string> = {
-    emerald: "bg-emerald-500/10 text-emerald-300 border-emerald-500/20",
-    brand: "bg-brand-500/10 text-brand-300 border-brand-500/20",
-    purple: "bg-purple-500/10 text-purple-300 border-purple-500/20",
-  };
+function RecentSaves() {
+  const { savedProjects, loadProject } = useStackStore();
+  const router = useRouter();
+
+  const recent = [...savedProjects]
+    .sort((a, b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime())
+    .slice(0, 5);
+
+  if (recent.length === 0) return null;
+
   return (
     <section>
-      <SectionHeader title="Activity" subtitle="What happened across your workspace" />
+      <SectionHeader title="Recent saves" subtitle="Last 5 projects you worked on" />
       <Card className="mt-4 divide-y divide-white/[0.04]">
-        {items.map((it, i) => (
-          <button
-            key={i}
-            type="button"
-            onClick={() =>
-              toast({
-                title: `${it.who} ${it.what} ${it.target}`,
-                description: `in ${it.where} · ${it.when}`,
-                kind: "info",
-              })
-            }
-            className="flex w-full items-center gap-3 p-3.5 text-left hover:bg-white/[0.02]"
-          >
-            <span
-              className={`grid h-7 w-7 place-items-center rounded-full border text-[10px] font-semibold ${toneMap[it.tone]}`}
+        {recent.map((p) => {
+          const stackLine = [p.config.language, p.config.framework, p.config.database]
+            .filter(Boolean)
+            .join(" · ");
+          return (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => {
+                loadProject(p.id);
+                router.push("/builder");
+              }}
+              className="flex w-full items-center gap-3 p-3.5 text-left hover:bg-white/[0.02] group"
             >
-              {it.who.slice(0, 2).toUpperCase()}
-            </span>
-            <div className="flex-1 text-sm">
-              <span className="font-medium">{it.who}</span>{" "}
-              <span className="text-muted-foreground">{it.what}</span>{" "}
-              <span className="font-medium">{it.target}</span>{" "}
-              <span className="text-muted-foreground">in</span>{" "}
-              <span className="font-mono text-[12px]">{it.where}</span>
-            </div>
-            <span className="text-[11px] text-muted-foreground">{it.when}</span>
-          </button>
-        ))}
+              <div className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-white/10 bg-white/[0.03]">
+                <History className="h-3.5 w-3.5 text-muted-foreground" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium truncate">{p.name}</div>
+                <div className="text-[11px] text-muted-foreground font-mono truncate">{stackLine}</div>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                {p.entities.length > 0 && (
+                  <Badge variant="outline" className="text-[10px]">
+                    {p.entities.length} model{p.entities.length !== 1 ? "s" : ""}
+                  </Badge>
+                )}
+                <span className="text-[11px] text-muted-foreground">{relativeTime(p.savedAt)}</span>
+                <ArrowRight className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+              </div>
+            </button>
+          );
+        })}
       </Card>
     </section>
   );
