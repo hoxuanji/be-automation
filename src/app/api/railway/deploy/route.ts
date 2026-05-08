@@ -3,7 +3,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { getDeployCreds } from "@/lib/db";
 import { stackConfigSchema, endpointSchema, entitySchema, relationSchema } from "@/lib/schema";
 import {
-  getDefaultWorkspaceId,
+  getDefaultTeamId,
   createRailwayProject,
   getRailwayProject,
   createRailwayService,
@@ -80,11 +80,11 @@ export async function POST(req: NextRequest) {
 
   // 4–8. Railway provisioning
   try {
-    // 4. Resolve workspace ID then create Railway project
-    const workspaceId = await getDefaultWorkspaceId(railwayToken);
-    console.log("[railway/deploy] workspace:", workspaceId);
+    // 4. Resolve team/workspace ID (null = personal project)
+    const teamId = await getDefaultTeamId(railwayToken);
+    console.log("[railway/deploy] teamId:", teamId ?? "(none — personal project)");
 
-    const project = await createRailwayProject(railwayToken, config.name, workspaceId);
+    const project = await createRailwayProject(railwayToken, config.name, teamId);
     console.log("[railway/deploy] project:", project.id);
 
     // 5. Get the default (production) environment ID

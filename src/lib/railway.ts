@@ -31,31 +31,28 @@ export async function verifyRailwayToken(
   return data.me;
 }
 
-// ─── Workspaces ───────────────────────────────────────────────────────────────
+// ─── Workspace / Team resolution ─────────────────────────────────────────────
 
-export async function getDefaultWorkspaceId(token: string): Promise<string> {
-  // Try top-level workspaces query (current Railway API)
+export async function getDefaultTeamId(token: string): Promise<string | null> {
+  // Try 1: singular 'workspace' field on Query (current Railway API)
   try {
-    const data = await gql<{
-      workspaces: { id: string; name: string; isPersonal?: boolean }[];
-    }>(token, `query { workspaces { id name isPersonal } }`);
-    const ws =
-      data.workspaces.find((w) => w.isPersonal) ?? data.workspaces[0];
-    if (ws?.id) return ws.id;
+    const data = await gql<{ workspace: { id: string } }>(
+      token, `query { workspace { id name } }`
+    );
+    if (data.workspace?.id) return data.workspace.id;
   } catch {}
 
-  // Fallback: me.workspaces connection (older schema)
+  // Try 2: me.workspaces returns Workspace directly (not a connection)
   try {
-    const data = await gql<{
-      me: { workspaces: { edges: { node: { id: string } }[] } };
-    }>(token, `query { me { workspaces { edges { node { id } } } } }`);
-    const id = data.me.workspaces.edges[0]?.node.id;
-    if (id) return id;
+    const data = await gql<{ me: { workspaces: { id: string }[] | { id: string } } }>(
+      token, `query { me { workspaces { id name } } }`
+    );
+    const ws = data.me?.workspaces;
+    if (Array.isArray(ws)) return ws[0]?.id ?? null;
+    if (ws && typeof ws === "object" && "id" in ws) return (ws as { id: string }).id;
   } catch {}
 
-  throw new Error(
-    "Could not find a Railway workspace. Make sure your token has the correct permissions."
-  );
+  return null;
 }
 
 // ─── Projects ─────────────────────────────────────────────────────────────────
@@ -63,14 +60,41 @@ export async function getDefaultWorkspaceId(token: string): Promise<string> {
 export async function createRailwayProject(
   token: string,
   name: string,
-  workspaceId: string
+  teamId: string | null
 ): Promise<{ id: string }> {
+  // Try with teamId (current Railway API)
+  if (teamId) {
+    try {
+      const data = await gql<{ projectCreate: { id: string } }>(
+        token,
+        `mutation CreateProject($input: ProjectCreateInput!) {
+          projectCreate(input: $input) { id }
+        }`,
+        { input: { name, teamId } }
+      );
+      return data.projectCreate;
+    } catch {}
+
+    // Fallback: older schema used workspaceId
+    try {
+      const data = await gql<{ projectCreate: { id: string } }>(
+        token,
+        `mutation CreateProject($input: ProjectCreateInput!) {
+          projectCreate(input: $input) { id }
+        }`,
+        { input: { name, workspaceId: teamId } }
+      );
+      return data.projectCreate;
+    } catch {}
+  }
+
+  // Last resort: create personal project with no team/workspace ID
   const data = await gql<{ projectCreate: { id: string } }>(
     token,
     `mutation CreateProject($input: ProjectCreateInput!) {
       projectCreate(input: $input) { id }
     }`,
-    { input: { name, workspaceId } }
+    { input: { name } }
   );
   return data.projectCreate;
 }
