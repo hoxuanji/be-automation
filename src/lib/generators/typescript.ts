@@ -565,7 +565,7 @@ function pkgJson(name: string, framework: string, withPrisma = false, _db = "") 
     },
   };
   const dep = {
-    ...(deps[framework] ?? deps.express),
+    ...(deps[framework] ?? deps.hono),
     ...(withPrisma ? { "@prisma/client": "^5.22.0" } : {}),
   };
   return (
@@ -619,6 +619,7 @@ function tsconfig() {
         emitDecoratorMetadata: true,
       },
       include: ["src/**/*"],
+      exclude: ["src/**/*.test.ts", "src/**/*.spec.ts", "node_modules"],
     },
     null,
     2
@@ -816,7 +817,64 @@ describe("${pascal} routes", () => {
 `;
   }
 
-  if (framework === "hono") {
+  if (framework === "nestjs") {
+    return `import { describe, it, expect, beforeEach } from "vitest";
+import { Test, TestingModule } from "@nestjs/testing";
+import { ${pascal}Controller } from "./${kebab}.controller";
+import { ${pascal}NestService } from "./${kebab}.service";
+
+const mockItem = { id: "test-id-1", ${mockFieldEntries}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+
+describe("${pascal}Controller", () => {
+  let controller: ${pascal}Controller;
+  const mockService = {
+    list: vi.fn().mockResolvedValue({ items: [mockItem], total: 1, page: 1, pageSize: 20 }),
+    getById: vi.fn().mockImplementation((id: string) =>
+      Promise.resolve(id === "test-id-1" ? mockItem : null)
+    ),
+    create: vi.fn().mockImplementation((dto: unknown) => Promise.resolve({ id: "test-id-1", ...(dto as object) })),
+    update: vi.fn().mockImplementation((id: string, dto: unknown) => Promise.resolve({ id, ...(dto as object) })),
+    remove: vi.fn().mockResolvedValue(undefined),
+  };
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      controllers: [${pascal}Controller],
+      providers: [{ provide: ${pascal}NestService, useValue: mockService }],
+    }).compile();
+    controller = module.get<${pascal}Controller>(${pascal}Controller);
+  });
+
+  it("list returns paginated result", async () => {
+    const result = await controller.list({});
+    expect(result).toHaveProperty("items");
+  });
+
+  it("getById returns item", async () => {
+    const result = await controller.getById("test-id-1");
+    expect(result).toHaveProperty("id");
+  });
+
+  it("create returns new item", async () => {
+    const result = await controller.create(${sendBody} as unknown);
+    expect(result).toHaveProperty("id");
+  });
+
+  it("update returns updated item", async () => {
+    const result = await controller.update("test-id-1", ${sendBody} as unknown);
+    expect(result).toHaveProperty("id");
+  });
+
+  it("remove returns void", async () => {
+    const result = await controller.remove("test-id-1");
+    expect(result).toBeUndefined();
+  });
+});
+`;
+  }
+
+  // Default: hono-style test (covers hono and any unrecognized framework)
+  {
     return `import { describe, it, expect, vi } from "vitest";
 import { ${camel}Routes } from "./${kebab}.route";
 
@@ -891,59 +949,6 @@ describe("${pascal} routes", () => {
 `;
   }
 
-  return `import { describe, it, expect, beforeEach } from "vitest";
-import { Test, TestingModule } from "@nestjs/testing";
-import { ${pascal}Controller } from "./${kebab}.controller";
-import { ${pascal}NestService } from "./${kebab}.service";
-
-const mockItem = { id: "test-id-1", ${mockFieldEntries}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-
-describe("${pascal}Controller", () => {
-  let controller: ${pascal}Controller;
-  const mockService = {
-    list: vi.fn().mockResolvedValue({ items: [mockItem], total: 1, page: 1, pageSize: 20 }),
-    getById: vi.fn().mockImplementation((id: string) =>
-      Promise.resolve(id === "test-id-1" ? mockItem : null)
-    ),
-    create: vi.fn().mockImplementation((dto: unknown) => Promise.resolve({ id: "test-id-1", ...(dto as object) })),
-    update: vi.fn().mockImplementation((id: string, dto: unknown) => Promise.resolve({ id, ...(dto as object) })),
-    remove: vi.fn().mockResolvedValue(undefined),
-  };
-
-  beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
-      controllers: [${pascal}Controller],
-      providers: [{ provide: ${pascal}NestService, useValue: mockService }],
-    }).compile();
-    controller = module.get<${pascal}Controller>(${pascal}Controller);
-  });
-
-  it("list returns paginated result", async () => {
-    const result = await controller.list({});
-    expect(result).toHaveProperty("items");
-  });
-
-  it("getById returns item", async () => {
-    const result = await controller.getById("test-id-1");
-    expect(result).toHaveProperty("id");
-  });
-
-  it("create returns new item", async () => {
-    const result = await controller.create(${sendBody} as unknown);
-    expect(result).toHaveProperty("id");
-  });
-
-  it("update returns updated item", async () => {
-    const result = await controller.update("test-id-1", ${sendBody} as unknown);
-    expect(result).toHaveProperty("id");
-  });
-
-  it("remove returns void", async () => {
-    const result = await controller.remove("test-id-1");
-    expect(result).toBeUndefined();
-  });
-});
-`;
 }
 
 function nestjsFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
