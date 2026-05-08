@@ -1,6 +1,24 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { safeName, toPascal, toKebab, toCamel } from "./types";
 
+function tsMockField(name: string, type: FieldType): string {
+  switch (type) {
+    case "string": return `${name}: "test-value"`;
+    case "text": return `${name}: "test-value"`;
+    case "number": return `${name}: 1`;
+    case "boolean": return `${name}: true`;
+    case "uuid": return `${name}: "00000000-0000-0000-0000-000000000001"`;
+    case "date": return `${name}: new Date().toISOString()`;
+    case "json": return `${name}: {}`;
+  }
+}
+
+function tsSendBody(nonPkFields: EntityField[]): string {
+  const required = nonPkFields.filter((f) => f.required).slice(0, 4);
+  const fields = required.length ? required : nonPkFields.slice(0, 2);
+  return `{ ${fields.map((f) => tsMockField(f.name, f.type)).join(", ")} }`;
+}
+
 export function typescriptFiles(
   config: StackConfig,
   endpoints: Endpoint[],
@@ -12,6 +30,7 @@ export function typescriptFiles(
   files.push({ path: "package.json", content: pkgJson(name, config.framework, entities.length > 0, config.database) });
   files.push({ path: "tsconfig.json", content: tsconfig() });
   files.push({ path: "Dockerfile", content: tsDockerfile() });
+  files.push({ path: "vitest.config.ts", content: vitestConfig() });
 
   if (entities.length > 0) {
     files.push(...prismaFiles(config, entities));
@@ -85,6 +104,13 @@ function entityCrudFiles(config: StackConfig, entities: Entity[]): GeneratedFile
         content: honoRouteFile(pascal, camel, kebab),
       });
     }
+
+    files.push({
+      path: config.framework === "nestjs"
+        ? `src/modules/${kebab}/${kebab}.controller.spec.ts`
+        : `src/routes/${kebab}.${config.framework === "express" ? "router" : "route"}.test.ts`,
+      content: testFile(config.framework, pascal, camel, kebab, nonPkFields),
+    });
   }
 
   return files;
@@ -553,6 +579,7 @@ function pkgJson(name: string, framework: string, withPrisma = false, _db = "") 
           start: framework === "nestjs" ? "node dist/main.js" : "node dist/main.js",
           build: "tsc -p tsconfig.json",
           test: "vitest run",
+          "test:coverage": "vitest run --coverage",
           ...(withPrisma ? { "db:generate": "prisma generate", "db:migrate": "prisma migrate dev" } : {}),
         },
         dependencies: dep,
@@ -560,7 +587,10 @@ function pkgJson(name: string, framework: string, withPrisma = false, _db = "") 
           "@types/node": "^22.10.5",
           tsx: "^4.19.0",
           typescript: "^5.7.2",
-          vitest: "^2.1.0",
+          vitest: "^2.0.0",
+          "@vitest/coverage-v8": "^2.0.0",
+          supertest: "^7.0.0",
+          "@types/supertest": "^6.0.0",
           ...(framework === "express" ? { "@types/express": "^4.17.21" } : {}),
           ...(withPrisma ? { prisma: "^5.22.0" } : {}),
         },
@@ -613,6 +643,306 @@ COPY --from=build /app/package.json ./package.json
 USER node
 EXPOSE 8080
 CMD ["node", "dist/main.js"]
+`;
+}
+
+function vitestConfig(): string {
+  return `import { defineConfig } from "vitest/config";
+export default defineConfig({
+  test: {
+    globals: true,
+    environment: "node",
+  },
+});
+`;
+}
+
+function testFile(
+  framework: string,
+  pascal: string,
+  camel: string,
+  kebab: string,
+  nonPkFields: EntityField[]
+): string {
+  const mockFieldEntries = nonPkFields
+    .slice(0, 4)
+    .map((f) => tsMockField(f.name, f.type))
+    .join(", ");
+  const sendBody = tsSendBody(nonPkFields);
+
+  if (framework === "express") {
+    return `import { describe, it, expect, vi } from "vitest";
+import request from "supertest";
+import express from "express";
+import { create${pascal}Router } from "./${kebab}.router";
+
+const mockItem = { id: "test-id-1", ${mockFieldEntries}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+
+vi.mock("../services/${kebab}.service", () => ({
+  list${pascal}: vi.fn().mockResolvedValue({ items: [mockItem], total: 1, page: 1, pageSize: 20 }),
+  get${pascal}ById: vi.fn().mockImplementation((id: string) =>
+    Promise.resolve(id === "test-id-1" ? mockItem : null)
+  ),
+  create${pascal}: vi.fn().mockResolvedValue(mockItem),
+  update${pascal}: vi.fn().mockImplementation((id: string, data: unknown) =>
+    Promise.resolve(id === "test-id-1" ? { ...mockItem, ...(data as object) } : null)
+  ),
+  delete${pascal}: vi.fn().mockResolvedValue(undefined),
+}));
+
+const app = express();
+app.use(express.json());
+app.use("/${kebab}s", create${pascal}Router());
+
+describe("${pascal} routes", () => {
+  it("GET /${kebab}s → 200 with items", async () => {
+    const res = await request(app).get("/${kebab}s");
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+  });
+
+  it("GET /${kebab}s/:id → 200 when found", async () => {
+    const res = await request(app).get("/${kebab}s/test-id-1");
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe("test-id-1");
+  });
+
+  it("GET /${kebab}s/:id → 404 when not found", async () => {
+    const res = await request(app).get("/${kebab}s/nonexistent");
+    expect(res.status).toBe(404);
+  });
+
+  it("POST /${kebab}s → 201 with created item", async () => {
+    const res = await request(app)
+      .post("/${kebab}s")
+      .send(${sendBody});
+    expect(res.status).toBe(201);
+    expect(res.body.id).toBe("test-id-1");
+  });
+
+  it("PATCH /${kebab}s/:id → 200 when found", async () => {
+    const res = await request(app)
+      .patch("/${kebab}s/test-id-1")
+      .send(${sendBody});
+    expect(res.status).toBe(200);
+  });
+
+  it("PATCH /${kebab}s/:id → 404 when not found", async () => {
+    const res = await request(app)
+      .patch("/${kebab}s/nonexistent")
+      .send(${sendBody});
+    expect(res.status).toBe(404);
+  });
+
+  it("DELETE /${kebab}s/:id → 204", async () => {
+    const res = await request(app).delete("/${kebab}s/test-id-1");
+    expect(res.status).toBe(204);
+  });
+});
+`;
+  }
+
+  if (framework === "fastify") {
+    return `import { describe, it, expect, vi } from "vitest";
+import Fastify from "fastify";
+import { ${camel}Routes } from "./${kebab}.route";
+
+const mockItem = { id: "test-id-1", ${mockFieldEntries}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+
+vi.mock("../services/${kebab}.service", () => ({
+  list${pascal}: vi.fn().mockResolvedValue({ items: [mockItem], total: 1, page: 1, pageSize: 20 }),
+  get${pascal}ById: vi.fn().mockImplementation((id: string) =>
+    Promise.resolve(id === "test-id-1" ? mockItem : null)
+  ),
+  create${pascal}: vi.fn().mockResolvedValue(mockItem),
+  update${pascal}: vi.fn().mockImplementation((id: string, data: unknown) =>
+    Promise.resolve(id === "test-id-1" ? { ...mockItem, ...(data as object) } : null)
+  ),
+  delete${pascal}: vi.fn().mockResolvedValue(undefined),
+}));
+
+async function buildApp() {
+  const app = Fastify();
+  await app.register(${camel}Routes, { prefix: "/${kebab}s" });
+  return app;
+}
+
+describe("${pascal} routes", () => {
+  it("GET /${kebab}s → 200 with items", async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: "GET", url: "/${kebab}s" });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).items).toHaveLength(1);
+  });
+
+  it("GET /${kebab}s/:id → 200 when found", async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: "GET", url: "/${kebab}s/test-id-1" });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).id).toBe("test-id-1");
+  });
+
+  it("GET /${kebab}s/:id → 404 when not found", async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: "GET", url: "/${kebab}s/nonexistent" });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("POST /${kebab}s → 201 with created item", async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: "POST", url: "/${kebab}s", payload: ${sendBody} });
+    expect(res.statusCode).toBe(201);
+    expect(JSON.parse(res.body).id).toBe("test-id-1");
+  });
+
+  it("PATCH /${kebab}s/:id → 200 when found", async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: "PATCH", url: "/${kebab}s/test-id-1", payload: ${sendBody} });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("PATCH /${kebab}s/:id → 404 when not found", async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: "PATCH", url: "/${kebab}s/nonexistent", payload: ${sendBody} });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("DELETE /${kebab}s/:id → 204", async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: "DELETE", url: "/${kebab}s/test-id-1" });
+    expect(res.statusCode).toBe(204);
+  });
+});
+`;
+  }
+
+  if (framework === "hono") {
+    return `import { describe, it, expect, vi } from "vitest";
+import { ${camel}Routes } from "./${kebab}.route";
+
+const mockItem = { id: "test-id-1", ${mockFieldEntries}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+
+vi.mock("../services/${kebab}.service", () => ({
+  list${pascal}: vi.fn().mockResolvedValue({ items: [mockItem], total: 1, page: 1, pageSize: 20 }),
+  get${pascal}ById: vi.fn().mockImplementation((id: string) =>
+    Promise.resolve(id === "test-id-1" ? mockItem : null)
+  ),
+  create${pascal}: vi.fn().mockResolvedValue(mockItem),
+  update${pascal}: vi.fn().mockImplementation((id: string, data: unknown) =>
+    Promise.resolve(id === "test-id-1" ? { ...mockItem, ...(data as object) } : null)
+  ),
+  delete${pascal}: vi.fn().mockResolvedValue(undefined),
+}));
+
+describe("${pascal} routes", () => {
+  it("GET / → 200 with items", async () => {
+    const res = await ${camel}Routes.request("/");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.items).toHaveLength(1);
+  });
+
+  it("GET /:id → 200 when found", async () => {
+    const res = await ${camel}Routes.request("/test-id-1");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.id).toBe("test-id-1");
+  });
+
+  it("GET /:id → 404 when not found", async () => {
+    const res = await ${camel}Routes.request("/nonexistent");
+    expect(res.status).toBe(404);
+  });
+
+  it("POST / → 201 with created item", async () => {
+    const res = await ${camel}Routes.request("/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(${sendBody}),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.id).toBe("test-id-1");
+  });
+
+  it("PATCH /:id → 200 when found", async () => {
+    const res = await ${camel}Routes.request("/test-id-1", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(${sendBody}),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("PATCH /:id → 404 when not found", async () => {
+    const res = await ${camel}Routes.request("/nonexistent", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(${sendBody}),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("DELETE /:id → 204", async () => {
+    const res = await ${camel}Routes.request("/test-id-1", { method: "DELETE" });
+    expect(res.status).toBe(204);
+  });
+});
+`;
+  }
+
+  return `import { describe, it, expect, beforeEach } from "vitest";
+import { Test, TestingModule } from "@nestjs/testing";
+import { ${pascal}Controller } from "./${kebab}.controller";
+import { ${pascal}NestService } from "./${kebab}.service";
+
+const mockItem = { id: "test-id-1", ${mockFieldEntries}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+
+describe("${pascal}Controller", () => {
+  let controller: ${pascal}Controller;
+  const mockService = {
+    list: vi.fn().mockResolvedValue({ items: [mockItem], total: 1, page: 1, pageSize: 20 }),
+    getById: vi.fn().mockImplementation((id: string) =>
+      Promise.resolve(id === "test-id-1" ? mockItem : null)
+    ),
+    create: vi.fn().mockImplementation((dto: unknown) => Promise.resolve({ id: "test-id-1", ...(dto as object) })),
+    update: vi.fn().mockImplementation((id: string, dto: unknown) => Promise.resolve({ id, ...(dto as object) })),
+    remove: vi.fn().mockResolvedValue(undefined),
+  };
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      controllers: [${pascal}Controller],
+      providers: [{ provide: ${pascal}NestService, useValue: mockService }],
+    }).compile();
+    controller = module.get<${pascal}Controller>(${pascal}Controller);
+  });
+
+  it("list returns paginated result", async () => {
+    const result = await controller.list({});
+    expect(result).toHaveProperty("items");
+  });
+
+  it("getById returns item", async () => {
+    const result = await controller.getById("test-id-1");
+    expect(result).toHaveProperty("id");
+  });
+
+  it("create returns new item", async () => {
+    const result = await controller.create(${sendBody} as unknown);
+    expect(result).toHaveProperty("id");
+  });
+
+  it("update returns updated item", async () => {
+    const result = await controller.update("test-id-1", ${sendBody} as unknown);
+    expect(result).toHaveProperty("id");
+  });
+
+  it("remove returns void", async () => {
+    const result = await controller.remove("test-id-1");
+    expect(result).toBeUndefined();
+  });
+});
 `;
 }
 
