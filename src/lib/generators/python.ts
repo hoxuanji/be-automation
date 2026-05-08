@@ -45,6 +45,17 @@ settings = Settings()
         content: entityRouterFile(pascal, snake, kebab, nonPkFields),
       });
     }
+    files.push({ path: "tests/__init__.py", content: "" });
+    files.push({ path: "tests/conftest.py", content: confpyFile() });
+    for (const entity of entities) {
+      const snake = toSnake(entity.name);
+      const kebab = toKebab(entity.name);
+      const nonPkFields = entity.fields.filter((f) => !f.primaryKey);
+      files.push({
+        path: `tests/test_${snake}.py`,
+        content: entityTestFile(snake, kebab, nonPkFields),
+      });
+    }
   } else if (hasEntities) {
     files.push({ path: "app/models.py", content: sqlalchemyModels(config, entities) });
   }
@@ -260,6 +271,7 @@ ${deps}
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"
 httpx = "^0.27.0"
+pytest-asyncio = "^0.23.0"
 `;
 }
 
@@ -370,4 +382,115 @@ function handlerName(e: Endpoint) {
     .filter(Boolean)
     .map((p) => (p.startsWith(":") ? "by_" + p.slice(1) : p.replace(/[^a-zA-Z0-9]/g, "_")));
   return (e.method.toLowerCase() + "_" + parts.join("_")).replace(/_+$/g, "");
+}
+
+function confpyFile(): string {
+  return `import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.db import get_db
+from app.models import Base
+
+
+@pytest.fixture(scope="session")
+def engine():
+    _engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=_engine)
+    yield _engine
+    _engine.dispose()
+
+
+@pytest.fixture()
+def db(engine):
+    Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    session = Session()
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()
+
+
+@pytest.fixture()
+def client(db):
+    def _get_db():
+        yield db
+
+    app.dependency_overrides[get_db] = _get_db
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+`;
+}
+
+function pyTestVal(type: FieldType): string {
+  switch (type) {
+    case "string": case "text": return '"test value"';
+    case "number": return "1";
+    case "boolean": return "True";
+    case "uuid": return '"00000000-0000-0000-0000-000000000001"';
+    case "date": return '"2024-01-01T00:00:00"';
+    case "json": return "{}";
+  }
+}
+
+function buildPyPayload(fields: EntityField[], isUpdate = false): string {
+  const relevant = fields.slice(0, 4);
+  if (relevant.length === 0) return '{"name": "test"}';
+  const pairs = relevant.map((f) => {
+    const val = isUpdate
+      ? (f.type === "string" || f.type === "text" ? '"updated value"' : pyTestVal(f.type))
+      : pyTestVal(f.type);
+    return `"${f.name}": ${val}`;
+  });
+  return `{${pairs.join(", ")}}`;
+}
+
+function entityTestFile(snake: string, kebab: string, nonPkFields: EntityField[]): string {
+  const requiredFields = nonPkFields.filter((f) => f.required);
+  const createPayload = buildPyPayload(requiredFields);
+  const updatePayload = buildPyPayload(requiredFields, true);
+  return `def test_list_${snake}s_empty(client):
+    res = client.get("/${kebab}s/")
+    assert res.status_code == 200
+    assert isinstance(res.json(), list)
+
+
+def test_create_${snake}(client):
+    res = client.post("/${kebab}s/", json=${createPayload})
+    assert res.status_code == 201
+    data = res.json()
+    assert "id" in data
+    return data["id"]
+
+
+def test_get_${snake}(client):
+    created = client.post("/${kebab}s/", json=${createPayload}).json()
+    res = client.get(f"/${kebab}s/{created['id']}")
+    assert res.status_code == 200
+    assert res.json()["id"] == created["id"]
+
+
+def test_get_${snake}_not_found(client):
+    res = client.get("/${kebab}s/00000000-0000-0000-0000-000000000000")
+    assert res.status_code == 404
+
+
+def test_update_${snake}(client):
+    created = client.post("/${kebab}s/", json=${createPayload}).json()
+    res = client.put(f"/${kebab}s/{created['id']}", json=${updatePayload})
+    assert res.status_code == 200
+
+
+def test_delete_${snake}(client):
+    created = client.post("/${kebab}s/", json=${createPayload}).json()
+    res = client.delete(f"/${kebab}s/{created['id']}")
+    assert res.status_code == 204
+`;
 }
