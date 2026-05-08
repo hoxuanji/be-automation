@@ -6,6 +6,7 @@ import { useSearchParams } from "next/navigation";
 import {
   ChevronRight,
   Copy,
+  Download,
   FileCode,
   FileCog,
   FileJson,
@@ -160,6 +161,19 @@ export default function PreviewPage() {
   const [ghStatus, setGhStatus] = React.useState<GhStatus | null>(null);
   const [pushing, setPushing] = React.useState(false);
 
+  function downloadCollection() {
+    const file = generatedFiles.find((f) => f.path === "api/postman_collection.json");
+    if (!file) return;
+    const blob = new Blob([file.content], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${config.name}-postman.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast({ title: "Postman collection downloaded", description: "Import it in Postman → Collections → Import", kind: "success" });
+  }
+
   // Keep selected in sync when generated files change (e.g. config change)
   React.useEffect(() => {
     setSelected(defaultSelected);
@@ -291,6 +305,9 @@ export default function PreviewPage() {
                   <Badge variant="success">{flatFiles.length} files</Badge>
                   <Button variant="secondary" size="sm" onClick={copyPath}>
                     <Copy className="h-3.5 w-3.5" /> Copy path
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={downloadCollection}>
+                    <Download className="h-3.5 w-3.5" /> Postman
                   </Button>
                   <DownloadRepoButton />
                 </div>

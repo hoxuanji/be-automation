@@ -35,7 +35,7 @@ export const SelectableCard = React.forwardRef<
       {...props}
     >
       <div className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
+        <div className="flex min-w-0 items-start gap-3">
           {icon ? (
             <div
               className={cn(
@@ -48,8 +48,8 @@ export const SelectableCard = React.forwardRef<
               {icon}
             </div>
           ) : null}
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
+          <div className="min-w-0 overflow-hidden">
+            <div className="flex flex-wrap items-center gap-1.5">
               <span className="text-sm font-medium text-foreground">
                 {label}
               </span>

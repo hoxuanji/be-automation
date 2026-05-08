@@ -148,19 +148,21 @@ export default function BuilderPage() {
         <ArchitecturePreview />
 
         <div className="grid gap-6 lg:grid-cols-[1fr,320px]">
-          <Tabs defaultValue="runtime" className="space-y-4">
+          <Tabs defaultValue="runtime" className="space-y-4 min-w-0">
             <div className="relative">
               <TabsList className="w-full overflow-x-auto no-scrollbar justify-start">
                 {tabs.map((t) => {
                   const Icon = t.icon;
                   return (
-                    <TabsTrigger key={t.id} value={t.id}>
+                    <TabsTrigger key={t.id} value={t.id} className="shrink-0">
                       <Icon className="h-3.5 w-3.5" />
                       {t.label}
                     </TabsTrigger>
                   );
                 })}
               </TabsList>
+              {/* Fade gradient — signals more tabs are available off-screen */}
+              <div className="pointer-events-none absolute right-0 top-0 h-full w-16 bg-gradient-to-l from-[#0a0a0f] to-transparent xl:hidden" />
             </div>
 
             <TabsContent value="runtime">
@@ -391,7 +393,7 @@ function RuntimePanel() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             {languages.map((l) => (
               <SelectableCard
                 key={l.id}
@@ -429,7 +431,7 @@ function RuntimePanel() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2">
             {frameworksForLang.map((f) => (
               <SelectableCard
                 key={f.id}
@@ -478,7 +480,7 @@ function OptionPanel({
         <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           {options.map((o) => (
             <SelectableCard
               key={o.id}
@@ -521,7 +523,7 @@ function ApiPanel() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2">
             {apis.map((a) => (
               <SelectableCard
                 key={a.id}
@@ -545,7 +547,7 @@ function ApiPanel() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             {authProviders.map((a) => (
               <SelectableCard
                 key={a.id}
@@ -757,7 +759,7 @@ function ScalingPanel() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2">
             {scalingStrategies.map((s) => (
               <SelectableCard
                 key={s.id}
