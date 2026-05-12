@@ -1,5 +1,6 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { toPascal, toSnake, toKebab, toCamel } from "./types";
+import { needsAuth } from "./auth/providers";
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
@@ -99,9 +100,15 @@ function springFiles(
 ): GeneratedFile[] {
   const artifact = safe(config.name);
   const files: GeneratedFile[] = [];
+  const anyProtected = endpoints.some((e) => e.auth);
+  const withAuth = needsAuth(config, anyProtected);
 
-  files.push({ path: "pom.xml",    content: springPom(artifact) });
+  files.push({ path: "pom.xml",    content: springPom(artifact, withAuth) });
   files.push({ path: "Dockerfile", content: springDockerfile() });
+  files.push({
+    path: "src/main/resources/logback-spring.xml",
+    content: springLogbackJson(),
+  });
   files.push({
     path: "src/main/java/dev/helios/app/Application.java",
     content: springApplication(),
@@ -112,8 +119,15 @@ function springFiles(
   });
   files.push({
     path: "src/main/resources/application.properties",
-    content: springAppProperties(config.name),
+    content: springAppProperties(config.name, withAuth),
   });
+
+  if (withAuth) {
+    files.push({
+      path: "src/main/java/dev/helios/app/SecurityConfig.java",
+      content: springSecurityConfig(),
+    });
+  }
 
   // Scaffold-only endpoint controller when no entities but there are custom endpoints
   if (entities.length === 0 && endpoints.length > 0) {
@@ -150,7 +164,22 @@ function springFiles(
   return files;
 }
 
-function springPom(artifactId: string): string {
+function springPom(artifactId: string, withAuth = false): string {
+  const authDeps = withAuth
+    ? `    <!-- Spring Security + OAuth2 Resource Server validates JWTs via JWKS,
+         gated by \`spring.security.oauth2.resourceserver.jwt.issuer-uri\` in
+         application.properties. Works with Clerk, Auth0, Cognito, Firebase,
+         Keycloak, and Supabase Auth. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+    </dependency>
+`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
@@ -180,11 +209,20 @@ function springPom(artifactId: string): string {
       <artifactId>postgresql</artifactId>
       <scope>runtime</scope>
     </dependency>
+    <!-- Flyway runs src/main/resources/db/migration/*.sql on Spring Boot startup. -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-validation</artifactId>
     </dependency>
-    <dependency>
+${authDeps}    <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
       <scope>test</scope>
@@ -193,6 +231,13 @@ function springPom(artifactId: string): string {
       <groupId>com.h2database</groupId>
       <artifactId>h2</artifactId>
       <scope>test</scope>
+    </dependency>
+    <!-- JSON logging via logstash-logback-encoder — produces one JSON
+         object per log line, parseable by Loki / Datadog / CloudWatch. -->
+    <dependency>
+      <groupId>net.logstash.logback</groupId>
+      <artifactId>logstash-logback-encoder</artifactId>
+      <version>8.0</version>
     </dependency>
   </dependencies>
   <build>
@@ -217,9 +262,37 @@ RUN mvn package -DskipTests -q
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-COPY --from=build /src/target/*.jar app.jar
+RUN groupadd --system --gid 1001 app \\
+ && useradd --system --uid 1001 --gid app --home /home/app --shell /bin/false app
+COPY --from=build --chown=app:app /src/target/*.jar app.jar
 EXPOSE 8080
+USER app
 ENTRYPOINT ["java", "-jar", "app.jar"]
+`;
+}
+
+function springLogbackJson(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logback config. Uses logstash-logback-encoder to emit one JSON object per
+  line — log aggregators (Loki, Datadog, CloudWatch) parse this natively.
+  Spring Boot auto-loads this file because it's named logback-spring.xml.
+-->
+<configuration>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <!-- Drop noisy caller-class metadata; keep everything else default. -->
+      <includeCallerData>false</includeCallerData>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="STDOUT"/>
+  </root>
+
+  <!-- Hide Spring's startup banner lines unless DEBUG is enabled. -->
+  <logger name="org.springframework.boot.StartupInfoLogger" level="INFO"/>
+</configuration>
 `;
 }
 
@@ -256,13 +329,127 @@ public class HealthController {
 `;
 }
 
-function springAppProperties(appName: string): string {
+function springAppProperties(appName: string, withAuth = false): string {
+  const authProps = withAuth
+    ? `
+# ─── OAuth2 Resource Server ──────────────────────────────────────────────────
+# Spring Security validates inbound JWTs against this JWKS / issuer. Point
+# AUTH_ISSUER + AUTH_JWKS_URL at Clerk, Auth0, Cognito, Firebase, Keycloak, or
+# Supabase Auth — the same config shape handles all of them.
+spring.security.oauth2.resourceserver.jwt.issuer-uri=\${AUTH_ISSUER:}
+spring.security.oauth2.resourceserver.jwt.jwk-set-uri=\${AUTH_JWKS_URL:}
+# Optional: when set, SecurityConfig wires a custom OAuth2TokenValidator that
+# checks the \`aud\` claim against this value.
+auth.expected-audience=\${AUTH_AUDIENCE:}
+`
+    : "";
   return `spring.application.name=${appName}
 spring.datasource.url=\${DATABASE_URL:jdbc:postgresql://localhost:5432/${appName}}
 spring.datasource.driver-class-name=org.postgresql.Driver
-spring.jpa.hibernate.ddl-auto=update
+# JPA: Flyway handles schema so \`ddl-auto=validate\` is safer than \`update\`.
+spring.jpa.hibernate.ddl-auto=validate
 spring.jpa.show-sql=false
+
+# HikariCP — sized for a single-container deployment. Tune when scaling out
+# or when fronted by PgBouncer.
+spring.datasource.hikari.maximum-pool-size=20
+spring.datasource.hikari.minimum-idle=2
+spring.datasource.hikari.connection-timeout=10000
+spring.datasource.hikari.idle-timeout=600000
+spring.datasource.hikari.max-lifetime=1800000
+spring.datasource.hikari.validation-timeout=5000
+
+# Flyway auto-runs src/main/resources/db/migration/V*.sql on startup.
+spring.flyway.enabled=true
+spring.flyway.baseline-on-migrate=true
+${authProps}
 server.port=\${PORT:8080}
+`;
+}
+
+function springSecurityConfig(): string {
+  return `package dev.helios.app;
+
+import java.util.List;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.oauth2.core.OAuth2Error;
+import org.springframework.security.oauth2.core.OAuth2TokenValidator;
+import org.springframework.security.oauth2.core.OAuth2TokenValidatorResult;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtValidators;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
+import org.springframework.security.web.SecurityFilterChain;
+
+/**
+ * Spring Security config: treat the app as an OAuth2 Resource Server. Spring
+ * fetches the JWKS lazily, caches keys per RFC 7517, and validates signature
+ * + iss + exp by default. We add an optional audience check on top.
+ *
+ * /health stays public; everything else requires an authenticated JWT.
+ */
+@Configuration
+public class SecurityConfig {
+
+    @Value("\${spring.security.oauth2.resourceserver.jwt.jwk-set-uri:}")
+    private String jwkSetUri;
+
+    @Value("\${spring.security.oauth2.resourceserver.jwt.issuer-uri:}")
+    private String issuerUri;
+
+    @Value("\${auth.expected-audience:}")
+    private String expectedAudience;
+
+    @Bean
+    SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/health", "/actuator/**").permitAll()
+                .anyRequest().authenticated())
+            // Stateless API — disable CSRF since we don't use cookie-based sessions.
+            .csrf(csrf -> csrf.disable())
+            .oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> {}));
+        return http.build();
+    }
+
+    @Bean
+    JwtDecoder jwtDecoder() {
+        NimbusJwtDecoder decoder = NimbusJwtDecoder.withJwkSetUri(jwkSetUri).build();
+        OAuth2TokenValidator<Jwt> defaultValidator = JwtValidators.createDefaultWithIssuer(issuerUri);
+        if (expectedAudience == null || expectedAudience.isBlank()) {
+            decoder.setJwtValidator(defaultValidator);
+        } else {
+            decoder.setJwtValidator(new DelegatingAudienceValidator(defaultValidator, expectedAudience));
+        }
+        return decoder;
+    }
+
+    private static final class DelegatingAudienceValidator implements OAuth2TokenValidator<Jwt> {
+        private final OAuth2TokenValidator<Jwt> delegate;
+        private final String audience;
+
+        DelegatingAudienceValidator(OAuth2TokenValidator<Jwt> delegate, String audience) {
+            this.delegate = delegate;
+            this.audience = audience;
+        }
+
+        @Override
+        public OAuth2TokenValidatorResult validate(Jwt jwt) {
+            OAuth2TokenValidatorResult base = delegate.validate(jwt);
+            if (base.hasErrors()) return base;
+            List<String> audList = jwt.getAudience();
+            if (audList != null && audList.contains(audience)) {
+                return OAuth2TokenValidatorResult.success();
+            }
+            return OAuth2TokenValidatorResult.failure(
+                new OAuth2Error("invalid_token", "audience mismatch", null));
+        }
+    }
+}
 `;
 }
 

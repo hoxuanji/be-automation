@@ -1,5 +1,6 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { toPascal, toSnake, toKebab, toCamel } from "./types";
+import { needsAuth } from "./auth/providers";
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
@@ -101,8 +102,11 @@ RUN gradle shadowJar --no-daemon -q
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-COPY --from=build /src/build/libs/*-all.jar app.jar
+RUN groupadd --system --gid 1001 app \\
+ && useradd --system --uid 1001 --gid app --home /home/app --shell /bin/false app
+COPY --from=build --chown=app:app /src/build/libs/*-all.jar app.jar
 EXPOSE 8080
+USER app
 ENTRYPOINT ["java", "-jar", "app.jar"]
 `;
 }
@@ -153,16 +157,41 @@ import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.SchemaUtils
 import org.jetbrains.exposed.sql.transactions.transaction
 
+/**
+ * Connect to Postgres with retry-on-startup. Kubernetes pods often boot
+ * before the DB accepts connections; HikariCP would otherwise fail fast
+ * and crash the app, triggering a pod restart loop.
+ */
 fun initDatabase() {
     val url = System.getenv("DATABASE_URL") ?: "jdbc:postgresql://localhost:5432/${appName}"
     val config = HikariConfig().apply {
         jdbcUrl = url
         maximumPoolSize = 20
+        minimumIdle = 2
+        connectionTimeout = 10_000
+        idleTimeout = 600_000
+        maxLifetime = 1_800_000
+        validationTimeout = 5_000
     }
-    Database.connect(HikariDataSource(config))
-    transaction {
-        SchemaUtils.createMissingTablesAndColumns(${schemaArg})
+
+    var delay = 200L
+    var lastErr: Throwable? = null
+    for (attempt in 1..6) {
+        try {
+            val ds = HikariDataSource(config)
+            Database.connect(ds)
+            transaction {
+                SchemaUtils.createMissingTablesAndColumns(${schemaArg})
+            }
+            return
+        } catch (e: Throwable) {
+            lastErr = e
+            println("db: connect attempt \${attempt}/6 failed: \${e.message} — retrying in \${delay}ms")
+            Thread.sleep(delay)
+            delay = minOf(delay * 2, 5_000L)
+        }
     }
+    throw IllegalStateException("db: could not connect after retries", lastErr)
 }
 `;
 }
@@ -470,14 +499,46 @@ function springKtFiles(
   const safe = safeName(config.name);
   const pkg = `dev.helios.${safe.replace(/-/g, "_")}`;
   const files: GeneratedFile[] = [];
+  const anyProtected = endpoints.some((e) => e.auth);
+  const withAuth = needsAuth(config, anyProtected);
 
-  files.push({ path: "build.gradle.kts", content: springKtBuildGradle(safe) });
+  files.push({ path: "build.gradle.kts", content: springKtBuildGradle(safe, withAuth) });
   files.push({ path: "settings.gradle.kts", content: `rootProject.name = "${safe}"\n` });
   files.push({ path: "Dockerfile", content: springKtDockerfile() });
+  files.push({
+    path: "src/main/resources/logback-spring.xml",
+    content: `<?xml version="1.0" encoding="UTF-8"?>
+<!-- JSON logging via logstash-logback-encoder. Spring Boot auto-loads this file. -->
+<configuration>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <includeCallerData>false</includeCallerData>
+    </encoder>
+  </appender>
+  <root level="INFO">
+    <appender-ref ref="STDOUT"/>
+  </root>
+</configuration>
+`,
+  });
   files.push({
     path: `src/main/kotlin/${pkgPath(pkg)}/Application.kt`,
     content: springKtApplication(pkg),
   });
+
+  // Spring Boot looks for application.properties on the classpath; emit one
+  // that wires the OAuth2 resource server when auth is enabled.
+  files.push({
+    path: "src/main/resources/application.properties",
+    content: springKtAppProperties(safe, withAuth),
+  });
+
+  if (withAuth) {
+    files.push({
+      path: `src/main/kotlin/${pkgPath(pkg)}/SecurityConfig.kt`,
+      content: springKtSecurityConfig(pkg),
+    });
+  }
 
   for (const entity of entities) {
     const pascal = toPascal(entity.name);
@@ -507,8 +568,15 @@ function pkgPath(pkg: string): string {
   return pkg.replace(/\./g, "/");
 }
 
-function springKtBuildGradle(appName: string): string {
+function springKtBuildGradle(appName: string, withAuth = false): string {
   void appName;
+  const authDeps = withAuth
+    ? `    // OAuth2 Resource Server — validates inbound JWTs against the configured
+    // JWKS. Works with Clerk, Auth0, Cognito, Firebase, Keycloak, Supabase Auth.
+    implementation("org.springframework.boot:spring-boot-starter-security")
+    implementation("org.springframework.boot:spring-boot-starter-oauth2-resource-server")
+`
+    : "";
   return `plugins {
     kotlin("jvm") version "2.0.21"
     kotlin("plugin.spring") version "2.0.21"
@@ -525,7 +593,12 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
-    runtimeOnly("org.postgresql:postgresql:42.7.4")
+    // Flyway auto-runs migrations from src/main/resources/db/migration/ on startup.
+    implementation("org.flywaydb:flyway-core")
+    implementation("org.flywaydb:flyway-database-postgresql")
+    // JSON logging — logstash-logback-encoder hooks into Spring's Logback.
+    implementation("net.logstash.logback:logstash-logback-encoder:8.0")
+${authDeps}    runtimeOnly("org.postgresql:postgresql:42.7.4")
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("com.h2database:h2")
 }
@@ -541,6 +614,100 @@ tasks.withType<Test> { useJUnitPlatform() }
 `;
 }
 
+function springKtAppProperties(appName: string, withAuth = false): string {
+  const authProps = withAuth
+    ? `
+# ─── OAuth2 Resource Server ──────────────────────────────────────────────────
+spring.security.oauth2.resourceserver.jwt.issuer-uri=\${AUTH_ISSUER:}
+spring.security.oauth2.resourceserver.jwt.jwk-set-uri=\${AUTH_JWKS_URL:}
+auth.expected-audience=\${AUTH_AUDIENCE:}
+`
+    : "";
+  return `spring.application.name=${appName}
+spring.datasource.url=\${DATABASE_URL:jdbc:postgresql://localhost:5432/${appName}}
+spring.datasource.driver-class-name=org.postgresql.Driver
+spring.jpa.hibernate.ddl-auto=validate
+spring.jpa.show-sql=false
+
+spring.datasource.hikari.maximum-pool-size=20
+spring.datasource.hikari.minimum-idle=2
+spring.datasource.hikari.connection-timeout=10000
+
+spring.flyway.enabled=true
+spring.flyway.baseline-on-migrate=true
+${authProps}
+server.port=\${PORT:8080}
+`;
+}
+
+function springKtSecurityConfig(pkg: string): string {
+  return `package ${pkg}
+
+import org.springframework.beans.factory.annotation.Value
+import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Configuration
+import org.springframework.security.config.annotation.web.builders.HttpSecurity
+import org.springframework.security.oauth2.core.OAuth2Error
+import org.springframework.security.oauth2.core.OAuth2TokenValidator
+import org.springframework.security.oauth2.core.OAuth2TokenValidatorResult
+import org.springframework.security.oauth2.jwt.Jwt
+import org.springframework.security.oauth2.jwt.JwtDecoder
+import org.springframework.security.oauth2.jwt.JwtValidators
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder
+import org.springframework.security.web.SecurityFilterChain
+
+/**
+ * OAuth2 Resource Server. Spring validates JWT signature, iss, and exp
+ * automatically; we layer an optional audience check on top.
+ *
+ * /health stays public; everything else requires a valid Bearer token.
+ */
+@Configuration
+class SecurityConfig(
+    @Value("\\\${spring.security.oauth2.resourceserver.jwt.jwk-set-uri:}") private val jwkSetUri: String,
+    @Value("\\\${spring.security.oauth2.resourceserver.jwt.issuer-uri:}") private val issuerUri: String,
+    @Value("\\\${auth.expected-audience:}") private val expectedAudience: String,
+) {
+    @Bean
+    fun filterChain(http: HttpSecurity): SecurityFilterChain {
+        http
+            .authorizeHttpRequests {
+                it.requestMatchers("/health", "/actuator/**").permitAll()
+                  .anyRequest().authenticated()
+            }
+            .csrf { it.disable() }
+            .oauth2ResourceServer { rs -> rs.jwt { } }
+        return http.build()
+    }
+
+    @Bean
+    fun jwtDecoder(): JwtDecoder {
+        val decoder = NimbusJwtDecoder.withJwkSetUri(jwkSetUri).build()
+        val defaultValidator = JwtValidators.createDefaultWithIssuer(issuerUri)
+        decoder.setJwtValidator(
+            if (expectedAudience.isBlank()) defaultValidator
+            else AudienceValidator(defaultValidator, expectedAudience)
+        )
+        return decoder
+    }
+
+    private class AudienceValidator(
+        private val delegate: OAuth2TokenValidator<Jwt>,
+        private val audience: String,
+    ) : OAuth2TokenValidator<Jwt> {
+        override fun validate(jwt: Jwt): OAuth2TokenValidatorResult {
+            val base = delegate.validate(jwt)
+            if (base.hasErrors()) return base
+            return if (jwt.audience?.contains(audience) == true) OAuth2TokenValidatorResult.success()
+            else OAuth2TokenValidatorResult.failure(
+                OAuth2Error("invalid_token", "audience mismatch", null)
+            )
+        }
+    }
+}
+`;
+}
+
 function springKtDockerfile(): string {
   return `FROM gradle:8.10-jdk21 AS build
 WORKDIR /src
@@ -551,8 +718,11 @@ RUN gradle bootJar --no-daemon -q
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-COPY --from=build /src/build/libs/*.jar app.jar
+RUN groupadd --system --gid 1001 app \\
+ && useradd --system --uid 1001 --gid app --home /home/app --shell /bin/false app
+COPY --from=build --chown=app:app /src/build/libs/*.jar app.jar
 EXPOSE 8080
+USER app
 ENTRYPOINT ["java", "-jar", "app.jar"]
 `;
 }

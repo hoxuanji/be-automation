@@ -2,20 +2,34 @@ import { NextResponse, type NextRequest } from "next/server";
 import crypto from "crypto";
 import { signToken } from "@/lib/auth";
 import { upsertUserByGithub } from "@/lib/db";
+import { getJwtSecret } from "@/lib/env";
 
 export const runtime = "nodejs";
 
+const STATE_TTL_SEC = 600; // must match the issuer in src/app/api/auth/github/route.ts
+const IS_PROD = process.env.NODE_ENV === "production";
+
 function verifyState(state: string): { mode: string } | null {
-  // State format: nonce:mode:sig  (sig = first 24 hex chars of HMAC-SHA256)
-  const lastColon = state.lastIndexOf(":");
-  if (lastColon < 0) return null;
-  const sig = state.slice(lastColon + 1);
-  const payload = state.slice(0, lastColon);
-  const secret = process.env.JWT_SECRET ?? "helios-dev-secret-change-in-production";
-  const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex").slice(0, 24);
-  if (sig !== expected) return null;
-  const modeStart = payload.lastIndexOf(":");
-  const mode = modeStart >= 0 ? payload.slice(modeStart + 1) : "connect";
+  // State format: `${nonce}:${mode}:${issued}:${sig}` — see issuer for details.
+  // Older states had no `issued` segment; those are rejected outright so
+  // a mix-and-match attacker can't replay a pre-timestamp state.
+  const parts = state.split(":");
+  if (parts.length !== 4) return null;
+  const [nonce, mode, issuedStr, sig] = parts;
+  if (!nonce || !mode || !issuedStr || !sig) return null;
+  const payload = `${nonce}:${mode}:${issuedStr}`;
+  const expected = crypto
+    .createHmac("sha256", getJwtSecret())
+    .update(payload)
+    .digest("hex")
+    .slice(0, 24);
+  // Constant-time compare to avoid signature timing leaks.
+  if (sig.length !== expected.length) return null;
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  const issued = Number(issuedStr);
+  if (!Number.isFinite(issued)) return null;
+  const now = Math.floor(Date.now() / 1000);
+  if (Math.abs(now - issued) > STATE_TTL_SEC) return null;
   return { mode };
 }
 
@@ -104,7 +118,7 @@ export async function GET(req: NextRequest) {
       const jwtToken = await signToken({ sub: user.id, email: user.email, name: user.name });
 
       const maxAge = 86400 * 7;
-      const cookieOpts = `Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Lax`;
+      const cookieOpts = `Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${IS_PROD ? "; Secure" : ""}`;
       const headers = new Headers({ "Content-Type": "text/html" });
       headers.append("Set-Cookie", `helios_token=${jwtToken}; ${cookieOpts}`);
       headers.append("Set-Cookie", `github_token=${ghToken}; ${cookieOpts}`);
@@ -121,7 +135,7 @@ export async function GET(req: NextRequest) {
     const dest = returnTo && returnTo.startsWith("/") ? returnTo : "/preview?github=connected";
 
     const maxAge = 86400 * 7;
-    const cookieOpts = `Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Lax`;
+    const cookieOpts = `Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${IS_PROD ? "; Secure" : ""}`;
     const headers = new Headers({ "Content-Type": "text/html" });
     headers.append("Set-Cookie", `github_token=${ghToken}; ${cookieOpts}`);
     headers.append("Set-Cookie", `github_return_to=; Path=/; Max-Age=0`);

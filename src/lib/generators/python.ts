@@ -1,16 +1,25 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { toPascal, toSnake, toKebab } from "./types";
+import { pyGrpcFiles } from "./grpc/python";
+import { needsAuth } from "./auth/providers";
 
 export function pythonFiles(
   config: StackConfig,
   endpoints: Endpoint[],
   entities: Entity[] = []
 ): GeneratedFile[] {
+  // gRPC mode replaces the FastAPI / Django / Litestar bootstrap entirely.
+  if (config.api === "grpc") {
+    return pyGrpcFiles(config, entities);
+  }
+
   const files: GeneratedFile[] = [];
+  const anyProtected = endpoints.some((e) => e.auth);
+  const withAuth = needsAuth(config, anyProtected);
   const hasEntities = entities.length > 0;
   const isMongo = /mongo/.test(config.database);
 
-  files.push({ path: "pyproject.toml", content: pyproject(config, hasEntities) });
+  files.push({ path: "pyproject.toml", content: pyproject(config, hasEntities, withAuth) });
   files.push({ path: "Dockerfile", content: pyDockerfile() });
   files.push({ path: "app/__init__.py", content: "" });
   files.push({
@@ -65,20 +74,123 @@ settings = Settings()
     content: appMain(config, endpoints, hasEntities && !isMongo ? entities : []),
   });
 
+  if (withAuth) {
+    files.push({ path: "app/auth.py", content: pyAuthModule() });
+  }
+
+  files.push({
+    path: "app/logging_config.py",
+    content: `"""Structured JSON logging for the FastAPI app.
+
+stdlib-only — emits one JSON object per line on stdout, which Loki /
+CloudWatch / Datadog / GCP Logging all parse natively. Uvicorn's access
+log is redirected through this same handler so every line is JSON.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+from datetime import datetime, timezone
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": datetime.now(tz=timezone.utc).isoformat(timespec="milliseconds"),
+            "level": record.levelname.lower(),
+            "msg": record.getMessage(),
+            "logger": record.name,
+        }
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        # Merge structured \`extra={...}\` fields without stomping core keys.
+        for key, value in record.__dict__.items():
+            if key in ("args", "asctime", "created", "exc_info", "exc_text", "filename",
+                      "funcName", "levelname", "levelno", "lineno", "message", "module",
+                      "msecs", "msg", "name", "pathname", "process", "processName",
+                      "relativeCreated", "stack_info", "thread", "threadName", "taskName"):
+                continue
+            if key not in payload:
+                payload[key] = value
+        return json.dumps(payload, default=str)
+
+
+def configure_logging() -> None:
+    level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(JsonFormatter())
+    root = logging.getLogger()
+    root.handlers = [handler]
+    root.setLevel(level)
+    # Uvicorn installs its own handlers on these loggers; replace them so
+    # access logs are JSON too.
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        uv = logging.getLogger(name)
+        uv.handlers = [handler]
+        uv.propagate = False
+`,
+  });
+
   return files;
 }
 
 function dbFile(config: StackConfig): string {
   const isSqlite = /sqlite/.test(config.database);
-  const connectArgs = isSqlite
-    ? `\nconnect_args = {"check_same_thread": False} if "sqlite" in (settings.database_url or "") else {}`
-    : "";
-  return `from sqlalchemy import create_engine
+  return `"""Database connection helper.
+
+Opens a SQLAlchemy engine with production-minded defaults:
+  - pool_pre_ping to detect stale connections after a DB restart.
+  - Modest pool_size / max_overflow that match a single-container deployment.
+    Tune when running behind a PgBouncer or a read replica.
+  - Startup retry loop — Kubernetes pods often boot before the DB is ready.
+"""
+from __future__ import annotations
+
+import logging
+import time
+
+from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
+
 from .config import settings
-${connectArgs ? connectArgs + "\n" : ""}
+
+log = logging.getLogger(__name__)
+
 _url = settings.database_url or "sqlite:///./app.db"
-engine = create_engine(_url${isSqlite ? ', connect_args={"check_same_thread": False}' : ""})
+_is_sqlite = "sqlite" in _url
+
+_engine_kwargs = {
+    "pool_pre_ping": True,
+    ${isSqlite ? '"connect_args": {"check_same_thread": False},' : '"pool_size": 10,\n    "max_overflow": 20,\n    "pool_recycle": 1800,'}
+}
+
+engine = create_engine(_url, **_engine_kwargs)
+
+
+def _wait_for_db(max_attempts: int = 6, base_delay: float = 0.5) -> None:
+    """Retry initial connection with exponential backoff — up to ~30s total."""
+    if _is_sqlite:
+        return  # SQLite opens lazily; no server to wait for.
+    delay = base_delay
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with engine.connect() as conn:
+                conn.exec_driver_sql("SELECT 1")
+            return
+        except OperationalError as exc:
+            if attempt == max_attempts:
+                raise
+            log.warning("db: connection attempt %d/%d failed (%s); retrying in %.1fs",
+                        attempt, max_attempts, exc.__class__.__name__, delay)
+            time.sleep(delay)
+            delay = min(delay * 2, 5.0)
+
+
+_wait_for_db()
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -248,17 +360,22 @@ function saColType(t: FieldType, isPostgres: boolean): string {
   }
 }
 
-function pyproject(config: StackConfig, withModels = false) {
+function pyproject(config: StackConfig, withModels = false, withAuth = false) {
   const isPostgres = /postgres|neon|supabase|cockroach/.test(config.database);
   const sqlDeps = withModels && !(/mongo/.test(config.database))
     ? `\nsqlalchemy = "^2.0.0"\nalembic = "^1.13.0"\n${isPostgres ? `psycopg2-binary = "^2.9.0"\n` : `aiosqlite = "^0.20.0"\n`}`
     : "";
+  const authDeps = withAuth
+    // PyJWT 2.8+ ships PyJWKClient with key caching; `crypto` pulls in
+    // cryptography for RS256/ES256 signatures.
+    ? `\npyjwt = { version = "^2.9.0", extras = ["crypto"] }`
+    : "";
   const deps =
     config.framework === "fastapi"
-      ? `fastapi = "^0.115.0"\nuvicorn = { extras = ["standard"], version = "^0.30.0" }\npydantic = "^2.9.0"\npydantic-settings = "^2.5.0"${sqlDeps}`
+      ? `fastapi = "^0.115.0"\nuvicorn = { extras = ["standard"], version = "^0.30.0" }\npydantic = "^2.9.0"\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}`
       : config.framework === "litestar"
-      ? `litestar = { extras = ["standard"], version = "^2.12.0" }\npydantic-settings = "^2.5.0"${sqlDeps}`
-      : `django = "^5.1.0"\npydantic-settings = "^2.5.0"${sqlDeps}`;
+      ? `litestar = { extras = ["standard"], version = "^2.12.0" }\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}`
+      : `django = "^5.1.0"\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}`;
   return `[project]
 name = "${config.name}"
 version = "0.1.0"
@@ -275,14 +392,94 @@ pytest-asyncio = "^0.23.0"
 `;
 }
 
+function pyAuthModule(): string {
+  return `"""JWT verification for incoming requests.
+
+Uses PyJWT's built-in PyJWKClient which fetches and caches keys from the
+configured JWKS endpoint. Works with any OIDC / OAuth2 provider that
+publishes a JWKS URL — Clerk, Auth0, Cognito, Firebase, Keycloak, and
+Supabase Auth (asymmetric mode) are all supported out of the box.
+"""
+from __future__ import annotations
+
+import os
+from functools import lru_cache
+
+import jwt
+from fastapi import Header, HTTPException, status
+from jwt import PyJWKClient
+
+
+@lru_cache(maxsize=1)
+def _jwks_client() -> PyJWKClient:
+    url = os.environ.get("AUTH_JWKS_URL")
+    if not url:
+        raise RuntimeError("AUTH_JWKS_URL is not set")
+    # PyJWKClient caches keys in-process and refreshes on unknown kids.
+    return PyJWKClient(url, cache_keys=True, lifespan=3600)
+
+
+def _verify(token: str) -> dict:
+    issuer = os.environ.get("AUTH_ISSUER")
+    audience = os.environ.get("AUTH_AUDIENCE")  # optional
+    if not issuer:
+        raise RuntimeError("AUTH_ISSUER is not set")
+
+    signing_key = _jwks_client().get_signing_key_from_jwt(token).key
+    return jwt.decode(
+        token,
+        signing_key,
+        algorithms=["RS256", "ES256"],
+        issuer=issuer,
+        audience=audience if audience else None,
+        options={"verify_aud": bool(audience)},
+        leeway=30,
+    )
+
+
+async def auth_required(authorization: str | None = Header(default=None)) -> dict:
+    """FastAPI dependency that enforces a valid Bearer JWT.
+
+    Usage::
+
+        @app.get("/me")
+        async def me(claims: dict = Depends(auth_required)):
+            return {"sub": claims["sub"]}
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="missing_or_malformed_token")
+    token = authorization[len("Bearer "):].strip()
+    try:
+        return _verify(token)
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="invalid_token")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=str(exc))
+`;
+}
+
 function pyDockerfile() {
   return `# syntax=docker/dockerfile:1
 FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+
+# Create a non-root user to run the app. Pinned UID/GID keeps volume
+# permissions deterministic across hosts.
+RUN groupadd --system --gid 1001 app \\
+ && useradd --system --uid 1001 --gid app --home /home/app --shell /bin/false app \\
+ && mkdir -p /home/app && chown -R app:app /home/app
+
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir poetry==1.8.3 && poetry config virtualenvs.create false && poetry install --only main --no-root || pip install fastapi uvicorn pydantic pydantic-settings
-COPY . .
+RUN pip install --no-cache-dir poetry==1.8.3 \\
+ && poetry config virtualenvs.create false \\
+ && (poetry install --only main --no-root || pip install fastapi uvicorn pydantic pydantic-settings)
+COPY --chown=app:app . .
+
+USER app
 EXPOSE 8080
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
 `;
@@ -314,6 +511,7 @@ async def ${handlerName(e)}(${paramsDecl}):
 from .config import settings
 from .db import engine
 from .models import Base
+from .auth import auth_required
 ${routerImports}
 
 Base.metadata.create_all(bind=engine)
@@ -321,11 +519,6 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title=settings.app_name)
 
 ${routerIncludes}
-
-
-async def auth_required(authorization: str | None = Header(default=None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="unauthorized")
 
 
 @app.get("/health")
@@ -336,15 +529,35 @@ ${routes}
 `;
     }
 
-    return `from fastapi import FastAPI, Depends, HTTPException, Header
+    return `from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Depends, HTTPException, Header
+
 from .config import settings
+from .logging_config import configure_logging
+from .auth import auth_required
 
-app = FastAPI(title=settings.app_name)
+
+configure_logging()
 
 
-async def auth_required(authorization: str | None = Header(default=None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="unauthorized")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Lifespan context — runs before the first request (startup) and after
+    the last in-flight request drains (shutdown).
+
+    Uvicorn already responds to SIGTERM by initiating a graceful shutdown,
+    but it only invokes lifespan hooks if the app opts in to the lifespan
+    protocol. By passing \`lifespan=lifespan\` below we guarantee that any
+    cleanup (DB pool.dispose(), worker cancellation, etc.) runs on the way
+    out — essential for K8s rolling deploys.
+    """
+    # Startup — add resource init here (DB warmup, cache pre-fill, …).
+    yield
+    # Shutdown — add resource teardown here (close DB pools, flush buffers, …).
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 
 @app.get("/health")
@@ -355,13 +568,24 @@ ${routes}
 `;
   }
   if (config.framework === "litestar") {
-    return `from litestar import Litestar, get
+    return `from contextlib import asynccontextmanager
+
+from litestar import Litestar, get
+
+
+@asynccontextmanager
+async def lifespan(_app: Litestar):
+    # Startup — init resources here.
+    yield
+    # Shutdown — release resources here. Runs on SIGTERM from uvicorn.
+
 
 @get("/health")
 async def health() -> dict:
     return {"ok": True}
 
-app = Litestar(route_handlers=[health])
+
+app = Litestar(route_handlers=[health], lifespan=[lifespan])
 `;
   }
   // django minimal

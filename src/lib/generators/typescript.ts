@@ -1,5 +1,7 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { safeName, toPascal, toKebab, toCamel } from "./types";
+import { tsGrpcFiles } from "./grpc/typescript";
+import { needsAuth } from "./auth/providers";
 
 function tsMockField(name: string, type: FieldType): string {
   switch (type) {
@@ -24,10 +26,24 @@ export function typescriptFiles(
   endpoints: Endpoint[],
   entities: Entity[] = []
 ): GeneratedFile[] {
+  // gRPC mode replaces the framework-specific HTTP bootstrap with a @grpc/grpc-js
+  // server. Prisma schema is still useful so we keep it — the generated
+  // service stubs can plug into PrismaClient without further ceremony.
+  if (config.api === "grpc") {
+    const files: GeneratedFile[] = [];
+    if (entities.length > 0) {
+      files.push(...prismaFiles(config, entities));
+    }
+    files.push(...tsGrpcFiles(config, entities));
+    return files;
+  }
+
   const name = safeName(config.name);
   const files: GeneratedFile[] = [];
+  const anyProtected = endpoints.some((e) => e.auth);
+  const withAuth = needsAuth(config, anyProtected);
 
-  files.push({ path: "package.json", content: pkgJson(name, config.framework, entities.length > 0, config.database) });
+  files.push({ path: "package.json", content: pkgJson(name, config.framework, entities.length > 0, config.database, withAuth) });
   files.push({ path: "tsconfig.json", content: tsconfig() });
   files.push({ path: "Dockerfile", content: tsDockerfile() });
   files.push({ path: "vitest.config.ts", content: vitestConfig() });
@@ -538,17 +554,20 @@ function prismaType(t: FieldType): string {
   }
 }
 
-function pkgJson(name: string, framework: string, withPrisma = false, _db = "") {
+function pkgJson(name: string, framework: string, withPrisma = false, _db = "", withAuth = false) {
   const deps: Record<string, Record<string, string>> = {
     nestjs: {
       "@nestjs/common": "^10.4.0",
       "@nestjs/core": "^10.4.0",
       "@nestjs/platform-express": "^10.4.0",
+      helmet: "^8.0.0",
       "reflect-metadata": "^0.2.2",
       "rxjs": "^7.8.1",
     },
     express: {
       express: "^4.21.0",
+      helmet: "^8.0.0",
+      cors: "^2.8.5",
       pino: "^9.5.0",
       "pino-http": "^10.3.0",
       zod: "^3.24.1",
@@ -567,6 +586,8 @@ function pkgJson(name: string, framework: string, withPrisma = false, _db = "") 
   const dep = {
     ...(deps[framework] ?? deps.hono),
     ...(withPrisma ? { "@prisma/client": "^5.22.0" } : {}),
+    // jose handles JWKS fetch + cache + JWT verify for every supported provider.
+    ...(withAuth ? { jose: "^5.9.6" } : {}),
   };
   return (
     JSON.stringify(
@@ -580,8 +601,19 @@ function pkgJson(name: string, framework: string, withPrisma = false, _db = "") 
           build: "tsc -p tsconfig.json",
           test: "vitest run",
           "test:coverage": "vitest run --coverage",
-          ...(withPrisma ? { "db:generate": "prisma generate", "db:migrate": "prisma migrate dev" } : {}),
+          ...(withPrisma
+            ? {
+                "db:generate": "prisma generate",
+                "db:migrate": "prisma migrate dev",
+                "db:deploy": "prisma migrate deploy",
+                "db:seed": "prisma db seed",
+              }
+            : {}),
         },
+        // `prisma db seed` reads this to find the seed script.
+        ...(withPrisma
+          ? { prisma: { seed: "tsx prisma/seed.ts" } }
+          : {}),
         dependencies: dep,
         devDependencies: {
           "@types/node": "^22.10.5",
@@ -591,7 +623,7 @@ function pkgJson(name: string, framework: string, withPrisma = false, _db = "") 
           "@vitest/coverage-v8": "^2.0.0",
           supertest: "^7.0.0",
           "@types/supertest": "^6.0.0",
-          ...(framework === "express" ? { "@types/express": "^4.17.21" } : {}),
+          ...(framework === "express" ? { "@types/express": "^4.17.21", "@types/cors": "^2.8.17" } : {}),
           ...(withPrisma ? { prisma: "^5.22.0" } : {}),
         },
       },
@@ -966,18 +998,40 @@ function nestjsFiles(config: StackConfig, endpoints: Endpoint[], entities: Entit
     .join("\n");
   const entityModuleList = entities.map((e) => `${e.name}Module`).join(", ");
 
+  const anyProtected = endpoints.some((e) => e.auth);
+  const withAuth = needsAuth(config, anyProtected);
+
   return [
     {
       path: "src/main.ts",
       content: `import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
+import helmet from "helmet";
 import { AppModule } from "./app.module";
 
+// Comma-separated list of origins, e.g. "https://app.example.com,https://admin.example.com".
+// Omit to keep CORS locked down — the app defaults to same-origin only.
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ?.split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { cors: true });
+  const app = await NestFactory.create(AppModule, {
+    cors: allowedOrigins && allowedOrigins.length > 0
+      ? { origin: allowedOrigins, credentials: true }
+      : false,
+  });
+  app.use(helmet());
+  // enableShutdownHooks wires Node's SIGTERM/SIGINT into the Nest application
+  // lifecycle: controllers, providers, and the HTTP listener all receive
+  // onModuleDestroy / onApplicationShutdown callbacks before the process exits.
+  // Required for in-flight request draining during K8s rolling deploys.
+  app.enableShutdownHooks();
+
   const port = process.env.PORT ?? 8080;
   await app.listen(port);
-  console.log(\`listening on \${port}\`);
+  console.log(JSON.stringify({ level: "info", msg: "listening", port }));
 }
 
 bootstrap();
@@ -1006,6 +1060,57 @@ ${routes}
 }
 `,
     },
+    ...(withAuth
+      ? [
+          {
+            path: "src/auth/jwt.guard.ts",
+            content: `import { CanActivate, ExecutionContext, Injectable, UnauthorizedException, Logger } from "@nestjs/common";
+import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+
+/**
+ * NestJS guard that verifies an \`Authorization: Bearer <jwt>\` header against
+ * the configured issuer + JWKS. Attaches the decoded payload to
+ * \`request.user.claims\` so controllers can reach for \`req.user.sub\` etc.
+ *
+ * Apply per-route or globally:
+ *   @UseGuards(JwtAuthGuard)
+ *   @Get("/me")
+ *   me(@Req() req: Request) { return req.user; }
+ */
+@Injectable()
+export class JwtAuthGuard implements CanActivate {
+  private readonly log = new Logger(JwtAuthGuard.name);
+  private readonly issuer = process.env.AUTH_ISSUER;
+  private readonly audience = process.env.AUTH_AUDIENCE;
+  private readonly jwks = process.env.AUTH_JWKS_URL
+    ? createRemoteJWKSet(new URL(process.env.AUTH_JWKS_URL))
+    : null;
+
+  async canActivate(ctx: ExecutionContext): Promise<boolean> {
+    if (!this.jwks || !this.issuer) {
+      this.log.error("AUTH_ISSUER or AUTH_JWKS_URL not set");
+      throw new UnauthorizedException("auth_unconfigured");
+    }
+    const req = ctx.switchToHttp().getRequest<{ headers: Record<string, string>; user?: { sub: string; claims: JWTPayload } }>();
+    const header = req.headers.authorization;
+    if (!header?.startsWith("Bearer ")) throw new UnauthorizedException("missing_or_malformed_token");
+    try {
+      const { payload } = await jwtVerify(header.slice(7).trim(), this.jwks, {
+        issuer: this.issuer,
+        audience: this.audience,
+        clockTolerance: 30,
+      });
+      req.user = { sub: String(payload.sub ?? ""), claims: payload };
+      return true;
+    } catch {
+      throw new UnauthorizedException("invalid_token");
+    }
+  }
+}
+`,
+          },
+        ]
+      : []),
   ];
 }
 
@@ -1028,28 +1133,106 @@ function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
     {
       path: "src/main.ts",
       content: `import express from "express";
+import helmet from "helmet";
+import cors from "cors";
 import pinoHttp from "pino-http";
 ${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}import { authRequired } from "./middleware/auth";
 ${entityImports ? entityImports + "\n" : ""}
+// Comma-separated list of origins in ALLOWED_ORIGINS, e.g.
+// "https://app.example.com,https://admin.example.com". Omit to keep CORS
+// locked to same-origin only.
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ?.split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 const app = express();
-app.use(express.json());
-app.use(pinoHttp());
+app.disable("x-powered-by");
+app.use(helmet());
+if (allowedOrigins && allowedOrigins.length > 0) {
+  app.use(cors({ origin: allowedOrigins, credentials: true }));
+}
+// Explicit JSON size limit protects against resource-exhaustion payloads.
+app.use(express.json({ limit: "1mb" }));
+app.use(pinoHttp({
+  // JSON output (pino's default) is parseable by Loki / Datadog / CloudWatch
+  // without a text-to-JSON transform.
+  redact: ["req.headers.authorization", "req.headers.cookie"],
+}));
 ${config.rateLimit ? "app.use(rateLimit);\n" : ""}
 app.get("/health", (_, res) => res.json({ ok: true }));
 ${routes}
 ${entityMounts}
 const port = Number(process.env.PORT ?? 8080);
-app.listen(port, () => console.log(\`listening on \${port}\`));
+const server = app.listen(port, () => console.log(JSON.stringify({ level: "info", msg: "listening", port })));
+
+// Graceful shutdown on SIGTERM — Kubernetes sends this before killing the pod.
+// We stop accepting new connections, wait for in-flight requests to finish
+// (up to 25 s, within the default K8s terminationGracePeriodSeconds of 30 s),
+// then exit.
+function shutdown(signal: string) {
+  console.log(JSON.stringify({ level: "info", msg: "shutdown", signal }));
+  server.close((err) => {
+    if (err) {
+      console.error(JSON.stringify({ level: "error", msg: "shutdown failed", err: String(err) }));
+      process.exit(1);
+    }
+    process.exit(0);
+  });
+  // Belt-and-suspenders: force exit if close() hangs past the grace window.
+  setTimeout(() => {
+    console.error(JSON.stringify({ level: "error", msg: "shutdown timed out — forcing exit" }));
+    process.exit(1);
+  }, 25_000).unref();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
 `,
     },
     {
       path: "src/middleware/auth.ts",
       content: `import type { Request, Response, NextFunction } from "express";
+import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 
-export function authRequired(req: Request, res: Response, next: NextFunction) {
-  if (!req.headers.authorization) return res.status(401).json({ error: "unauthorized" });
-  // TODO: verify JWT
-  next();
+// Lazy-initialized JWKS fetcher. \`jose\` caches keys internally and honors
+// the \`Cache-Control\` header on the JWKS response — no hand-rolled key
+// management. One JWKS instance is shared across all requests.
+const issuer = process.env.AUTH_ISSUER;
+const jwksUrl = process.env.AUTH_JWKS_URL;
+const audience = process.env.AUTH_AUDIENCE;
+
+const jwks = jwksUrl ? createRemoteJWKSet(new URL(jwksUrl)) : null;
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      user?: { sub: string; claims: JWTPayload };
+    }
+  }
+}
+
+export async function authRequired(req: Request, res: Response, next: NextFunction) {
+  if (!jwks || !issuer) {
+    return res.status(500).json({ error: "auth_unconfigured", hint: "Set AUTH_ISSUER and AUTH_JWKS_URL." });
+  }
+  const header = req.headers.authorization;
+  if (!header?.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "missing_or_malformed_token" });
+  }
+  const token = header.slice("Bearer ".length).trim();
+  try {
+    const { payload } = await jwtVerify(token, jwks, {
+      issuer,
+      audience, // undefined → jose skips the check
+      clockTolerance: 30,
+    });
+    req.user = { sub: String(payload.sub ?? ""), claims: payload };
+    next();
+  } catch {
+    res.status(401).json({ error: "invalid_token" });
+  }
 }
 `,
     },
@@ -1103,6 +1286,7 @@ function fastifyFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
       content: `import Fastify from "fastify";
 import helmet from "@fastify/helmet";
 ${entityImports ? entityImports + "\n" : ""}
+// Fastify's built-in logger (pino) already emits JSON, so no extra config needed.
 const app = Fastify({ logger: true });
 await app.register(helmet);
 
@@ -1110,7 +1294,27 @@ app.get("/health", async () => ({ ok: true }));
 ${routes}
 ${entityRegistrations}
 const port = Number(process.env.PORT ?? 8080);
-app.listen({ port, host: "0.0.0.0" }).catch((err) => { app.log.error(err); process.exit(1); });
+try {
+  await app.listen({ port, host: "0.0.0.0" });
+} catch (err) {
+  app.log.error(err);
+  process.exit(1);
+}
+
+// Graceful shutdown — Fastify's close() awaits in-flight requests and
+// triggers all registered onClose hooks.
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.once(signal, async () => {
+    app.log.info({ signal }, "shutdown");
+    try {
+      await app.close();
+      process.exit(0);
+    } catch (err) {
+      app.log.error({ err }, "shutdown failed");
+      process.exit(1);
+    }
+  });
+}
 `,
     },
   ];
@@ -1142,8 +1346,28 @@ app.get("/health", (c) => c.json({ ok: true }));
 ${routes}
 ${entityMounts}
 const port = Number(process.env.PORT ?? 8080);
-serve({ fetch: app.fetch, port });
-console.log(\`listening on \${port}\`);
+const server = serve({ fetch: app.fetch, port });
+console.log(JSON.stringify({ level: "info", msg: "listening", port }));
+
+// Graceful shutdown. @hono/node-server exposes the underlying Node server
+// via the returned object — we call close() to stop accepting connections,
+// then force-exit if in-flight requests overrun the grace window.
+function shutdown(signal: string) {
+  console.log(JSON.stringify({ level: "info", msg: "shutdown", signal }));
+  server.close((err) => {
+    if (err) {
+      console.error(JSON.stringify({ level: "error", msg: "shutdown failed", err: String(err) }));
+      process.exit(1);
+    }
+    process.exit(0);
+  });
+  setTimeout(() => {
+    console.error(JSON.stringify({ level: "error", msg: "shutdown timed out — forcing exit" }));
+    process.exit(1);
+  }, 25_000).unref();
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
 `,
     },
   ];

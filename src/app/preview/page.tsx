@@ -212,9 +212,18 @@ export default function PreviewPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ config, endpoints, entities, repoName }),
       });
-      const data = await res.json() as { url?: string; fullName?: string; fileCount?: number; error?: string };
+      const data = await res.json() as {
+        url?: string;
+        fullName?: string;
+        fileCount?: number;
+        error?: string;
+        message?: string;
+        hint?: string;
+      };
       if (!res.ok || data.error) {
-        toast({ title: "Push failed", description: data.error ?? "Unknown error", kind: "error" });
+        const title = data.message ?? "Push failed";
+        const description = data.hint ?? data.error ?? "Unknown error";
+        toast({ title, description, kind: "error" });
       } else {
         toast({
           title: `Pushed to ${data.fullName}`,

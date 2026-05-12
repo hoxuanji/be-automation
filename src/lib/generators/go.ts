@@ -1,15 +1,30 @@
 import type { Endpoint, Entity, FieldType, GeneratedFile, StackConfig } from "./types";
 import { safeName, toPascal, toKebab, toSnake } from "./types";
+import { goGrpcFiles } from "./grpc/go";
+import { authProviderSpec, needsAuth } from "./auth/providers";
 
 export function goFiles(
   config: StackConfig,
   endpoints: Endpoint[],
   entities: Entity[] = []
 ): GeneratedFile[] {
+  // gRPC mode swaps the HTTP framework bootstrap for a pure gRPC server.
+  // Keep the Dockerfile + shared helpers; replace the cmd / internal/server
+  // output with the gRPC tree.
+  if (config.api === "grpc") {
+    const files: GeneratedFile[] = [];
+    files.push({ path: "Dockerfile", content: goDockerfile() });
+    files.push({ path: "internal/config/config.go", content: goConfig() });
+    files.push(...goGrpcFiles(config, entities));
+    return files;
+  }
+
   const module = `github.com/your-org/${safeName(config.name)}`;
   const files: GeneratedFile[] = [];
+  const anyProtected = endpoints.some((e) => e.auth);
+  const withAuth = needsAuth(config, anyProtected);
 
-  files.push({ path: "go.mod", content: goMod(module, config.framework, entities.length > 0) });
+  files.push({ path: "go.mod", content: goMod(module, config.framework, entities.length > 0, withAuth) });
   files.push({ path: "Dockerfile", content: goDockerfile() });
   files.push({
     path: "cmd/api/main.go",
@@ -25,12 +40,19 @@ export function goFiles(
   });
   files.push({
     path: "internal/server/middleware.go",
-    content: goMiddleware(config),
+    content: goMiddleware(config, module, withAuth),
   });
   files.push({
     path: "internal/server/health.go",
     content: goHealth(config.framework),
   });
+
+  if (withAuth) {
+    files.push({
+      path: "internal/auth/jwt.go",
+      content: goAuthJwt(),
+    });
+  }
 
   if (/postgres|neon|supabase|cockroach|planetscale/.test(config.database) || config.database === "mysql") {
     files.push({
@@ -764,12 +786,27 @@ func OpenGorm(dsn string) (*gorm.DB, error) {
   return `package db
 
 import (
+\t"time"
+
 \tgormPg "gorm.io/driver/postgres"
 \t"gorm.io/gorm"
 )
 
 func OpenGorm(dsn string) (*gorm.DB, error) {
-\treturn gorm.Open(gormPg.Open(dsn), &gorm.Config{})
+\t// GORM wraps the underlying *sql.DB; configure the pool explicitly rather
+\t// than relying on GORM's defaults (no pool configuration at all).
+\tdb, err := gorm.Open(gormPg.Open(dsn), &gorm.Config{})
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\tsqlDB, err := db.DB()
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\tsqlDB.SetMaxOpenConns(25)
+\tsqlDB.SetMaxIdleConns(10)
+\tsqlDB.SetConnMaxLifetime(30 * time.Minute)
+\treturn db, nil
 }
 `;
 }
@@ -848,7 +885,7 @@ function buildGORMTags(f: { type: FieldType; primaryKey?: boolean; unique: boole
   return tags.join(" ");
 }
 
-function goMod(module: string, framework: string, withEntities = false) {
+function goMod(module: string, framework: string, withEntities = false, withAuth = false) {
   const frameworkDep: Record<string, string> = {
     gin: "\tgithub.com/gin-gonic/gin v1.10.0",
     fiber: "\tgithub.com/gofiber/fiber/v2 v2.52.0",
@@ -856,7 +893,13 @@ function goMod(module: string, framework: string, withEntities = false) {
     chi: "\tgithub.com/go-chi/chi/v5 v5.1.0",
   };
   const gormDeps = withEntities
-    ? "\tgorm.io/gorm v1.25.12\n\tgorm.io/driver/postgres v1.5.11\n\tgorm.io/driver/sqlite v1.5.5"
+    ? "\tgorm.io/gorm v1.25.12\n\tgorm.io/driver/postgres v1.5.11\n\tgorm.io/driver/sqlite v1.5.5\n\tgithub.com/golang-migrate/migrate/v4 v4.18.1"
+    : "";
+  const authDeps = withAuth
+    // jwx is the canonical Go JWT/JWK library — handles JWKS fetch + cache,
+    // RS256/ES256 verification, and claim validation without hand-rolling
+    // PEM parsing.
+    ? "\tgithub.com/lestrrat-go/jwx/v2 v2.1.1"
     : "";
   return `module ${module}
 
@@ -865,7 +908,7 @@ go 1.23
 require (
 ${frameworkDep[framework] ?? frameworkDep.gin}
 \tgithub.com/caarlos0/env/v11 v11.2.2
-${gormDeps}
+${gormDeps}${gormDeps && authDeps ? "\n" : ""}${authDeps}
 )
 `;
 }
@@ -1342,16 +1385,162 @@ ${handlers}
 `;
 }
 
-function goMiddleware(config: StackConfig) {
+function goAuthJwt(): string {
+  return `// Package auth verifies inbound JWTs against the configured issuer and JWKS
+// endpoint. The JWKS is fetched once on first use and refreshed automatically
+// by jwx's cache; no hand-rolled key management required.
+//
+// The package is provider-agnostic: point AUTH_ISSUER and AUTH_JWKS_URL at
+// Clerk, Auth0, Cognito, Firebase, Keycloak, or Supabase Auth and the same
+// verifier handles all of them. Set AUTH_AUDIENCE if the provider issues
+// tokens with an \`aud\` claim (most do).
+package auth
+
+import (
+\t"context"
+\t"errors"
+\t"fmt"
+\t"net/http"
+\t"os"
+\t"strings"
+\t"sync"
+\t"time"
+
+\t"github.com/lestrrat-go/jwx/v2/jwk"
+\t"github.com/lestrrat-go/jwx/v2/jwt"
+)
+
+// Claims is a thin wrapper around jwt.Token so handlers can reach for the
+// common fields (subject, audience, email) without poking at the jwx API.
+type Claims struct {
+\tSubject  string
+\tIssuer   string
+\tAudience []string
+\tEmail    string
+\tRaw      jwt.Token
+}
+
+type contextKey struct{}
+
+// NewContext / FromContext thread claims through request context.
+func NewContext(ctx context.Context, c *Claims) context.Context {
+\treturn context.WithValue(ctx, contextKey{}, c)
+}
+func FromContext(ctx context.Context) (*Claims, bool) {
+\tc, ok := ctx.Value(contextKey{}).(*Claims)
+\treturn c, ok
+}
+
+// Verifier holds JWKS and config read from the environment. Safe to share
+// across goroutines — jwk.Cache does its own locking.
+type Verifier struct {
+\tissuer   string
+\taudience string
+\tjwksURL  string
+\tcache    *jwk.Cache
+\tset      jwk.Set
+\tonce     sync.Once
+}
+
+var (
+\tdefaultVerifier *Verifier
+\tdefaultErr      error
+\tdefaultOnce     sync.Once
+)
+
+// Default returns a process-wide Verifier built from the AUTH_* env vars.
+// Call \`auth.Default()\` once at startup to fail fast if the env is wrong.
+func Default() (*Verifier, error) {
+\tdefaultOnce.Do(func() {
+\t\tdefaultVerifier, defaultErr = NewVerifier(context.Background())
+\t})
+\treturn defaultVerifier, defaultErr
+}
+
+func NewVerifier(ctx context.Context) (*Verifier, error) {
+\tissuer := os.Getenv("AUTH_ISSUER")
+\tjwksURL := os.Getenv("AUTH_JWKS_URL")
+\tif issuer == "" || jwksURL == "" {
+\t\treturn nil, errors.New("auth: AUTH_ISSUER and AUTH_JWKS_URL must be set")
+\t}
+
+\tcache := jwk.NewCache(ctx)
+\tif err := cache.Register(jwksURL, jwk.WithMinRefreshInterval(15*time.Minute)); err != nil {
+\t\treturn nil, fmt.Errorf("auth: register JWKS: %w", err)
+\t}
+\t// Warm the cache so the first incoming request doesn't pay the fetch latency.
+\tif _, err := cache.Refresh(ctx, jwksURL); err != nil {
+\t\treturn nil, fmt.Errorf("auth: fetch JWKS: %w", err)
+\t}
+\treturn &Verifier{
+\t\tissuer:   issuer,
+\t\taudience: os.Getenv("AUTH_AUDIENCE"),
+\t\tjwksURL:  jwksURL,
+\t\tcache:    cache,
+\t\tset:      jwk.NewCachedSet(cache, jwksURL),
+\t}, nil
+}
+
+// Verify parses, validates, and returns claims for the given raw token.
+// Returns a wrapped error on any validation failure — the caller should
+// respond 401 without leaking detail to the client.
+func (v *Verifier) Verify(ctx context.Context, raw string) (*Claims, error) {
+\topts := []jwt.ParseOption{
+\t\tjwt.WithKeySet(v.set),
+\t\tjwt.WithIssuer(v.issuer),
+\t\tjwt.WithValidate(true),
+\t\tjwt.WithAcceptableSkew(30 * time.Second),
+\t}
+\tif v.audience != "" {
+\t\topts = append(opts, jwt.WithAudience(v.audience))
+\t}
+\ttok, err := jwt.ParseString(raw, opts...)
+\tif err != nil {
+\t\treturn nil, fmt.Errorf("auth: verify: %w", err)
+\t}
+\temail, _ := tok.Get("email")
+\temailStr, _ := email.(string)
+\treturn &Claims{
+\t\tSubject:  tok.Subject(),
+\t\tIssuer:   tok.Issuer(),
+\t\tAudience: tok.Audience(),
+\t\tEmail:    emailStr,
+\t\tRaw:      tok,
+\t}, nil
+}
+
+// ExtractBearer pulls the token out of an \`Authorization: Bearer <token>\`
+// header and returns an error when the header is missing or malformed.
+// Framework middleware wraps this.
+func ExtractBearer(h http.Header) (string, error) {
+\tauth := h.Get("Authorization")
+\tif auth == "" {
+\t\treturn "", errors.New("missing Authorization header")
+\t}
+\tconst prefix = "Bearer "
+\tif !strings.HasPrefix(auth, prefix) {
+\t\treturn "", errors.New("Authorization header must be a Bearer token")
+\t}
+\treturn strings.TrimSpace(auth[len(prefix):]), nil
+}
+`;
+}
+
+function goMiddleware(config: StackConfig, module: string, withAuth: boolean) {
   const fw = config.framework;
+  // Per-framework import of the shared auth package. We import it only when
+  // at least one endpoint needs protection (withAuth) — otherwise the
+  // auth middleware is a no-op and we skip the dependency entirely.
+  const authImport = withAuth ? `\n\t"${module}/internal/auth"` : "";
   if (fw === "gin") {
     return `package server
 
 import (
 \t"log/slog"
+\t"net/http"
 \t"time"
 
-\t"github.com/gin-gonic/gin"
+\t"github.com/gin-gonic/gin"${authImport}
 )
 
 func recoverer(log *slog.Logger) gin.HandlerFunc {
@@ -1371,13 +1560,33 @@ func requestLog(log *slog.Logger) gin.HandlerFunc {
 
 ${config.rateLimit ? `func rateLimit() gin.HandlerFunc { return func(c *gin.Context) { c.Next() } } // TODO: implement using redis
 ` : ""}${config.tracing ? `func tracing() gin.HandlerFunc { return func(c *gin.Context) { c.Next() } } // TODO: wire otel
-` : ""}func authRequired(c *gin.Context) {
-\ttoken := c.GetHeader("Authorization")
-\tif token == "" { c.AbortWithStatus(401); return }
-\t// TODO: verify JWT using cfg.JWTSecret
+` : ""}${
+  withAuth
+    ? `func authRequired(c *gin.Context) {
+\tv, err := auth.Default()
+\tif err != nil {
+\t\tc.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "auth_unconfigured"})
+\t\treturn
+\t}
+\traw, err := auth.ExtractBearer(c.Request.Header)
+\tif err != nil {
+\t\tc.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing_or_malformed_token"})
+\t\treturn
+\t}
+\tclaims, err := v.Verify(c.Request.Context(), raw)
+\tif err != nil {
+\t\tc.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid_token"})
+\t\treturn
+\t}
+\tc.Request = c.Request.WithContext(auth.NewContext(c.Request.Context(), claims))
 \tc.Next()
 }
-`;
+`
+    : `func authRequired(c *gin.Context) {
+\t// Auth disabled — no provider configured for this stack.
+\tc.Next()
+}
+`}`;
   }
   if (fw === "fiber") {
     return `package server
@@ -1386,7 +1595,7 @@ import (
 \t"log/slog"
 \t"time"
 
-\t"github.com/gofiber/fiber/v2"
+\t"github.com/gofiber/fiber/v2"${authImport}
 )
 
 func recoverer(log *slog.Logger) fiber.Handler {
@@ -1410,20 +1619,37 @@ func requestLog(log *slog.Logger) fiber.Handler {
 \t}
 }
 
-${config.rateLimit ? "func rateLimit() fiber.Handler { return func(c *fiber.Ctx) error { return c.Next() } }\n" : ""}${config.tracing ? "func tracing() fiber.Handler { return func(c *fiber.Ctx) error { return c.Next() } }\n" : ""}func authRequired(c *fiber.Ctx) error {
-\tif c.Get("Authorization") == "" { return c.SendStatus(401) }
+${config.rateLimit ? "func rateLimit() fiber.Handler { return func(c *fiber.Ctx) error { return c.Next() } }\n" : ""}${config.tracing ? "func tracing() fiber.Handler { return func(c *fiber.Ctx) error { return c.Next() } }\n" : ""}${
+  withAuth
+    ? `func authRequired(c *fiber.Ctx) error {
+\tv, err := auth.Default()
+\tif err != nil {
+\t\treturn c.Status(500).JSON(fiber.Map{"error": "auth_unconfigured"})
+\t}
+\traw, err := auth.ExtractBearer(c.GetReqHeaders().(map[string][]string))
+\tif err != nil {
+\t\treturn c.Status(401).JSON(fiber.Map{"error": "missing_or_malformed_token"})
+\t}
+\tclaims, err := v.Verify(c.UserContext(), raw)
+\tif err != nil {
+\t\treturn c.Status(401).JSON(fiber.Map{"error": "invalid_token"})
+\t}
+\tc.SetUserContext(auth.NewContext(c.UserContext(), claims))
 \treturn c.Next()
 }
-`;
+`
+    : `func authRequired(c *fiber.Ctx) error { return c.Next() }
+`}`;
   }
   if (fw === "echo") {
     return `package server
 
 import (
 \t"log/slog"
+\t"net/http"
 \t"time"
 
-\t"github.com/labstack/echo/v4"
+\t"github.com/labstack/echo/v4"${authImport}
 )
 
 func recoverer(log *slog.Logger) echo.MiddlewareFunc {
@@ -1451,23 +1677,38 @@ func requestLog(log *slog.Logger) echo.MiddlewareFunc {
 \t}
 }
 
-${config.rateLimit ? "func rateLimit() echo.MiddlewareFunc { return func(next echo.HandlerFunc) echo.HandlerFunc { return next } }\n" : ""}${config.tracing ? "func tracing() echo.MiddlewareFunc { return func(next echo.HandlerFunc) echo.HandlerFunc { return next } }\n" : ""}func authRequired(next echo.HandlerFunc) echo.HandlerFunc {
+${config.rateLimit ? "func rateLimit() echo.MiddlewareFunc { return func(next echo.HandlerFunc) echo.HandlerFunc { return next } }\n" : ""}${config.tracing ? "func tracing() echo.MiddlewareFunc { return func(next echo.HandlerFunc) echo.HandlerFunc { return next } }\n" : ""}${
+  withAuth
+    ? `func authRequired(next echo.HandlerFunc) echo.HandlerFunc {
 \treturn func(c echo.Context) error {
-\t\tif c.Request().Header.Get("Authorization") == "" {
-\t\t\treturn c.NoContent(401)
+\t\tv, err := auth.Default()
+\t\tif err != nil {
+\t\t\treturn c.JSON(http.StatusInternalServerError, map[string]string{"error": "auth_unconfigured"})
 \t\t}
+\t\traw, err := auth.ExtractBearer(c.Request().Header)
+\t\tif err != nil {
+\t\t\treturn c.JSON(http.StatusUnauthorized, map[string]string{"error": "missing_or_malformed_token"})
+\t\t}
+\t\tclaims, err := v.Verify(c.Request().Context(), raw)
+\t\tif err != nil {
+\t\t\treturn c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+\t\t}
+\t\tc.SetRequest(c.Request().WithContext(auth.NewContext(c.Request().Context(), claims)))
 \t\treturn next(c)
 \t}
 }
-`;
+`
+    : `func authRequired(next echo.HandlerFunc) echo.HandlerFunc { return next }
+`}`;
   }
   // chi
   return `package server
 
 import (
+\t"encoding/json"
 \t"log/slog"
 \t"net/http"
-\t"time"
+\t"time"${authImport}
 )
 
 func recoverer(log *slog.Logger) func(http.Handler) http.Handler {
@@ -1494,13 +1735,37 @@ func requestLog(log *slog.Logger) func(http.Handler) http.Handler {
 \t}
 }
 
-${config.rateLimit ? "func rateLimit() func(http.Handler) http.Handler { return func(next http.Handler) http.Handler { return next } }\n" : ""}${config.tracing ? "func tracing() func(http.Handler) http.Handler { return func(next http.Handler) http.Handler { return next } }\n" : ""}func authRequired(next http.Handler) http.Handler {
+${config.rateLimit ? "func rateLimit() func(http.Handler) http.Handler { return func(next http.Handler) http.Handler { return next } }\n" : ""}${config.tracing ? "func tracing() func(http.Handler) http.Handler { return func(next http.Handler) http.Handler { return next } }\n" : ""}${
+  withAuth
+    ? `func authRequired(next http.Handler) http.Handler {
 \treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-\t\tif r.Header.Get("Authorization") == "" { w.WriteHeader(401); return }
-\t\tnext.ServeHTTP(w, r)
+\t\tv, err := auth.Default()
+\t\tif err != nil {
+\t\t\twriteJSONErr(w, http.StatusInternalServerError, "auth_unconfigured")
+\t\t\treturn
+\t\t}
+\t\traw, err := auth.ExtractBearer(r.Header)
+\t\tif err != nil {
+\t\t\twriteJSONErr(w, http.StatusUnauthorized, "missing_or_malformed_token")
+\t\t\treturn
+\t\t}
+\t\tclaims, err := v.Verify(r.Context(), raw)
+\t\tif err != nil {
+\t\t\twriteJSONErr(w, http.StatusUnauthorized, "invalid_token")
+\t\t\treturn
+\t\t}
+\t\tnext.ServeHTTP(w, r.WithContext(auth.NewContext(r.Context(), claims)))
 \t})
 }
-`;
+
+func writeJSONErr(w http.ResponseWriter, status int, code string) {
+\tw.Header().Set("Content-Type", "application/json")
+\tw.WriteHeader(status)
+\t_ = json.NewEncoder(w).Encode(map[string]string{"error": code})
+}
+`
+    : `func authRequired(next http.Handler) http.Handler { return next }
+`}`;
 }
 
 function goHealth(framework: string) {
@@ -1543,24 +1808,59 @@ function goSQLDB(db: string) {
 
 import (
 \t"context"
+\t"errors"
+\t"fmt"
+\t"log"
 \t"time"
 
 \t_ "github.com/jackc/pgx/v5/stdlib"
 \t"database/sql"
 )
 
+// Open connects to the database and retries transient errors with exponential
+// backoff (up to ~30s total). Kubernetes pods frequently come up before their
+// database StatefulSet / managed instance accepts connections — without retry
+// the API pod restarts and delays rollout.
+//
+// Pool sizing (25 open / 10 idle / 30m lifetime) matches Go's community
+// consensus for a single-instance API talking to Postgres. Tune per your
+// connection-limited deployment (e.g. pgbouncer transaction pooling).
 func Open(dsn string) (*sql.DB, error) {
 \t// db: ${db}
 \tconn, err := sql.Open("pgx", dsn)
-\tif err != nil { return nil, err }
+\tif err != nil {
+\t\treturn nil, fmt.Errorf("sql.Open: %w", err)
+\t}
 \tconn.SetMaxOpenConns(25)
 \tconn.SetMaxIdleConns(10)
 \tconn.SetConnMaxLifetime(30 * time.Minute)
 
-\tctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+\tctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 \tdefer cancel()
-\tif err := conn.PingContext(ctx); err != nil { return nil, err }
-\treturn conn, nil
+
+\tvar lastErr error
+\tbackoff := 200 * time.Millisecond
+\tfor attempt := 1; attempt <= 6; attempt++ {
+\t\tif err := conn.PingContext(ctx); err == nil {
+\t\t\treturn conn, nil
+\t\t} else {
+\t\t\tlastErr = err
+\t\t\tif errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+\t\t\t\tbreak
+\t\t\t}
+\t\t\tlog.Printf("db: ping failed (attempt %d/6): %v — retrying in %s", attempt, err, backoff)
+\t\t\tselect {
+\t\t\tcase <-ctx.Done():
+\t\t\t\treturn nil, fmt.Errorf("db: context cancelled while retrying: %w", ctx.Err())
+\t\t\tcase <-time.After(backoff):
+\t\t\t}
+\t\t\tbackoff *= 2
+\t\t\tif backoff > 5*time.Second {
+\t\t\t\tbackoff = 5 * time.Second
+\t\t\t}
+\t\t}
+\t}
+\treturn nil, fmt.Errorf("db: could not connect after retries: %w", lastErr)
 }
 `;
 }

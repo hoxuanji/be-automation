@@ -1,0 +1,172 @@
+[
+  {
+    "path": ".editorconfig",
+    "lines": 10,
+    "size": 147
+  },
+  {
+    "path": ".env.example",
+    "lines": 20,
+    "size": 383
+  },
+  {
+    "path": ".github/workflows/ci.yml",
+    "lines": 69,
+    "size": 1835
+  },
+  {
+    "path": ".gitignore",
+    "lines": 31,
+    "size": 288
+  },
+  {
+    "path": "api/openapi.yaml",
+    "lines": 56,
+    "size": 1222
+  },
+  {
+    "path": "api/postman_collection.json",
+    "lines": 166,
+    "size": 4124
+  },
+  {
+    "path": "buf.gen.yaml",
+    "lines": 9,
+    "size": 175
+  },
+  {
+    "path": "buf.yaml",
+    "lines": 10,
+    "size": 92
+  },
+  {
+    "path": "DEPLOY.md",
+    "lines": 79,
+    "size": 2387
+  },
+  {
+    "path": "deploy/helm/Chart.yaml",
+    "lines": 21,
+    "size": 519
+  },
+  {
+    "path": "deploy/helm/templates/deployment.yaml",
+    "lines": 22,
+    "size": 490
+  },
+  {
+    "path": "deploy/helm/templates/service.yaml",
+    "lines": 12,
+    "size": 220
+  },
+  {
+    "path": "deploy/helm/values.yaml",
+    "lines": 63,
+    "size": 1195
+  },
+  {
+    "path": "deploy/k8s/deployment.yaml",
+    "lines": 63,
+    "size": 1983
+  },
+  {
+    "path": "deploy/k8s/hpa.yaml",
+    "lines": 19,
+    "size": 350
+  },
+  {
+    "path": "deploy/k8s/Makefile",
+    "lines": 36,
+    "size": 1371
+  },
+  {
+    "path": "deploy/k8s/pdb.yaml",
+    "lines": 10,
+    "size": 150
+  },
+  {
+    "path": "deploy/k8s/secrets.example.env",
+    "lines": 20,
+    "size": 442
+  },
+  {
+    "path": "deploy/k8s/service.yaml",
+    "lines": 14,
+    "size": 198
+  },
+  {
+    "path": "deploy/prometheus.yml",
+    "lines": 9,
+    "size": 152
+  },
+  {
+    "path": "docker-compose.yml",
+    "lines": 53,
+    "size": 1195
+  },
+  {
+    "path": "Dockerfile",
+    "lines": 20,
+    "size": 395
+  },
+  {
+    "path": "Makefile",
+    "lines": 18,
+    "size": 414
+  },
+  {
+    "path": "package.json",
+    "lines": 24,
+    "size": 506
+  },
+  {
+    "path": "prisma/schema.prisma",
+    "lines": 28,
+    "size": 505
+  },
+  {
+    "path": "prisma/seed.ts",
+    "lines": 27,
+    "size": 700
+  },
+  {
+    "path": "proto/test_app/v1/service.proto",
+    "lines": 121,
+    "size": 2972
+  },
+  {
+    "path": "QUICKSTART.md",
+    "lines": 97,
+    "size": 2334
+  },
+  {
+    "path": "README.md",
+    "lines": 64,
+    "size": 1932
+  },
+  {
+    "path": "src/main.ts",
+    "lines": 41,
+    "size": 1399
+  },
+  {
+    "path": "src/proto-loader.ts",
+    "lines": 29,
+    "size": 1197
+  },
+  {
+    "path": "src/services/post.service.ts",
+    "lines": 33,
+    "size": 1087
+  },
+  {
+    "path": "src/services/user.service.ts",
+    "lines": 33,
+    "size": 1087
+  },
+  {
+    "path": "tsconfig.json",
+    "lines": 18,
+    "size": 327
+  }
+]

@@ -1,0 +1,182 @@
+[
+  {
+    "path": ".editorconfig",
+    "lines": 10,
+    "size": 147
+  },
+  {
+    "path": ".env.example",
+    "lines": 20,
+    "size": 383
+  },
+  {
+    "path": ".github/workflows/ci.yml",
+    "lines": 59,
+    "size": 1523
+  },
+  {
+    "path": ".gitignore",
+    "lines": 27,
+    "size": 248
+  },
+  {
+    "path": "api/openapi.yaml",
+    "lines": 56,
+    "size": 1222
+  },
+  {
+    "path": "api/postman_collection.json",
+    "lines": 166,
+    "size": 4118
+  },
+  {
+    "path": "Cargo.toml",
+    "lines": 22,
+    "size": 662
+  },
+  {
+    "path": "DEPLOY.md",
+    "lines": 79,
+    "size": 2387
+  },
+  {
+    "path": "deploy/helm/Chart.yaml",
+    "lines": 21,
+    "size": 519
+  },
+  {
+    "path": "deploy/helm/templates/deployment.yaml",
+    "lines": 22,
+    "size": 490
+  },
+  {
+    "path": "deploy/helm/templates/service.yaml",
+    "lines": 12,
+    "size": 220
+  },
+  {
+    "path": "deploy/helm/values.yaml",
+    "lines": 63,
+    "size": 1195
+  },
+  {
+    "path": "deploy/k8s/deployment.yaml",
+    "lines": 63,
+    "size": 1983
+  },
+  {
+    "path": "deploy/k8s/hpa.yaml",
+    "lines": 19,
+    "size": 350
+  },
+  {
+    "path": "deploy/k8s/Makefile",
+    "lines": 36,
+    "size": 1371
+  },
+  {
+    "path": "deploy/k8s/pdb.yaml",
+    "lines": 10,
+    "size": 150
+  },
+  {
+    "path": "deploy/k8s/secrets.example.env",
+    "lines": 20,
+    "size": 442
+  },
+  {
+    "path": "deploy/k8s/service.yaml",
+    "lines": 14,
+    "size": 198
+  },
+  {
+    "path": "deploy/prometheus.yml",
+    "lines": 9,
+    "size": 152
+  },
+  {
+    "path": "docker-compose.yml",
+    "lines": 53,
+    "size": 1195
+  },
+  {
+    "path": "Dockerfile",
+    "lines": 14,
+    "size": 422
+  },
+  {
+    "path": "migrations/20240101000001_init.down.sql",
+    "lines": 5,
+    "size": 92
+  },
+  {
+    "path": "migrations/20240101000001_init.up.sql",
+    "lines": 23,
+    "size": 791
+  },
+  {
+    "path": "QUICKSTART.md",
+    "lines": 96,
+    "size": 2259
+  },
+  {
+    "path": "README.md",
+    "lines": 60,
+    "size": 2053
+  },
+  {
+    "path": "src/config.rs",
+    "lines": 17,
+    "size": 484
+  },
+  {
+    "path": "src/db.rs",
+    "lines": 31,
+    "size": 1231
+  },
+  {
+    "path": "src/handlers/mod.rs",
+    "lines": 3,
+    "size": 28
+  },
+  {
+    "path": "src/handlers/post.rs",
+    "lines": 87,
+    "size": 2559
+  },
+  {
+    "path": "src/handlers/user.rs",
+    "lines": 89,
+    "size": 2661
+  },
+  {
+    "path": "src/main.rs",
+    "lines": 62,
+    "size": 2395
+  },
+  {
+    "path": "src/models/mod.rs",
+    "lines": 3,
+    "size": 28
+  },
+  {
+    "path": "src/models/post.rs",
+    "lines": 22,
+    "size": 483
+  },
+  {
+    "path": "src/models/user.rs",
+    "lines": 25,
+    "size": 635
+  },
+  {
+    "path": "tests/post_test.rs",
+    "lines": 62,
+    "size": 1954
+  },
+  {
+    "path": "tests/user_test.rs",
+    "lines": 62,
+    "size": 2059
+  }
+]

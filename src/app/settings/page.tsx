@@ -413,7 +413,7 @@ function RailwayIntegrationRow() {
   const [expanded, setExpanded] = React.useState(false);
   const [token, setToken] = React.useState("");
   const [saving, setSaving] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
+  const [error, setError] = React.useState<{ message: string; hint?: string } | null>(null);
   const [verifiedEmail, setVerifiedEmail] = React.useState<string | null>(null);
 
   React.useEffect(() => {
@@ -428,7 +428,7 @@ function RailwayIntegrationRow() {
 
   async function saveToken() {
     const t = token.trim();
-    if (!t) { setError("Token required"); return; }
+    if (!t) { setError({ message: "Token required" }); return; }
     setSaving(true);
     setError(null);
     try {
@@ -437,9 +437,9 @@ function RailwayIntegrationRow() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token: t }),
       });
-      const vData = await vRes.json() as { email?: string; error?: string };
+      const vData = await vRes.json() as { email?: string; error?: string; hint?: string };
       if (!vRes.ok) {
-        setError(vData.error ?? "Invalid token");
+        setError({ message: vData.error ?? "Invalid token", hint: vData.hint });
         return;
       }
       setVerifiedEmail(vData.email ?? null);
@@ -453,7 +453,7 @@ function RailwayIntegrationRow() {
       setExpanded(false);
       toast({ title: "Railway token saved", kind: "success" });
     } catch {
-      setError("Request failed");
+      setError({ message: "Request failed", hint: "Check your network and try again." });
     } finally {
       setSaving(false);
     }
@@ -550,7 +550,12 @@ function RailwayIntegrationRow() {
             onKeyDown={(e) => { if (e.key === "Enter") void saveToken(); }}
             autoFocus
           />
-          {error && <p className="text-xs text-red-400">{error}</p>}
+          {error && (
+            <div className="rounded-md border border-red-500/20 bg-red-500/[0.04] px-2.5 py-2 text-xs text-red-300">
+              <div className="font-medium">{error.message}</div>
+              {error.hint && <div className="mt-0.5 text-red-300/70">{error.hint}</div>}
+            </div>
+          )}
           <div className="flex gap-2">
             <Button
               variant="secondary"

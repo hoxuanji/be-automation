@@ -1,0 +1,172 @@
+import type { Entity, EntityField, FieldType } from "../types";
+import { toSnake } from "../types";
+
+export type SqlDialect = "postgres" | "mysql" | "sqlite";
+
+// Entity table name → snake_case plural. Keep in sync with any ORM-generated
+// table names elsewhere (gorm, sqlalchemy, etc) so migrations and ORM models
+// agree on the same table.
+export function tableName(entity: Entity): string {
+  return `${toSnake(entity.name)}s`;
+}
+
+function sqlType(field: EntityField, dialect: SqlDialect): string {
+  const t: FieldType = field.type;
+  switch (dialect) {
+    case "postgres":
+      switch (t) {
+        case "string":
+          return "VARCHAR(255)";
+        case "text":
+          return "TEXT";
+        case "number":
+          return "DOUBLE PRECISION";
+        case "boolean":
+          return "BOOLEAN";
+        case "date":
+          return "TIMESTAMPTZ";
+        case "uuid":
+          return "UUID";
+        case "json":
+          return "JSONB";
+      }
+      return "TEXT";
+    case "mysql":
+      switch (t) {
+        case "string":
+          return "VARCHAR(255)";
+        case "text":
+          return "TEXT";
+        case "number":
+          return "DOUBLE";
+        case "boolean":
+          return "BOOLEAN";
+        case "date":
+          return "DATETIME(3)";
+        case "uuid":
+          return "CHAR(36)";
+        case "json":
+          return "JSON";
+      }
+      return "TEXT";
+    case "sqlite":
+      // SQLite uses type affinity — these all map at the affinity level.
+      switch (t) {
+        case "string":
+        case "text":
+        case "uuid":
+        case "json":
+          return "TEXT";
+        case "number":
+          return "REAL";
+        case "boolean":
+          return "INTEGER";
+        case "date":
+          return "TEXT"; // stored as ISO-8601
+      }
+      return "TEXT";
+  }
+}
+
+function pkDefault(field: EntityField, dialect: SqlDialect): string {
+  if (!field.primaryKey) return "";
+  if (field.type === "uuid" && dialect === "postgres") {
+    // pgcrypto ships gen_random_uuid() in Postgres 13+; no extension needed.
+    return " DEFAULT gen_random_uuid()";
+  }
+  return "";
+}
+
+function columnDef(field: EntityField, dialect: SqlDialect): string {
+  const name = toSnake(field.name);
+  const type = sqlType(field, dialect);
+  const nullable = field.required ? " NOT NULL" : "";
+  const unique = field.unique && !field.primaryKey ? " UNIQUE" : "";
+  const pk = field.primaryKey ? " PRIMARY KEY" : "";
+  const def = pkDefault(field, dialect);
+  return `  ${name} ${type}${pk}${def}${nullable}${unique}`;
+}
+
+function tableSql(entity: Entity, dialect: SqlDialect): string {
+  const tbl = tableName(entity);
+  const fields = entity.fields;
+  const hasPk = fields.some((f) => f.primaryKey);
+  // Every generated table gets server-managed timestamps so migrations stay
+  // consistent with the ORM models (which expect createdAt / updatedAt).
+  const createdAtDefault =
+    dialect === "sqlite" ? "CURRENT_TIMESTAMP" : dialect === "mysql" ? "CURRENT_TIMESTAMP(3)" : "now()";
+  const cols = [
+    ...fields.map((f) => columnDef(f, dialect)),
+    `  created_at ${sqlType({ ...fields[0], type: "date" } as EntityField, dialect)} NOT NULL DEFAULT ${createdAtDefault}`,
+    `  updated_at ${sqlType({ ...fields[0], type: "date" } as EntityField, dialect)} NOT NULL DEFAULT ${createdAtDefault}`,
+  ];
+
+  // Add a surrogate primary key if the user didn't mark one (rare but possible).
+  if (!hasPk && fields.length > 0) {
+    cols.unshift(
+      `  id ${dialect === "postgres" ? "UUID PRIMARY KEY DEFAULT gen_random_uuid()" : dialect === "mysql" ? "CHAR(36) PRIMARY KEY" : "TEXT PRIMARY KEY"}`
+    );
+  }
+
+  return `CREATE TABLE IF NOT EXISTS ${tbl} (\n${cols.join(",\n")}\n);`;
+}
+
+function indexSql(entity: Entity, dialect: SqlDialect): string[] {
+  const tbl = tableName(entity);
+  const out: string[] = [];
+  for (const f of entity.fields) {
+    if (f.unique && !f.primaryKey) {
+      // UNIQUE already creates an index; skip explicit one.
+      continue;
+    }
+    if (/Id$|_id$|^id$/.test(f.name)) {
+      out.push(`CREATE INDEX IF NOT EXISTS idx_${tbl}_${toSnake(f.name)} ON ${tbl} (${toSnake(f.name)});`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Renders the initial migration SQL for a set of entities.
+ *
+ * Returns two strings, UP and DOWN. Both are idempotent (`CREATE TABLE IF NOT
+ * EXISTS`, `DROP TABLE IF EXISTS`) so re-running the migration doesn't fail.
+ */
+export function initialMigrationSql(
+  entities: Entity[],
+  dialect: SqlDialect
+): { up: string; down: string } {
+  if (entities.length === 0) {
+    return {
+      up: "-- No entities defined yet. Add entities in the builder and regenerate.\n",
+      down: "-- No entities defined yet.\n",
+    };
+  }
+
+  const tables = entities.map((e) => tableSql(e, dialect));
+  const indexes = entities.flatMap((e) => indexSql(e, dialect));
+
+  const up = [
+    "-- Generated by Helios — regenerate by re-running the generator or edit freely.",
+    "",
+    ...tables,
+    "",
+    ...indexes,
+    "",
+  ].join("\n");
+
+  const down = [
+    "-- Reverses the initial migration.",
+    "",
+    ...entities.reverse().map((e) => `DROP TABLE IF EXISTS ${tableName(e)};`),
+    "",
+  ].join("\n");
+
+  return { up, down };
+}
+
+export function dialectFor(database: string): SqlDialect {
+  if (/mysql|planetscale/i.test(database)) return "mysql";
+  if (/sqlite/i.test(database)) return "sqlite";
+  return "postgres";
+}

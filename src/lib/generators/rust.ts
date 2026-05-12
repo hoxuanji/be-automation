@@ -100,7 +100,7 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chro
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
 
 [dev-dependencies]
@@ -125,7 +125,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
 
 [dev-dependencies]
@@ -145,9 +145,10 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && r
 COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
-FROM gcr.io/distroless/cc-debian12
+FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /src/target/release/${safeName} /api
 EXPOSE 8080
+USER nonroot:nonroot
 ENTRYPOINT ["/api"]
 `;
 }
@@ -191,13 +192,34 @@ pub fn new_store() -> Store {
   }
 
   return `use sqlx::postgres::PgPoolOptions;
+use std::time::Duration;
 
+/// Connect to Postgres with retry/backoff. Kubernetes pods frequently start
+/// before the database is ready; an unconditional \`.expect()\` turns the first
+/// connection failure into a crash loop. We retry up to ~30 seconds with
+/// exponential backoff before surfacing the last error.
 pub async fn connect(database_url: &str) -> sqlx::PgPool {
-    PgPoolOptions::new()
-        .max_connections(20)
-        .connect(database_url)
-        .await
-        .expect("failed to connect to database")
+    let mut delay = Duration::from_millis(200);
+    let mut last_err: Option<sqlx::Error> = None;
+    for attempt in 1..=6 {
+        match PgPoolOptions::new()
+            .max_connections(20)
+            .min_connections(2)
+            .acquire_timeout(Duration::from_secs(10))
+            .idle_timeout(Duration::from_secs(600))
+            .connect(database_url)
+            .await
+        {
+            Ok(pool) => return pool,
+            Err(err) => {
+                eprintln!("db: connect attempt {}/6 failed: {} — retrying in {:?}", attempt, err, delay);
+                last_err = Some(err);
+                tokio::time::sleep(delay).await;
+                delay = std::cmp::min(delay * 2, Duration::from_secs(5));
+            }
+        }
+    }
+    panic!("db: could not connect after retries: {:?}", last_err);
 }
 `;
 }
@@ -733,7 +755,12 @@ use axum::Router;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    // JSON-formatted tracing output — parseable by Loki / Datadog / CloudWatch.
+    // RUST_LOG=debug narrows verbosity; the env-filter feature handles parsing.
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
     dotenvy::dotenv().ok();
     let cfg = config::Config::from_env();
 ${poolSetup}
@@ -745,7 +772,33 @@ ${withState};
     let addr = format!("0.0.0.0:{}", cfg.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!("listening on {}", addr);
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
+}
+
+// Waits for SIGTERM (K8s rolling deploys) or SIGINT (Ctrl-C). Axum drains
+// in-flight requests before exiting, bounded by the pod's terminationGracePeriodSeconds.
+async fn shutdown_signal() {
+    use tokio::signal;
+    let ctrl_c = async {
+        signal::ctrl_c().await.expect("install SIGINT handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("shutdown: SIGINT"),
+        _ = terminate => tracing::info!("shutdown: SIGTERM"),
+    }
 }
 `;
 }
@@ -778,7 +831,11 @@ use actix_web::{web, App, HttpServer};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    tracing_subscriber::fmt::init();
+    // JSON-formatted tracing output — parseable by Loki / Datadog / CloudWatch.
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
     dotenvy::dotenv().ok();
     let cfg = config::Config::from_env();
 ${poolSetup}
@@ -792,6 +849,10 @@ ${appData}
 ${endpointRoutes}${endpointRoutes && entityConfigs ? "\n" : ""}${entityConfigs}
     })
     .bind(&addr)?
+    // Actix's HttpServer::run already installs SIGTERM/SIGINT handlers and
+    // drains in-flight requests with a 30 s timeout — which matches the K8s
+    // default terminationGracePeriodSeconds. Tune via \`.shutdown_timeout(...)\`
+    // if your pod spec overrides the grace period.
     .run()
     .await
 }

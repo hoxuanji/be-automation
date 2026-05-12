@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { jwtVerify } from "jose";
+import { getJwtSecret } from "@/lib/env";
 
 const COOKIE_NAME = "helios_token";
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET ?? "helios-dev-secret-change-in-production"
-);
+let _jwtSecret: Uint8Array | null = null;
+function jwtSecret(): Uint8Array {
+  if (!_jwtSecret) _jwtSecret = new TextEncoder().encode(getJwtSecret());
+  return _jwtSecret;
+}
 
 const PROTECTED = ["/dashboard", "/builder", "/api-builder", "/preview", "/deploy", "/settings"];
 const AUTH_ONLY = ["/login", "/signup"];
@@ -20,7 +23,7 @@ export async function middleware(req: NextRequest) {
   let authenticated = false;
   if (token) {
     try {
-      await jwtVerify(token, JWT_SECRET);
+      await jwtVerify(token, jwtSecret());
       authenticated = true;
     } catch {}
   }

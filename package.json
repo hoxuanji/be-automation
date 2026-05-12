@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "node --experimental-strip-types --no-warnings --import ./src/lib/generators/__tests__/loader.mjs --test ./src/lib/generators/__tests__/generate.test.ts",
+    "test:update": "UPDATE_SNAPSHOTS=1 npm test"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

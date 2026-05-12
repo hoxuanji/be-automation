@@ -1,11 +1,19 @@
 import { SignJWT, jwtVerify } from "jose";
 import bcrypt from "bcryptjs";
 import { NextRequest } from "next/server";
+import { getJwtSecret } from "./env";
 
 const COOKIE_NAME = "helios_token";
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET ?? "helios-dev-secret-change-in-production"
-);
+// Defer reading the secret until first use so that a dev process without
+// JWT_SECRET still boots (the `getJwtSecret` helper permits the dev fallback
+// in non-prod and throws in prod).
+let _jwtSecret: Uint8Array | null = null;
+function jwtSecret(): Uint8Array {
+  if (!_jwtSecret) {
+    _jwtSecret = new TextEncoder().encode(getJwtSecret());
+  }
+  return _jwtSecret;
+}
 
 // ─── Password ────────────────────────────────────────────────────────────────
 
@@ -34,12 +42,12 @@ export async function signToken(payload: JWTPayload): Promise<string> {
     .setSubject(payload.sub)
     .setExpirationTime("7d")
     .setIssuedAt()
-    .sign(JWT_SECRET);
+    .sign(jwtSecret());
 }
 
 export async function verifyToken(token: string): Promise<JWTPayload | null> {
   try {
-    const { payload } = await jwtVerify(token, JWT_SECRET);
+    const { payload } = await jwtVerify(token, jwtSecret());
     return {
       sub: payload.sub as string,
       email: payload.email as string,

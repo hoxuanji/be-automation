@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
+import { assertProdSecretsReady, getEncryptionKey } from "./env";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const DB_PATH = path.join(DATA_DIR, "helios.db");
@@ -12,16 +13,14 @@ let _envChecked = false;
 
 function openDb(): Database.Database {
   if (!_envChecked) {
+    // In production, throw immediately if JWT_SECRET or ENCRYPTION_KEY are
+    // missing / match the dev fallback. This turns a silent security
+    // downgrade into a loud boot failure that CI/deploy logs will catch.
+    assertProdSecretsReady();
     if (process.env.NODE_ENV === "production") {
-      const warn = (msg: string) => console.error(`[Helios] SECURITY WARNING: ${msg}`);
-      if (!process.env.JWT_SECRET || process.env.JWT_SECRET === "helios-dev-secret-change-in-production")
-        warn("JWT_SECRET is not set or uses the insecure default — sessions can be forged");
-      if (!process.env.ENCRYPTION_KEY)
-        warn("ENCRYPTION_KEY is not set — API keys are stored with weak encryption");
-      if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET)
-        warn("GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET not set — GitHub OAuth will fail");
-      if (!process.env.ANTHROPIC_API_KEY)
-        warn("ANTHROPIC_API_KEY not set — AI features will return 503");
+      if (!process.env.ANTHROPIC_API_KEY) {
+        console.error("[Helios] ANTHROPIC_API_KEY not set — AI features will return 503");
+      }
     }
     _envChecked = true;
   }
@@ -261,10 +260,7 @@ export function setDeployCreds(userId: string, creds: DeployCredsMap): void {
 // ─── Encryption helpers ──────────────────────────────────────────────────────
 
 function encKey(): Buffer {
-  const raw =
-    process.env.ENCRYPTION_KEY ??
-    "helios-dev-enc-key-change-in-production";
-  return crypto.createHash("sha256").update(raw).digest();
+  return crypto.createHash("sha256").update(getEncryptionKey()).digest();
 }
 
 export function encryptApiKey(key: string): string {

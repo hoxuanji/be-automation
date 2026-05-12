@@ -1,0 +1,227 @@
+[
+  {
+    "path": ".editorconfig",
+    "lines": 10,
+    "size": 147
+  },
+  {
+    "path": ".env.example",
+    "lines": 20,
+    "size": 383
+  },
+  {
+    "path": ".github/workflows/ci.yml",
+    "lines": 69,
+    "size": 1835
+  },
+  {
+    "path": ".gitignore",
+    "lines": 31,
+    "size": 288
+  },
+  {
+    "path": "api/openapi.yaml",
+    "lines": 56,
+    "size": 1222
+  },
+  {
+    "path": "api/postman_collection.json",
+    "lines": 166,
+    "size": 4126
+  },
+  {
+    "path": "DEPLOY.md",
+    "lines": 79,
+    "size": 2387
+  },
+  {
+    "path": "deploy/helm/Chart.yaml",
+    "lines": 21,
+    "size": 519
+  },
+  {
+    "path": "deploy/helm/templates/deployment.yaml",
+    "lines": 22,
+    "size": 490
+  },
+  {
+    "path": "deploy/helm/templates/service.yaml",
+    "lines": 12,
+    "size": 220
+  },
+  {
+    "path": "deploy/helm/values.yaml",
+    "lines": 63,
+    "size": 1195
+  },
+  {
+    "path": "deploy/k8s/deployment.yaml",
+    "lines": 63,
+    "size": 2037
+  },
+  {
+    "path": "deploy/k8s/hpa.yaml",
+    "lines": 19,
+    "size": 350
+  },
+  {
+    "path": "deploy/k8s/Makefile",
+    "lines": 36,
+    "size": 1371
+  },
+  {
+    "path": "deploy/k8s/pdb.yaml",
+    "lines": 10,
+    "size": 150
+  },
+  {
+    "path": "deploy/k8s/secrets.example.env",
+    "lines": 20,
+    "size": 442
+  },
+  {
+    "path": "deploy/k8s/service.yaml",
+    "lines": 13,
+    "size": 174
+  },
+  {
+    "path": "deploy/prometheus.yml",
+    "lines": 9,
+    "size": 152
+  },
+  {
+    "path": "docker-compose.yml",
+    "lines": 53,
+    "size": 1195
+  },
+  {
+    "path": "Dockerfile",
+    "lines": 18,
+    "size": 479
+  },
+  {
+    "path": "package.json",
+    "lines": 40,
+    "size": 987
+  },
+  {
+    "path": "prisma/schema.prisma",
+    "lines": 28,
+    "size": 505
+  },
+  {
+    "path": "prisma/seed.ts",
+    "lines": 27,
+    "size": 700
+  },
+  {
+    "path": "QUICKSTART.md",
+    "lines": 97,
+    "size": 2334
+  },
+  {
+    "path": "README.md",
+    "lines": 56,
+    "size": 1807
+  },
+  {
+    "path": "src/app.controller.ts",
+    "lines": 33,
+    "size": 615
+  },
+  {
+    "path": "src/app.module.ts",
+    "lines": 8,
+    "size": 309
+  },
+  {
+    "path": "src/auth/jwt.guard.ts",
+    "lines": 44,
+    "size": 1761
+  },
+  {
+    "path": "src/main.ts",
+    "lines": 32,
+    "size": 1146
+  },
+  {
+    "path": "src/modules/post/post.controller.spec.ts",
+    "lines": 53,
+    "size": 2155
+  },
+  {
+    "path": "src/modules/post/post.controller.ts",
+    "lines": 35,
+    "size": 873
+  },
+  {
+    "path": "src/modules/post/post.module.ts",
+    "lines": 10,
+    "size": 249
+  },
+  {
+    "path": "src/modules/post/post.service.ts",
+    "lines": 13,
+    "size": 562
+  },
+  {
+    "path": "src/modules/user/user.controller.spec.ts",
+    "lines": 53,
+    "size": 2257
+  },
+  {
+    "path": "src/modules/user/user.controller.ts",
+    "lines": 35,
+    "size": 873
+  },
+  {
+    "path": "src/modules/user/user.module.ts",
+    "lines": 10,
+    "size": 249
+  },
+  {
+    "path": "src/modules/user/user.service.ts",
+    "lines": 13,
+    "size": 562
+  },
+  {
+    "path": "src/repositories/post.repository.ts",
+    "lines": 32,
+    "size": 983
+  },
+  {
+    "path": "src/repositories/user.repository.ts",
+    "lines": 32,
+    "size": 983
+  },
+  {
+    "path": "src/services/post.service.ts",
+    "lines": 23,
+    "size": 602
+  },
+  {
+    "path": "src/services/user.service.ts",
+    "lines": 23,
+    "size": 602
+  },
+  {
+    "path": "src/validators/post.validator.ts",
+    "lines": 22,
+    "size": 538
+  },
+  {
+    "path": "src/validators/user.validator.ts",
+    "lines": 23,
+    "size": 578
+  },
+  {
+    "path": "tsconfig.json",
+    "lines": 27,
+    "size": 490
+  },
+  {
+    "path": "vitest.config.ts",
+    "lines": 8,
+    "size": 139
+  }
+]

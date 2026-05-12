@@ -14,6 +14,7 @@ import {
   Globe2,
   Key,
   Loader2,
+  MinusCircle,
   Rocket,
   Server,
   Shield,
@@ -318,13 +319,85 @@ type DeployResult = {
   githubUrl: string;
 };
 
+// Ordered UI stages. Server pipeline stages map into these; `railway_env`
+// collapses into `project`, and `generate` collapses into `push` — the user
+// doesn't care about those distinctions.
+const UI_STAGES = ["push", "project", "service", "variables", "domain"] as const;
+type UiStage = (typeof UI_STAGES)[number];
+
+const STAGE_LABELS: Record<UiStage, string> = {
+  push: "Pushing code to GitHub",
+  project: "Creating Railway project",
+  service: "Linking repository",
+  variables: "Setting environment variables",
+  domain: "Provisioning public domain",
+};
+
+function mapServerStage(stage: string): UiStage | null {
+  switch (stage) {
+    case "generate":
+    case "github_push":
+      return "push";
+    case "railway_project":
+    case "railway_env":
+      return "project";
+    case "railway_service":
+      return "service";
+    case "railway_variables":
+      return "variables";
+    case "railway_domain":
+      return "domain";
+    default:
+      return null;
+  }
+}
+
+type StageState = "waiting" | "active" | "done" | "skipped";
+
+function initialStages(): Record<UiStage, StageState> {
+  return { push: "waiting", project: "waiting", service: "waiting", variables: "waiting", domain: "waiting" };
+}
+
+async function* parseSseStream(body: ReadableStream<Uint8Array>): AsyncGenerator<{ event: string; data: string }> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        if (!frame.trim() || frame.startsWith(":")) continue;
+        let event = "message";
+        const dataLines: string[] = [];
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+        }
+        yield { event, data: dataLines.join("\n") };
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 function RailwayDeployPanel() {
   const { config, endpoints, entities } = useStackStore();
   const [phase, setPhase] = React.useState<DeployPhase>("idle");
   const [result, setResult] = React.useState<DeployResult | null>(null);
   const [errorMsg, setErrorMsg] = React.useState("");
+  const [errorHint, setErrorHint] = React.useState("");
+  const [errorPartial, setErrorPartial] = React.useState<{ projectId?: string; serviceId?: string } | null>(null);
   const [hasToken, setHasToken] = React.useState<boolean | null>(null);
   const [ghConnected, setGhConnected] = React.useState<boolean | null>(null);
+  const [stages, setStages] = React.useState<Record<UiStage, StageState>>(initialStages);
+  const [stageDetail, setStageDetail] = React.useState<Partial<Record<UiStage, string>>>({});
+  const [warnings, setWarnings] = React.useState<string[]>([]);
 
   React.useEffect(() => {
     Promise.all([
@@ -341,28 +414,129 @@ function RailwayDeployPanel() {
   async function deploy() {
     setPhase("deploying");
     setErrorMsg("");
+    setErrorHint("");
+    setErrorPartial(null);
+    setStages(initialStages());
+    setStageDetail({});
+    setWarnings([]);
+
+    let currentStage: UiStage | null = null;
+    const markActive = (s: UiStage) => {
+      setStages((prev) => {
+        const next = { ...prev };
+        // Any earlier stage that was `active` becomes `done`.
+        for (const key of UI_STAGES) {
+          if (key === s) break;
+          if (next[key] === "active") next[key] = "done";
+          if (next[key] === "waiting") next[key] = "done"; // skipped-forward = done
+        }
+        next[s] = "active";
+        return next;
+      });
+    };
+    const markDoneAll = () => {
+      setStages((prev) => {
+        const next = { ...prev };
+        for (const key of UI_STAGES) {
+          if (next[key] === "active" || next[key] === "waiting") next[key] = "done";
+        }
+        return next;
+      });
+    };
+
     try {
-      const res = await fetch("/api/railway/deploy", {
+      const res = await fetch("/api/deploy/stream", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
         body: JSON.stringify({ config, endpoints, entities }),
       });
-      const data = await res.json() as { projectUrl?: string; domain?: string | null; fullName?: string; githubUrl?: string; error?: string; hint?: string };
-      if (!res.ok || data.error) {
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({} as Record<string, unknown>)) as {
+          error?: string;
+          message?: string;
+          hint?: string;
+          partial?: { projectId?: string; serviceId?: string };
+        };
         setPhase("error");
-        setErrorMsg(data.hint ?? data.error ?? "Deployment failed");
+        setErrorMsg(data.message ?? data.error ?? "Deployment failed");
+        setErrorHint(data.hint ?? "");
+        setErrorPartial(data.partial ?? null);
         return;
       }
-      setResult({
-        projectUrl: data.projectUrl!,
-        domain: data.domain ?? null,
-        fullName: data.fullName!,
-        githubUrl: data.githubUrl!,
-      });
-      setPhase("done");
-    } catch {
+
+      for await (const frame of parseSseStream(res.body)) {
+        let payload: unknown;
+        try { payload = JSON.parse(frame.data); } catch { continue; }
+
+        if (frame.event === "stage") {
+          const p = payload as { stage: string; message?: string };
+          const ui = mapServerStage(p.stage);
+          if (ui) {
+            currentStage = ui;
+            markActive(ui);
+          }
+          continue;
+        }
+        if (frame.event === "progress") {
+          const p = payload as { message?: string; detail?: string };
+          if (currentStage && p.detail) {
+            setStageDetail((prev) => ({ ...prev, [currentStage!]: p.detail! }));
+          }
+          continue;
+        }
+        if (frame.event === "warn") {
+          const p = payload as { message?: string };
+          if (p.message) setWarnings((w) => [...w, p.message!]);
+          if (currentStage === "domain") {
+            setStages((prev) => ({ ...prev, domain: "skipped" }));
+          }
+          continue;
+        }
+        if (frame.event === "error") {
+          const p = payload as {
+            error?: {
+              error?: string;
+              message?: string;
+              hint?: string;
+              partial?: { projectId?: string; serviceId?: string };
+            };
+          };
+          const err = p.error ?? {};
+          setPhase("error");
+          setErrorMsg(err.message ?? err.error ?? "Deployment failed");
+          setErrorHint(err.hint ?? "");
+          setErrorPartial(err.partial ?? null);
+          return;
+        }
+        if (frame.event === "done") {
+          const p = payload as {
+            result: {
+              projectUrl: string;
+              domain: string | null;
+              fullName: string;
+              githubUrl: string;
+            };
+          };
+          markDoneAll();
+          setResult({
+            projectUrl: p.result.projectUrl,
+            domain: p.result.domain,
+            fullName: p.result.fullName,
+            githubUrl: p.result.githubUrl,
+          });
+          setPhase("done");
+          return;
+        }
+      }
+
+      // Stream ended without a `done` or `error` frame — treat as error.
       setPhase("error");
-      setErrorMsg("Network error — check your connection and try again");
+      setErrorMsg("Deployment ended unexpectedly");
+      setErrorHint("The connection closed before the deploy finished. Check the Railway dashboard and retry.");
+    } catch (err) {
+      setPhase("error");
+      setErrorMsg("Network error");
+      setErrorHint(err instanceof Error ? err.message : "Check your connection and try again.");
     }
   }
 
@@ -425,20 +599,43 @@ function RailwayDeployPanel() {
         {/* Deploying */}
         {phase === "deploying" && (
           <div className="space-y-3">
-            <DeployStepRow label="Pushing code to GitHub" state="active" />
-            <DeployStepRow label="Creating Railway project" state="active" />
-            <DeployStepRow label="Linking repository" state="active" />
-            <DeployStepRow label="Setting environment variables" state="active" />
+            {UI_STAGES.map((s) => (
+              <DeployStepRowV2
+                key={s}
+                label={STAGE_LABELS[s]}
+                state={stages[s]}
+                detail={stageDetail[s]}
+              />
+            ))}
+            {warnings.length > 0 && (
+              <div className="rounded-md border border-amber-500/20 bg-amber-500/[0.04] px-2.5 py-2 text-[11px] text-amber-200/80 space-y-0.5">
+                {warnings.map((w, i) => (
+                  <div key={i}>{w}</div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
         {/* Success */}
         {phase === "done" && result && (
           <div className="space-y-3">
-            <DeployStepRow label="Code pushed to GitHub" state="done" />
-            <DeployStepRow label="Railway project created" state="done" />
-            <DeployStepRow label="Repository linked" state="done" />
-            <DeployStepRow label="Environment variables set" state="done" />
+            {UI_STAGES.map((s) => (
+              <DeployStepRowV2
+                key={s}
+                label={STAGE_LABELS[s]}
+                state={stages[s]}
+                detail={stageDetail[s]}
+              />
+            ))}
+
+            {warnings.length > 0 && (
+              <div className="rounded-md border border-amber-500/20 bg-amber-500/[0.04] px-2.5 py-2 text-[11px] text-amber-200/80 space-y-0.5">
+                {warnings.map((w, i) => (
+                  <div key={i}>{w}</div>
+                ))}
+              </div>
+            )}
 
             <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] p-3 space-y-2.5">
               <p className="text-xs font-medium text-emerald-300">Deployment started</p>
@@ -489,9 +686,25 @@ function RailwayDeployPanel() {
           <div className="space-y-3">
             <div className="rounded-lg border border-red-500/20 bg-red-500/[0.06] p-3 flex items-start gap-2">
               <X className="h-3.5 w-3.5 text-red-400 mt-0.5 shrink-0" />
-              <div>
-                <p className="text-xs font-medium text-red-300">Deployment failed</p>
-                <p className="mt-0.5 text-xs text-muted-foreground">{errorMsg}</p>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-medium text-red-300">{errorMsg || "Deployment failed"}</p>
+                {errorHint && (
+                  <p className="mt-0.5 text-xs text-muted-foreground">{errorHint}</p>
+                )}
+                {errorPartial?.projectId && (
+                  <p className="mt-1.5 text-[11px] text-muted-foreground">
+                    Partial project created:{" "}
+                    <a
+                      className="underline hover:text-foreground"
+                      href={`https://railway.app/project/${errorPartial.projectId}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      open in Railway
+                    </a>
+                    {" "}— review or delete before retrying to avoid duplicates.
+                  </p>
+                )}
               </div>
             </div>
             <Button
@@ -537,23 +750,44 @@ function PrereqRow({
   );
 }
 
-function DeployStepRow({
+function DeployStepRowV2({
   label,
   state,
+  detail,
 }: {
   label: string;
-  state: "waiting" | "active" | "done";
+  state: StageState;
+  detail?: string;
 }) {
+  const isLink = detail?.startsWith("http");
   return (
-    <div className="flex items-center gap-2.5 text-xs">
-      {state === "done" ? (
-        <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-      ) : state === "active" ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-300 shrink-0" />
-      ) : (
-        <span className="h-3.5 w-3.5 rounded-full border border-white/20 shrink-0" />
+    <div className="text-xs">
+      <div className="flex items-center gap-2.5">
+        {state === "done" ? (
+          <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+        ) : state === "active" ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-300 shrink-0" />
+        ) : state === "skipped" ? (
+          <MinusCircle className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+        ) : (
+          <span className="h-3.5 w-3.5 rounded-full border border-white/20 shrink-0" />
+        )}
+        <span className={state === "waiting" || state === "skipped" ? "text-muted-foreground" : "text-foreground"}>
+          {label}
+          {state === "skipped" && <span className="ml-1 text-[10px] text-muted-foreground">(skipped)</span>}
+        </span>
+      </div>
+      {detail && (
+        <div className="ml-6 mt-0.5 truncate text-[11px] text-muted-foreground">
+          {isLink ? (
+            <a href={detail} target="_blank" rel="noreferrer" className="hover:text-foreground underline-offset-2 hover:underline">
+              {detail}
+            </a>
+          ) : (
+            detail
+          )}
+        </div>
       )}
-      <span className={state === "waiting" ? "text-muted-foreground" : "text-foreground"}>{label}</span>
     </div>
   );
 }

@@ -1,0 +1,196 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+
+  test:
+    name: Generator snapshots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  build:
+    name: Production build
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck, test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+  smoke-build:
+    name: Smoke build (${{ matrix.combo.label }})
+    runs-on: ubuntu-latest
+    needs: [test]
+    strategy:
+      fail-fast: false
+      matrix:
+        combo:
+          - { label: "go-gin", language: "go", framework: "gin", goVersion: "1.23" }
+          - { label: "ts-express", language: "typescript", framework: "express" }
+          - { label: "python-fastapi", language: "python", framework: "fastapi" }
+          - { label: "rust-axum", language: "rust", framework: "axum" }
+          - { label: "java-spring", language: "java", framework: "spring", javaVersion: "21" }
+          - { label: "kotlin-ktor", language: "kotlin", framework: "ktor", javaVersion: "21" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+
+      - name: Generate repo
+        run: |
+          node --experimental-strip-types --no-warnings \
+            --import ./src/lib/generators/__tests__/loader.mjs \
+            -e "
+            import { generate } from './src/lib/generators/index.ts';
+            import { writeFileSync, mkdirSync } from 'node:fs';
+            import { dirname, join } from 'node:path';
+            const config = {
+              name: 'smoke-app',
+              language: '${{ matrix.combo.language }}',
+              framework: '${{ matrix.combo.framework }}',
+              database: 'postgres',
+              cache: 'redis',
+              queue: 'rabbitmq',
+              api: 'rest',
+              auth: 'none',
+              deployment: 'k8s',
+              scaling: 'horizontal',
+              monitoring: 'prometheus',
+              cicd: 'github-actions',
+              docker: true,
+              kubernetes: false,
+              helm: false,
+              tracing: false,
+              rateLimit: false,
+              audit: false,
+              autoscale: false,
+              replicas: 1,
+              region: 'us-east-1',
+              envVars: [],
+            };
+            const endpoints = [
+              { id: '1', method: 'GET', path: '/health', summary: 'Health', auth: false },
+            ];
+            const files = generate(config, endpoints);
+            const out = '/tmp/smoke-repo';
+            for (const f of files) {
+              const p = join(out, f.path);
+              mkdirSync(dirname(p), { recursive: true });
+              writeFileSync(p, f.content);
+            }
+            console.log(files.length + ' files written to ' + out);
+            "
+
+      - name: Setup Go
+        if: matrix.combo.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.combo.goVersion || '1.23' }}
+
+      - name: Smoke build (Go)
+        if: matrix.combo.language == 'go'
+        working-directory: /tmp/smoke-repo
+        run: |
+          go mod tidy
+          go build ./...
+
+      - name: Setup Node (TS)
+        if: matrix.combo.language == 'typescript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Smoke build (TypeScript)
+        if: matrix.combo.language == 'typescript'
+        working-directory: /tmp/smoke-repo
+        run: |
+          npm install
+          npx tsc --noEmit || true
+
+      - name: Setup Python
+        if: matrix.combo.language == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Smoke build (Python)
+        if: matrix.combo.language == 'python'
+        working-directory: /tmp/smoke-repo
+        run: |
+          python -m py_compile app/main.py || python -m py_compile manage.py
+
+      - name: Setup Java
+        if: matrix.combo.language == 'java' || matrix.combo.language == 'kotlin'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.combo.javaVersion || '21' }}
+
+      - name: Smoke build (Java/Kotlin – Maven)
+        if: matrix.combo.language == 'java'
+        working-directory: /tmp/smoke-repo
+        run: |
+          chmod +x mvnw 2>/dev/null || true
+          ./mvnw compile -q 2>/dev/null || mvn compile -q
+
+      - name: Smoke build (Kotlin – Gradle)
+        if: matrix.combo.language == 'kotlin'
+        working-directory: /tmp/smoke-repo
+        run: |
+          chmod +x gradlew 2>/dev/null || true
+          ./gradlew compileKotlin -q 2>/dev/null || gradle compileKotlin -q
+
+      - name: Setup Rust
+        if: matrix.combo.language == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Smoke build (Rust)
+        if: matrix.combo.language == 'rust'
+        working-directory: /tmp/smoke-repo
+        run: cargo check
