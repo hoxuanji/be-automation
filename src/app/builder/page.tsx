@@ -52,6 +52,7 @@ import { EntityBuilder } from "@/components/builder/entity-builder";
 import { OnboardingWizard } from "@/components/builder/onboarding-wizard";
 import { useStackStore } from "@/lib/store";
 import { toast } from "@/components/ui/toast";
+import { cn } from "@/lib/utils";
 import { BrandIcon } from "@/components/shared/brand-icon";
 import {
   authProviders,
@@ -209,9 +210,17 @@ export default function BuilderPage() {
 
   const saveRef = React.useRef(saveCurrentProject);
   React.useEffect(() => { saveRef.current = saveCurrentProject; });
+  // Auto-save on unmount
   React.useEffect(() => {
     return () => { void saveRef.current().catch(() => {}); };
   }, []);
+  // Debounced auto-save: fire 2s after any config/endpoint/entity change
+  React.useEffect(() => {
+    const timer = setTimeout(() => {
+      void saveRef.current().catch(() => {});
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [config, endpoints, entities]);
 
   async function saveStack(silent = false) {
     setSaving(true);
@@ -311,6 +320,8 @@ export default function BuilderPage() {
 
         <ArchitecturePreview />
 
+        <QuickStart />
+
         <div className="grid gap-6 lg:grid-cols-[1fr,320px]">
           <div className="space-y-3 min-w-0">
             <AccordionSection
@@ -402,6 +413,13 @@ export default function BuilderPage() {
                 icon={<GitBranch className="h-4 w-4" />}
               />
               {config.cicd === "gh-actions" && <GitHubConnectPanel />}
+              <a
+                href="/git-settings"
+                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-brand-300 transition-colors"
+              >
+                <GitBranch className="h-3.5 w-3.5" />
+                Configure branch rules & PR strategy →
+              </a>
               <OptionPanel
                 title="Monitoring"
                 description="Traces, metrics, logs — wired in with sensible defaults."
@@ -425,6 +443,110 @@ export default function BuilderPage() {
       </div>
     </WorkspaceShell>
     </>
+  );
+}
+
+const QUICK_LANGUAGES = [
+  { id: "go", label: "Go", accent: "#00ADD8" },
+  { id: "typescript", label: "TypeScript", accent: "#3178C6" },
+  { id: "python", label: "Python", accent: "#3776AB" },
+  { id: "rust", label: "Rust", accent: "#DEA584" },
+] as const;
+
+const QUICK_DATABASES = [
+  { id: "postgres", label: "Postgres" },
+  { id: "mongodb", label: "MongoDB" },
+  { id: "mysql", label: "MySQL" },
+  { id: "sqlite", label: "SQLite" },
+] as const;
+
+function QuickStart() {
+  const { config, set, patch } = useStackStore();
+  const router = useRouter();
+  const [open, setOpen] = React.useState(false);
+  const [name, setName] = React.useState(config.name);
+
+  function go() {
+    patch({ name: name || config.name });
+    router.push("/preview");
+  }
+
+  return (
+    <div className="rounded-xl border border-brand-500/20 bg-brand-500/[0.04] overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between px-4 py-3 text-left"
+      >
+        <div className="flex items-center gap-2.5">
+          <Sparkles className="h-4 w-4 text-brand-400" />
+          <div>
+            <span className="text-sm font-semibold">Quick start</span>
+            <span className="ml-2 text-xs text-muted-foreground">name + language + database → preview in one click</span>
+          </div>
+        </div>
+        <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div className="border-t border-brand-500/10 px-4 py-4 space-y-4">
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="space-y-2">
+              <label className="text-xs text-muted-foreground font-medium">Project name</label>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="my-api"
+                className="text-sm h-8"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs text-muted-foreground font-medium">Language</label>
+              <div className="flex flex-wrap gap-1.5">
+                {QUICK_LANGUAGES.map((l) => (
+                  <button
+                    key={l.id}
+                    type="button"
+                    onClick={() => set("language", l.id as import("@/lib/store").StackConfig["language"])}
+                    className={cn(
+                      "rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
+                      config.language === l.id
+                        ? "border-brand-500/50 bg-brand-500/10 text-foreground"
+                        : "border-white/[0.08] text-muted-foreground hover:text-foreground hover:border-white/[0.15]"
+                    )}
+                    style={config.language === l.id ? { color: l.accent } : {}}
+                  >
+                    {l.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs text-muted-foreground font-medium">Database</label>
+              <div className="flex flex-wrap gap-1.5">
+                {QUICK_DATABASES.map((d) => (
+                  <button
+                    key={d.id}
+                    type="button"
+                    onClick={() => set("database", d.id)}
+                    className={cn(
+                      "rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
+                      config.database === d.id
+                        ? "border-brand-500/50 bg-brand-500/10 text-brand-300"
+                        : "border-white/[0.08] text-muted-foreground hover:text-foreground hover:border-white/[0.15]"
+                    )}
+                  >
+                    {d.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <Button variant="glow" size="sm" onClick={go}>
+            <Eye className="h-3.5 w-3.5" /> Preview & download
+          </Button>
+        </div>
+      )}
+    </div>
   );
 }
 

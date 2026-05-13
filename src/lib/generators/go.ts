@@ -32,7 +32,8 @@ export function goFiles(
   );
   const needsGorm = entities.length > 0 || withPatternDb;
 
-  files.push({ path: "go.mod", content: goMod(module, config.framework, needsGorm, withAuth, withPatternAuth) });
+  const withPrometheus = /prometheus|grafana/.test(config.monitoring);
+  files.push({ path: "go.mod", content: goMod(module, config.framework, needsGorm, withAuth, withPatternAuth, withPrometheus) });
   files.push({ path: "Dockerfile", content: goDockerfile() });
   files.push({
     path: "cmd/api/main.go",
@@ -104,7 +105,88 @@ export function goFiles(
     files.push({ path: "internal/cache/redis.go", content: goRedis() });
   }
 
+  if (withPrometheus) {
+    files.push({ path: "internal/monitoring/metrics.go", content: goPrometheusMetrics(module, config.framework) });
+  }
+
+  if (/sentry/.test(config.monitoring)) {
+    files.push({ path: "internal/monitoring/sentry.go", content: goSentryInit(module) });
+  }
+
+  if (/datadog/.test(config.monitoring)) {
+    files.push({ path: "internal/monitoring/datadog.go", content: goDatadogInit(module) });
+  }
+
   return files;
+}
+
+function goPrometheusMetrics(module: string, framework: string): string {
+  const fwImport = framework === "gin"
+    ? `"github.com/gin-gonic/gin"\n\t"github.com/prometheus/client_golang/prometheus/promhttp"`
+    : framework === "fiber"
+    ? `"github.com/gofiber/fiber/v2"\n\t"github.com/prometheus/client_golang/prometheus/promhttp"\n\t"net/http"`
+    : framework === "echo"
+    ? `"github.com/labstack/echo/v4"\n\t"github.com/prometheus/client_golang/prometheus/promhttp"\n\t"net/http"`
+    : `"net/http"\n\t"github.com/prometheus/client_golang/prometheus/promhttp"`;
+  const mountFn = framework === "gin"
+    ? `func MountMetrics(r *gin.Engine) {\n\tr.GET("/metrics", gin.WrapH(promhttp.Handler()))\n}`
+    : framework === "fiber"
+    ? `func MountMetrics(app *fiber.App) {\n\tapp.Get("/metrics", func(c *fiber.Ctx) error {\n\t\th := promhttp.Handler()\n\t\tadaptor := func(w http.ResponseWriter, r *http.Request) { h.ServeHTTP(w, r) }\n\t\t_ = adaptor\n\t\treturn c.Status(200).SendString("metrics")\n\t})\n}`
+    : framework === "echo"
+    ? `func MountMetrics(e *echo.Echo) {\n\te.GET("/metrics", echo.WrapHandler(promhttp.Handler()))\n}`
+    : `func MountMetrics(mux *http.ServeMux) {\n\tmux.Handle("/metrics", promhttp.Handler())\n}`;
+  return `package monitoring
+
+import (
+\t${fwImport}
+)
+
+// ${mountFn.split("\n")[0].replace("func ", "").split("(")[0]} exposes the Prometheus /metrics endpoint.
+// Call it from your server setup, e.g.: monitoring.MountMetrics(router)
+${mountFn}
+`;
+}
+
+function goSentryInit(_module: string): string {
+  return `package monitoring
+
+import (
+\t"log/slog"
+\t"os"
+
+\t"github.com/getsentry/sentry-go"
+)
+
+// Init initialises the Sentry SDK. Call once at startup before any request handling.
+func Init(log *slog.Logger) {
+\tif err := sentry.Init(sentry.ClientOptions{
+\t\tDsn:              os.Getenv("SENTRY_DSN"),
+\t\tTracesSampleRate: 1.0,
+\t}); err != nil {
+\t\tlog.Warn("sentry init failed", "err", err)
+\t}
+}
+`;
+}
+
+function goDatadogInit(_module: string): string {
+  return `package monitoring
+
+import (
+\t"log/slog"
+
+\t"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
+)
+
+// Init starts the Datadog APM tracer. Call once at startup before any request handling.
+func Init(log *slog.Logger) {
+\ttracer.Start(
+\t\ttracer.WithService("${_module}"),
+\t\ttracer.WithEnv("production"),
+\t)
+\tlog.Info("datadog tracer started")
+}
+`;
 }
 
 function goEntityHandler(module: string, framework: string, entity: Entity): string {
@@ -909,7 +991,7 @@ function buildGORMTags(f: { type: FieldType; primaryKey?: boolean; unique: boole
   return tags.join(" ");
 }
 
-function goMod(module: string, framework: string, withEntities = false, withAuth = false, withPatternAuth = false) {
+function goMod(module: string, framework: string, withEntities = false, withAuth = false, withPatternAuth = false, withPrometheus = false) {
   const frameworkDep: Record<string, string> = {
     gin: "\tgithub.com/gin-gonic/gin v1.10.0",
     fiber: "\tgithub.com/gofiber/fiber/v2 v2.52.0",
@@ -929,7 +1011,8 @@ function goMod(module: string, framework: string, withEntities = false, withAuth
   const patternAuthDeps = withPatternAuth
     ? "\tgithub.com/golang-jwt/jwt/v5 v5.2.1\n\tgolang.org/x/crypto v0.27.0\n\tgithub.com/google/uuid v1.6.0\n\tgithub.com/redis/go-redis/v9 v9.7.0"
     : "";
-  const allDeps = [gormDeps, authDeps, patternAuthDeps].filter(Boolean).join("\n");
+  const promDep = withPrometheus ? "\tgithub.com/prometheus/client_golang v1.20.4" : "";
+  const allDeps = [gormDeps, authDeps, patternAuthDeps, promDep].filter(Boolean).join("\n");
   return `module ${module}
 
 go 1.23
@@ -1196,7 +1279,7 @@ type Server struct {
 func New(cfg *config.Config, log *slog.Logger) *Server {
 \tgin.SetMode(gin.ReleaseMode)
 \tr := gin.New()
-\tr.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
+\tr.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""}${config.audit ? ", auditLog(log)" : ""})
 
 ${apiHSetup}\tr.GET("/health", healthHandler)
 ${routes}
@@ -1271,7 +1354,7 @@ type Server struct {
 
 func New(cfg *config.Config, log *slog.Logger) *Server {
 \tapp := fiber.New(fiber.Config{DisableStartupMessage: true})
-\tapp.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
+\tapp.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""}${config.audit ? ", auditLog(log)" : ""})
 
 ${apiHSetupF}\tapp.Get("/health", healthHandler)
 ${routesF}
@@ -1341,7 +1424,7 @@ type Server struct {
 func New(cfg *config.Config, log *slog.Logger) *Server {
 \te := echo.New()
 \te.HideBanner = true
-\te.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
+\te.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""}${config.audit ? ", auditLog(log)" : ""})
 
 ${apiHSetupE}\te.GET("/health", healthHandler)
 ${routesE}
@@ -1411,7 +1494,7 @@ type Server struct {
 
 func New(cfg *config.Config, log *slog.Logger) *Server {
 \tr := chi.NewRouter()
-\tr.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
+\tr.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""}${config.audit ? ", auditLog(log)" : ""})
 
 ${apiHSetupC}\tr.Get("/health", healthHandler)
 ${routesC}
@@ -1610,6 +1693,12 @@ func requestLog(log *slog.Logger) gin.HandlerFunc {
 
 ${config.rateLimit ? `func rateLimit() gin.HandlerFunc { return func(c *gin.Context) { c.Next() } } // TODO: implement using redis
 ` : ""}${config.tracing ? `func tracing() gin.HandlerFunc { return func(c *gin.Context) { c.Next() } } // TODO: wire otel
+` : ""}${config.audit ? `func auditLog(log *slog.Logger) gin.HandlerFunc {
+\treturn func(c *gin.Context) {
+\t\tc.Next()
+\t\tlog.Info("audit", "method", c.Request.Method, "path", c.Request.URL.Path, "status", c.Writer.Status(), "ip", c.ClientIP())
+\t}
+}
 ` : ""}${
   withAuth
     ? `func authRequired(c *gin.Context) {
@@ -1669,7 +1758,14 @@ func requestLog(log *slog.Logger) fiber.Handler {
 \t}
 }
 
-${config.rateLimit ? "func rateLimit() fiber.Handler { return func(c *fiber.Ctx) error { return c.Next() } }\n" : ""}${config.tracing ? "func tracing() fiber.Handler { return func(c *fiber.Ctx) error { return c.Next() } }\n" : ""}${
+${config.rateLimit ? "func rateLimit() fiber.Handler { return func(c *fiber.Ctx) error { return c.Next() } }\n" : ""}${config.tracing ? "func tracing() fiber.Handler { return func(c *fiber.Ctx) error { return c.Next() } }\n" : ""}${config.audit ? `func auditLog(log *slog.Logger) fiber.Handler {
+\treturn func(c *fiber.Ctx) error {
+\t\terr := c.Next()
+\t\tlog.Info("audit", "method", c.Method(), "path", c.Path(), "status", c.Response().StatusCode(), "ip", c.IP())
+\t\treturn err
+\t}
+}
+` : ""}${
   withAuth
     ? `func authRequired(c *fiber.Ctx) error {
 \tv, err := auth.Default()
@@ -1727,7 +1823,16 @@ func requestLog(log *slog.Logger) echo.MiddlewareFunc {
 \t}
 }
 
-${config.rateLimit ? "func rateLimit() echo.MiddlewareFunc { return func(next echo.HandlerFunc) echo.HandlerFunc { return next } }\n" : ""}${config.tracing ? "func tracing() echo.MiddlewareFunc { return func(next echo.HandlerFunc) echo.HandlerFunc { return next } }\n" : ""}${
+${config.rateLimit ? "func rateLimit() echo.MiddlewareFunc { return func(next echo.HandlerFunc) echo.HandlerFunc { return next } }\n" : ""}${config.tracing ? "func tracing() echo.MiddlewareFunc { return func(next echo.HandlerFunc) echo.HandlerFunc { return next } }\n" : ""}${config.audit ? `func auditLog(log *slog.Logger) echo.MiddlewareFunc {
+\treturn func(next echo.HandlerFunc) echo.HandlerFunc {
+\t\treturn func(c echo.Context) error {
+\t\t\terr := next(c)
+\t\t\tlog.Info("audit", "method", c.Request().Method, "path", c.Path(), "status", c.Response().Status, "ip", c.RealIP())
+\t\t\treturn err
+\t\t}
+\t}
+}
+` : ""}${
   withAuth
     ? `func authRequired(next echo.HandlerFunc) echo.HandlerFunc {
 \treturn func(c echo.Context) error {
@@ -1785,7 +1890,15 @@ func requestLog(log *slog.Logger) func(http.Handler) http.Handler {
 \t}
 }
 
-${config.rateLimit ? "func rateLimit() func(http.Handler) http.Handler { return func(next http.Handler) http.Handler { return next } }\n" : ""}${config.tracing ? "func tracing() func(http.Handler) http.Handler { return func(next http.Handler) http.Handler { return next } }\n" : ""}${
+${config.rateLimit ? "func rateLimit() func(http.Handler) http.Handler { return func(next http.Handler) http.Handler { return next } }\n" : ""}${config.tracing ? "func tracing() func(http.Handler) http.Handler { return func(next http.Handler) http.Handler { return next } }\n" : ""}${config.audit ? `func auditLog(log *slog.Logger) func(http.Handler) http.Handler {
+\treturn func(next http.Handler) http.Handler {
+\t\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+\t\t\tnext.ServeHTTP(w, r)
+\t\t\tlog.Info("audit", "method", r.Method, "path", r.URL.Path, "ip", r.RemoteAddr)
+\t\t})
+\t}
+}
+` : ""}${
   withAuth
     ? `func authRequired(next http.Handler) http.Handler {
 \treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

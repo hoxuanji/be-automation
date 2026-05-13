@@ -16,6 +16,14 @@ import { cn } from "@/lib/utils";
 const LANGUAGES = ["All", "Go", "TypeScript", "Python"] as const;
 type LangFilter = (typeof LANGUAGES)[number];
 
+const CATEGORIES = ["All", "REST API", "Microservice", "SaaS", "E-commerce", "CMS", "Cache Service"] as const;
+type CatFilter = (typeof CATEGORIES)[number];
+
+const DIFFICULTIES = ["All", "beginner", "intermediate", "advanced"] as const;
+type DiffFilter = (typeof DIFFICULTIES)[number];
+
+const DIFFICULTY_LABELS: Record<string, string> = { beginner: "Beginner", intermediate: "Intermediate", advanced: "Advanced" };
+
 function langKey(lang: string): LangFilter {
   const l = lang.toLowerCase();
   if (l === "go") return "Go";
@@ -27,9 +35,13 @@ function langKey(lang: string): LangFilter {
 export default function TemplatesPage() {
   const [search, setSearch] = React.useState("");
   const [lang, setLang] = React.useState<LangFilter>("All");
+  const [cat, setCat] = React.useState<CatFilter>("All");
+  const [diff, setDiff] = React.useState<DiffFilter>("All");
 
   const filtered = templates.filter((t) => {
     const matchesLang = lang === "All" || langKey(t.language) === lang;
+    const matchesCat = cat === "All" || t.category === cat;
+    const matchesDiff = diff === "All" || t.difficulty === diff;
     const q = search.toLowerCase().trim();
     const matchesSearch =
       !q ||
@@ -38,7 +50,7 @@ export default function TemplatesPage() {
       t.tags.some((tag) => tag.includes(q)) ||
       t.framework.toLowerCase().includes(q) ||
       t.database.toLowerCase().includes(q);
-    return matchesLang && matchesSearch;
+    return matchesLang && matchesCat && matchesDiff && matchesSearch;
   });
 
   return (
@@ -64,30 +76,66 @@ export default function TemplatesPage() {
           </div>
         </div>
 
-        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
-          <label className="flex items-center gap-2 rounded-md border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5 w-full sm:w-64 focus-within:border-brand-500/30">
-            <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="flex-1 bg-transparent text-xs placeholder:text-muted-foreground/70 focus:outline-none"
-              placeholder="Search templates…"
-            />
-          </label>
-          <div className="flex items-center gap-1.5">
-            {LANGUAGES.map((l) => (
+        <div className="space-y-2">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+            <label className="flex items-center gap-2 rounded-md border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5 w-full sm:w-64 focus-within:border-brand-500/30">
+              <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="flex-1 bg-transparent text-xs placeholder:text-muted-foreground/70 focus:outline-none"
+                placeholder="Search templates…"
+              />
+            </label>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {LANGUAGES.map((l) => (
+                <button
+                  key={l}
+                  type="button"
+                  onClick={() => setLang(l)}
+                  className={cn(
+                    "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
+                    lang === l
+                      ? "border-brand-500/40 bg-brand-500/10 text-brand-300"
+                      : "border-white/10 bg-white/[0.02] text-muted-foreground hover:text-foreground hover:bg-white/[0.04]"
+                  )}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wider mr-1">Category</span>
+            {CATEGORIES.map((c) => (
               <button
-                key={l}
+                key={c}
                 type="button"
-                onClick={() => setLang(l)}
+                onClick={() => setCat(c)}
                 className={cn(
-                  "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
-                  lang === l
-                    ? "border-brand-500/40 bg-brand-500/10 text-brand-300"
+                  "rounded-full border px-2.5 py-0.5 text-[11px] transition-colors",
+                  cat === c
+                    ? "border-purple-500/40 bg-purple-500/10 text-purple-300"
                     : "border-white/10 bg-white/[0.02] text-muted-foreground hover:text-foreground hover:bg-white/[0.04]"
                 )}
               >
-                {l}
+                {c}
+              </button>
+            ))}
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wider ml-2 mr-1">Difficulty</span>
+            {DIFFICULTIES.map((d) => (
+              <button
+                key={d}
+                type="button"
+                onClick={() => setDiff(d)}
+                className={cn(
+                  "rounded-full border px-2.5 py-0.5 text-[11px] transition-colors",
+                  diff === d
+                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                    : "border-white/10 bg-white/[0.02] text-muted-foreground hover:text-foreground hover:bg-white/[0.04]"
+                )}
+              >
+                {d === "All" ? "All" : DIFFICULTY_LABELS[d]}
               </button>
             ))}
           </div>
@@ -137,6 +185,9 @@ function TemplateCard({ template }: { template: Template }) {
         <div className="flex items-start justify-between gap-2">
           <BrandIcon id={template.language} size={32} rounded="md" />
           <div className="flex flex-wrap justify-end gap-1.5">
+            <Badge variant="outline" className={cn("text-[10px]", template.difficulty === "beginner" ? "border-emerald-500/30 text-emerald-300" : template.difficulty === "advanced" ? "border-red-500/30 text-red-300" : "border-amber-500/30 text-amber-300")}>
+              {DIFFICULTY_LABELS[template.difficulty]}
+            </Badge>
             <Badge variant="outline" className="text-[10px]">
               {template.entities.length} model{template.entities.length !== 1 ? "s" : ""}
             </Badge>

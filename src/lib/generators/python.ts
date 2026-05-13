@@ -367,13 +367,18 @@ function pyproject(config: StackConfig, withModels = false, withAuth = false) {
     ? `\nsqlalchemy = "^2.0.0"\nalembic = "^1.13.0"\n${isPostgres ? `psycopg2-binary = "^2.9.0"\n` : `aiosqlite = "^0.20.0"\n`}`
     : "";
   const authDeps = withAuth
-    // PyJWT 2.8+ ships PyJWKClient with key caching; `crypto` pulls in
-    // cryptography for RS256/ES256 signatures.
     ? `\npyjwt = { version = "^2.9.0", extras = ["crypto"] }`
+    : "";
+  const monDeps = /prometheus|grafana/.test(config.monitoring) && config.framework === "fastapi"
+    ? `\nprometheus-fastapi-instrumentator = "^7.0.0"`
+    : /sentry/.test(config.monitoring)
+    ? `\nsentry-sdk = { version = "^2.19.0", extras = ["fastapi"] }`
+    : /datadog/.test(config.monitoring)
+    ? `\nddtrace = "^2.14.0"`
     : "";
   const deps =
     config.framework === "fastapi"
-      ? `fastapi = "^0.115.0"\nuvicorn = { extras = ["standard"], version = "^0.30.0" }\npydantic = "^2.9.0"\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}`
+      ? `fastapi = "^0.115.0"\nuvicorn = { extras = ["standard"], version = "^0.30.0" }\npydantic = "^2.9.0"\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}${monDeps}`
       : config.framework === "litestar"
       ? `litestar = { extras = ["standard"], version = "^2.12.0" }\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}`
       : `django = "^5.1.0"\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}`;
@@ -569,7 +574,17 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
-
+${/prometheus|grafana/.test(config.monitoring) ? `
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator().instrument(app).expose(app)
+` : /sentry/.test(config.monitoring) ? `
+import sentry_sdk
+sentry_sdk.init(dsn=settings.sentry_dsn if hasattr(settings, "sentry_dsn") else None, traces_sample_rate=1.0)
+` : /datadog/.test(config.monitoring) ? `
+from ddtrace.contrib.asgi import TraceMiddleware
+from starlette.middleware import Middleware
+app.add_middleware(TraceMiddleware)
+` : ""}
 
 @app.get("/health")
 async def health():

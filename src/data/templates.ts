@@ -8,6 +8,8 @@ export type Template = {
   language: string;
   framework: string;
   database: string;
+  category: string;
+  difficulty: "beginner" | "intermediate" | "advanced";
   config: StackConfig;
   endpoints: Endpoint[];
   entities: Entity[];
@@ -71,6 +73,8 @@ export const templates: Template[] = [
     language: "go",
     framework: "gin",
     database: "postgres",
+    category: "REST API",
+    difficulty: "beginner",
     config: {
       name: "go-rest-api",
       language: "go",
@@ -106,6 +110,8 @@ export const templates: Template[] = [
     language: "typescript",
     framework: "express",
     database: "postgres",
+    category: "REST API",
+    difficulty: "beginner",
     config: {
       name: "ts-express-api",
       language: "typescript",
@@ -141,6 +147,8 @@ export const templates: Template[] = [
     language: "python",
     framework: "fastapi",
     database: "postgres",
+    category: "REST API",
+    difficulty: "beginner",
     config: {
       name: "fastapi-service",
       language: "python",
@@ -176,6 +184,8 @@ export const templates: Template[] = [
     language: "go",
     framework: "fiber",
     database: "mongodb",
+    category: "E-commerce",
+    difficulty: "intermediate",
     config: {
       name: "ecommerce-api",
       language: "go",
@@ -257,6 +267,8 @@ export const templates: Template[] = [
     language: "typescript",
     framework: "nestjs",
     database: "postgres",
+    category: "SaaS",
+    difficulty: "advanced",
     config: {
       name: "saas-pm-api",
       language: "typescript",
@@ -331,6 +343,8 @@ export const templates: Template[] = [
     language: "typescript",
     framework: "hono",
     database: "neon",
+    category: "CMS",
+    difficulty: "beginner",
     config: {
       name: "blog-cms-api",
       language: "typescript",
@@ -398,6 +412,8 @@ export const templates: Template[] = [
     language: "go",
     framework: "echo",
     database: "postgres",
+    category: "REST API",
+    difficulty: "intermediate",
     config: {
       name: "go-cached-api",
       language: "go",
@@ -443,6 +459,8 @@ export const templates: Template[] = [
     language: "typescript",
     framework: "fastify",
     database: "mongodb",
+    category: "REST API",
+    difficulty: "intermediate",
     config: {
       name: "event-mgmt-api",
       language: "typescript",
@@ -510,6 +528,8 @@ export const templates: Template[] = [
     language: "python",
     framework: "fastapi",
     database: "mongodb",
+    category: "REST API",
+    difficulty: "intermediate",
     config: {
       name: "media-platform-api",
       language: "python",
@@ -576,6 +596,8 @@ export const templates: Template[] = [
     language: "go",
     framework: "chi",
     database: "sqlite",
+    category: "REST API",
+    difficulty: "beginner",
     config: {
       name: "notes-api",
       language: "go",
@@ -642,6 +664,8 @@ export const templates: Template[] = [
     language: "typescript",
     framework: "nestjs",
     database: "postgres",
+    category: "Microservice",
+    difficulty: "advanced",
     config: {
       name: "billing-svc",
       language: "typescript",
@@ -698,6 +722,8 @@ export const templates: Template[] = [
     language: "typescript",
     framework: "express",
     database: "redis",
+    category: "Cache Service",
+    difficulty: "intermediate",
     config: {
       name: "cache-svc",
       language: "typescript",

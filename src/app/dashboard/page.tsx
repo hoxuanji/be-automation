@@ -24,6 +24,9 @@ import {
   Users,
   ChevronDown,
   Loader2,
+  X,
+  ChevronRight,
+  Check,
 } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import { Card } from "@/components/ui/card";
@@ -33,6 +36,153 @@ import { toast } from "@/components/ui/toast";
 import { useStackStore, type SavedProject } from "@/lib/store";
 import type { StackConfig } from "@/lib/generators/types";
 import { cn } from "@/lib/utils";
+
+const ONBOARDED_KEY = "helios_onboarded";
+
+const STARTER_LANGUAGES = [
+  { id: "go", label: "Go", desc: "Fast, compiled, great for high-throughput APIs.", accent: "#00ADD8" },
+  { id: "typescript", label: "TypeScript", desc: "Node.js + TypeScript for end-to-end typed APIs.", accent: "#3178C6" },
+  { id: "python", label: "Python", desc: "Async FastAPI stack with Pydantic v2 models.", accent: "#3776AB" },
+  { id: "rust", label: "Rust", desc: "Memory-safe, blazing performance.", accent: "#DEA584" },
+] as const;
+
+function OnboardingModal() {
+  const { set } = useStackStore();
+  const router = useRouter();
+  const [open, setOpen] = React.useState(false);
+  const [step, setStep] = React.useState(0);
+  const [pickedLang, setPickedLang] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    try {
+      if (!localStorage.getItem(ONBOARDED_KEY)) setOpen(true);
+    } catch {}
+  }, []);
+
+  function dismiss() {
+    try { localStorage.setItem(ONBOARDED_KEY, "1"); } catch {}
+    setOpen(false);
+  }
+
+  function finish() {
+    if (pickedLang) {
+      set("language", pickedLang as StackConfig["language"]);
+    }
+    dismiss();
+    router.push("/builder");
+  }
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+      <div className="relative w-full max-w-md rounded-2xl border border-white/[0.08] bg-[#0d0d12] shadow-2xl overflow-hidden">
+        <div className="pointer-events-none absolute -top-32 -right-32 h-64 w-64 aurora animate-aurora opacity-40" />
+
+        {/* Progress dots */}
+        <div className="relative flex items-center justify-between px-6 pt-5 pb-0">
+          <div className="flex items-center gap-2">
+            {[0, 1].map((i) => (
+              <span
+                key={i}
+                className={cn(
+                  "h-1.5 rounded-full transition-all",
+                  i === step ? "w-6 bg-brand-400" : i < step ? "w-1.5 bg-brand-400/40" : "w-1.5 bg-white/10"
+                )}
+              />
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={dismiss}
+            className="text-muted-foreground hover:text-foreground transition-colors"
+            aria-label="Skip"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="relative px-6 py-6">
+          {step === 0 && (
+            <div className="space-y-4">
+              <div className="h-12 w-12 rounded-xl bg-gradient-to-br from-brand-500/30 to-purple-500/30 border border-white/[0.08] grid place-items-center">
+                <Rocket className="h-6 w-6 text-brand-300" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold">Welcome to Helios</h2>
+                <p className="mt-1.5 text-sm text-muted-foreground">
+                  Configure your backend stack visually and download a real, buildable repository in seconds.
+                </p>
+              </div>
+              <ul className="space-y-2 text-sm text-muted-foreground">
+                {[
+                  "Pick your language, framework, and database",
+                  "Define API endpoints and entities",
+                  "Download or deploy directly to Railway",
+                ].map((item) => (
+                  <li key={item} className="flex items-start gap-2">
+                    <Check className="h-3.5 w-3.5 mt-0.5 shrink-0 text-brand-400" />
+                    {item}
+                  </li>
+                ))}
+              </ul>
+              <Button variant="glow" className="w-full" onClick={() => setStep(1)}>
+                Get started <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
+          )}
+
+          {step === 1 && (
+            <div className="space-y-4">
+              <div>
+                <h2 className="text-lg font-semibold">Pick your language</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  You can change this any time in the builder.
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {STARTER_LANGUAGES.map((lang) => (
+                  <button
+                    key={lang.id}
+                    type="button"
+                    onClick={() => setPickedLang(lang.id)}
+                    className={cn(
+                      "rounded-xl border p-3 text-left transition-all",
+                      pickedLang === lang.id
+                        ? "border-brand-500/60 bg-brand-500/10"
+                        : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]"
+                    )}
+                  >
+                    <div
+                      className="mb-2 text-xs font-semibold"
+                      style={{ color: lang.accent }}
+                    >
+                      {lang.label}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground leading-snug">{lang.desc}</div>
+                  </button>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <Button variant="secondary" className="flex-1" onClick={() => setStep(0)}>
+                  Back
+                </Button>
+                <Button
+                  variant="glow"
+                  className="flex-1"
+                  disabled={!pickedLang}
+                  onClick={finish}
+                >
+                  Open builder <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -177,6 +327,7 @@ export default function DashboardPage() {
     <WorkspaceShell
       breadcrumb={[{ label: "Dashboard" }]}
     >
+      <OnboardingModal />
       <PersistenceWarning />
       <div className="mx-auto max-w-6xl p-6 md:p-8 space-y-8">
         <HeaderBlock name={authUser?.name} projectCount={savedProjects.length} />

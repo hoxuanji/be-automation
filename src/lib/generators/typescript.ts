@@ -27,6 +27,10 @@ export function typescriptFiles(
   endpoints: Endpoint[],
   entities: Entity[] = []
 ): GeneratedFile[] {
+  if (config.api === "trpc") {
+    return tRPCFiles(config, endpoints, entities);
+  }
+
   // gRPC mode replaces the framework-specific HTTP bootstrap with a @grpc/grpc-js
   // server. Prisma schema is still useful so we keep it — the generated
   // service stubs can plug into PrismaClient without further ceremony.
@@ -44,7 +48,7 @@ export function typescriptFiles(
   const anyProtected = endpoints.some((e) => e.auth);
   const withAuth = needsAuth(config, anyProtected);
 
-  files.push({ path: "package.json", content: pkgJson(name, config.framework, entities.length > 0, config.database, withAuth) });
+  files.push({ path: "package.json", content: pkgJson(name, config.framework, entities.length > 0, config.database, withAuth, config.monitoring) });
   files.push({ path: "tsconfig.json", content: tsconfig() });
   files.push({ path: "Dockerfile", content: tsDockerfile() });
   files.push({ path: "vitest.config.ts", content: vitestConfig() });
@@ -555,7 +559,7 @@ function prismaType(t: FieldType): string {
   }
 }
 
-function pkgJson(name: string, framework: string, withPrisma = false, _db = "", withAuth = false) {
+function pkgJson(name: string, framework: string, withPrisma = false, _db = "", withAuth = false, monitoring = "") {
   const deps: Record<string, Record<string, string>> = {
     nestjs: {
       "@nestjs/common": "^10.4.0",
@@ -587,8 +591,10 @@ function pkgJson(name: string, framework: string, withPrisma = false, _db = "", 
   const dep = {
     ...(deps[framework] ?? deps.hono),
     ...(withPrisma ? { "@prisma/client": "^5.22.0" } : {}),
-    // jose handles JWKS fetch + cache + JWT verify for every supported provider.
     ...(withAuth ? { jose: "^5.9.6" } : {}),
+    ...(/prometheus|grafana/.test(monitoring) && framework === "express" ? { "prom-client": "^15.1.3" } : {}),
+    ...(/sentry/.test(monitoring) && framework === "express" ? { "@sentry/node": "^8.42.0" } : {}),
+    ...(/datadog/.test(monitoring) && framework === "express" ? { "dd-trace": "^5.23.0" } : {}),
   };
   return (
     JSON.stringify(
@@ -1140,7 +1146,7 @@ function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
 import helmet from "helmet";
 import cors from "cors";
 import pinoHttp from "pino-http";
-${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}import { authRequired } from "./middleware/auth";
+${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}${config.audit ? `import { auditLogger } from "./middleware/audit";\n` : ""}${/prometheus|grafana/.test(config.monitoring) ? `import { collectDefaultMetrics, register } from "prom-client";\ncollectDefaultMetrics();\n` : ""}${/sentry/.test(config.monitoring) ? `import * as Sentry from "@sentry/node";\nSentry.init({ dsn: process.env.SENTRY_DSN, tracesSampleRate: 1.0 });\n` : ""}${/datadog/.test(config.monitoring) ? `import tracer from "dd-trace";\ntracer.init();\n` : ""}import { authRequired } from "./middleware/auth";
 ${entityImports ? entityImports + "\n" : ""}
 // Comma-separated list of origins in ALLOWED_ORIGINS, e.g.
 // "https://app.example.com,https://admin.example.com". Omit to keep CORS
@@ -1163,9 +1169,9 @@ app.use(pinoHttp({
   // without a text-to-JSON transform.
   redact: ["req.headers.authorization", "req.headers.cookie"],
 }));
-${config.rateLimit ? "app.use(rateLimit);\n" : ""}
+${config.rateLimit ? "app.use(rateLimit);\n" : ""}${config.audit ? "app.use(auditLogger);\n" : ""}
 app.get("/health", (_, res) => res.json({ ok: true }));
-${routes}
+${/prometheus|grafana/.test(config.monitoring) ? `app.get("/metrics", async (_, res) => { res.set("Content-Type", register.contentType); res.end(await register.metrics()); });\n` : ""}${routes}
 ${entityMounts}
 const port = Number(process.env.PORT ?? 8080);
 const server = app.listen(port, () => console.log(JSON.stringify({ level: "info", msg: "listening", port })));
@@ -1240,6 +1246,33 @@ export async function authRequired(req: Request, res: Response, next: NextFuncti
 }
 `,
     },
+    ...(config.audit
+      ? [
+          {
+            path: "src/middleware/audit.ts",
+            content: `import type { Request, Response, NextFunction } from "express";
+
+export function auditLogger(req: Request, res: Response, next: NextFunction) {
+  res.on("finish", () => {
+    process.stdout.write(
+      JSON.stringify({
+        level: "info",
+        event: "audit",
+        method: req.method,
+        path: req.path,
+        status: res.statusCode,
+        userId: (req as Record<string, unknown> & { user?: { sub?: string } }).user?.sub ?? "anonymous",
+        ip: req.ip ?? req.socket.remoteAddress,
+        time: new Date().toISOString(),
+      }) + "\\n"
+    );
+  });
+  next();
+}
+`,
+          },
+        ]
+      : []),
     ...(config.rateLimit
       ? [
           {
@@ -1376,6 +1409,131 @@ function shutdown(signal: string) {
 }
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+`,
+    },
+  ];
+}
+
+function tRPCFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
+  const name = safeName(config.name);
+
+  const procedures = endpoints.map((e) => {
+    const key = handlerName(e);
+    const isQuery = e.method === "GET";
+    return `  ${key}: ${isQuery ? "publicProcedure.query" : "publicProcedure.mutation"}(() => ({ ok: true, op: "${e.method} ${e.path}" })),`;
+  }).join("\n");
+
+  const entityProcedures = entities.flatMap((en) => {
+    const n = en.name.toLowerCase();
+    return [
+      `  ${n}List: publicProcedure.query(() => [] as ${en.name}[]),`,
+      `  ${n}GetById: publicProcedure.input(z.object({ id: z.string() })).query(({ input }) => ({ id: input.id } as ${en.name})),`,
+      `  ${n}Create: publicProcedure.input(z.object({ data: z.record(z.unknown()) })).mutation(({ input }) => ({ id: "new", ...input.data } as unknown as ${en.name})),`,
+      `  ${n}Delete: publicProcedure.input(z.object({ id: z.string() })).mutation(({ input }) => ({ deleted: input.id })),`,
+    ];
+  }).join("\n");
+
+  const entityTypes = entities.map((en) => {
+    const fields = en.fields.map((f) => {
+      const tsType = f.type === "number" ? "number" : f.type === "boolean" ? "boolean" : f.type === "date" ? "string" : f.type === "json" ? "Record<string, unknown>" : "string";
+      return `  ${f.name}${f.required ? "" : "?"}: ${tsType};`;
+    }).join("\n");
+    return `export type ${en.name} = {\n${fields}\n};`;
+  }).join("\n\n");
+
+  return [
+    {
+      path: "package.json",
+      content: JSON.stringify({
+        name,
+        version: "0.1.0",
+        private: true,
+        scripts: {
+          dev: "tsx watch src/server.ts",
+          start: "node dist/server.js",
+          build: "tsc -p tsconfig.json",
+          test: "vitest run",
+        },
+        dependencies: {
+          "@trpc/server": "^11.0.0",
+          express: "^4.21.0",
+          zod: "^3.24.1",
+          "pino-http": "^10.3.0",
+        },
+        devDependencies: {
+          "@types/express": "^4.17.21",
+          "@types/node": "^22.10.5",
+          tsx: "^4.19.0",
+          typescript: "^5.7.2",
+          vitest: "^2.0.0",
+        },
+      }, null, 2) + "\n",
+    },
+    { path: "tsconfig.json", content: tsconfig() },
+    {
+      path: "src/trpc.ts",
+      content: `import { initTRPC } from "@trpc/server";
+import { z } from "zod";
+
+export { z };
+
+const t = initTRPC.create();
+export const router = t.router;
+export const publicProcedure = t.procedure;
+`,
+    },
+    {
+      path: "src/types.ts",
+      content: entityTypes || `// Add your shared types here.\nexport {};\n`,
+    },
+    {
+      path: "src/router.ts",
+      content: `import { router, publicProcedure, z } from "./trpc";
+${entities.length > 0 ? `import type { ${entities.map((e) => e.name).join(", ")} } from "./types";` : ""}
+
+export const appRouter = router({
+  health: publicProcedure.query(() => ({ ok: true })),
+${procedures}
+${entityProcedures}
+});
+
+export type AppRouter = typeof appRouter;
+`,
+    },
+    {
+      path: "src/server.ts",
+      content: `import express from "express";
+import pinoHttp from "pino-http";
+import * as trpcExpress from "@trpc/server/adapters/express";
+import { appRouter } from "./router";
+
+const app = express();
+app.use(pinoHttp());
+app.use(
+  "/trpc",
+  trpcExpress.createExpressMiddleware({ router: appRouter })
+);
+app.get("/health", (_, res) => res.json({ ok: true }));
+
+const port = Number(process.env.PORT ?? 8080);
+app.listen(port, () =>
+  console.log(JSON.stringify({ level: "info", msg: "listening", port }))
+);
+`,
+    },
+    {
+      path: "src/client.ts",
+      content: `import { createTRPCClient, httpBatchLink } from "@trpc/client";
+import type { AppRouter } from "./router";
+
+// Example client — import this in any consuming project.
+export const trpc = createTRPCClient<AppRouter>({
+  links: [
+    httpBatchLink({
+      url: process.env.API_URL ?? "http://localhost:8080/trpc",
+    }),
+  ],
+});
 `,
     },
   ];

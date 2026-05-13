@@ -139,6 +139,16 @@ function openDb(): Database.Database {
   // Idempotent migration: gallery owner + rate_limits
   try { db.exec("ALTER TABLE gallery_stacks ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE SET NULL"); } catch {}
   db.exec(`
+    CREATE TABLE IF NOT EXISTS gallery_reports (
+      id          TEXT PRIMARY KEY,
+      stack_id    TEXT REFERENCES gallery_stacks(id) ON DELETE CASCADE,
+      reporter_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      reason      TEXT,
+      created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_gallery_reports_stack ON gallery_reports(stack_id);
+  `);
+  db.exec(`
     CREATE TABLE IF NOT EXISTS rate_limits (
       key      TEXT PRIMARY KEY,
       count    INTEGER NOT NULL DEFAULT 1,
@@ -532,6 +542,12 @@ export function deleteGalleryStack(id: string, ownerId: string): boolean {
     .prepare("DELETE FROM gallery_stacks WHERE id = ? AND owner_id = ?")
     .run(id, ownerId);
   return result.changes > 0;
+}
+
+export function reportGalleryStack(id: string, stackId: string, reporterId: string, reason?: string): void {
+  getDb()
+    .prepare("INSERT OR IGNORE INTO gallery_reports (id, stack_id, reporter_id, reason) VALUES (?, ?, ?, ?)")
+    .run(id, stackId, reporterId, reason ?? null);
 }
 
 // ─── Account deletion ─────────────────────────────────────────────────────────

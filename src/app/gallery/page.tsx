@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
+  Flag,
   Globe,
   Loader2,
   Search,
@@ -75,6 +76,7 @@ export default function GalleryPage() {
   const [debouncedQ, setDebouncedQ] = React.useState("");
   const [starring, setStarring] = React.useState<string | null>(null);
   const [deleting, setDeleting] = React.useState<string | null>(null);
+  const [reporting, setReporting] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(query), 300);
@@ -142,6 +144,19 @@ export default function GalleryPage() {
       toast({ title: "Star failed", kind: "error" });
     } finally {
       setStarring(null);
+    }
+  }
+
+  async function handleReport(stack: GalleryStack) {
+    if (reporting || !authUser) return;
+    setReporting(stack.id);
+    try {
+      await fetch(`/api/gallery/${stack.id}/report`, { method: "POST" });
+      toast({ title: "Reported", description: "Thanks — we'll review this stack.", kind: "success" });
+    } catch {
+      toast({ title: "Report failed", kind: "error" });
+    } finally {
+      setReporting(null);
     }
   }
 
@@ -240,11 +255,14 @@ export default function GalleryPage() {
                   key={stack.id}
                   stack={stack}
                   isOwner={!!authUser && authUser.id === stack.owner_id}
+                  isLoggedIn={!!authUser}
                   starring={starring === stack.id}
                   deleting={deleting === stack.id}
+                  reporting={reporting === stack.id}
                   onLoad={() => loadInBuilder(stack)}
                   onStar={() => handleStar(stack)}
                   onDelete={() => handleDelete(stack)}
+                  onReport={() => handleReport(stack)}
                 />
               ))}
             </div>
@@ -266,19 +284,25 @@ export default function GalleryPage() {
 function StackCard({
   stack,
   isOwner,
+  isLoggedIn,
   starring,
   deleting,
+  reporting,
   onLoad,
   onStar,
   onDelete,
+  onReport,
 }: {
   stack: GalleryStack;
   isOwner: boolean;
+  isLoggedIn: boolean;
   starring: boolean;
   deleting: boolean;
+  reporting: boolean;
   onLoad: () => void;
   onStar: () => void;
   onDelete: () => void;
+  onReport: () => void;
 }) {
   return (
     <Card className="group relative overflow-hidden hover-raise flex flex-col">
@@ -289,7 +313,7 @@ function StackCard({
             <BrandIcon id={stack.language} size={18} />
             <span className="font-medium text-sm truncate">{stack.title}</span>
           </div>
-          <div className="flex items-center gap-1 shrink-0">
+          <div className="flex items-center gap-1.5 shrink-0">
             {isOwner && (
               <button
                 onClick={onDelete}
@@ -301,6 +325,20 @@ function StackCard({
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : (
                   <Trash2 className="h-3.5 w-3.5" />
+                )}
+              </button>
+            )}
+            {isLoggedIn && !isOwner && (
+              <button
+                onClick={onReport}
+                disabled={reporting}
+                className="text-muted-foreground/40 hover:text-amber-400 transition-colors"
+                aria-label="Report"
+              >
+                {reporting ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Flag className="h-3 w-3" />
                 )}
               </button>
             )}
