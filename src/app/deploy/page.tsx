@@ -6,10 +6,8 @@ import {
   ArrowRight,
   Check,
   ChevronRight,
-  CircleDollarSign,
   CloudCog,
   Copy,
-  Cpu,
   ExternalLink,
   FileText,
   Github,
@@ -19,31 +17,19 @@ import {
   MinusCircle,
   RefreshCw,
   Rocket,
-  Server,
   Sparkles,
-  Zap,
   X,
 } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { Slider } from "@/components/ui/slider";
 import { Separator } from "@/components/ui/separator";
 import { useStackStore, type GithubRepo } from "@/lib/store";
 import { deployments } from "@/data/stack-options";
 import { toast } from "@/components/ui/toast";
 import { BrandIcon } from "@/components/shared/brand-icon";
 
-const regions = [
-  { id: "us-east-1", label: "US East · N. Virginia", flag: "🇺🇸", ms: 42 },
-  { id: "us-west-2", label: "US West · Oregon", flag: "🇺🇸", ms: 58 },
-  { id: "eu-west-2", label: "EU West · London", flag: "🇬🇧", ms: 86 },
-  { id: "ap-south-1", label: "APAC · Mumbai", flag: "🇮🇳", ms: 124 },
-  { id: "sa-east-1", label: "South America · São Paulo", flag: "🇧🇷", ms: 142 },
-  { id: "ap-southeast-2", label: "APAC · Sydney", flag: "🇦🇺", ms: 168 },
-];
 
 export default function DeployPage() {
   const { config, patch } = useStackStore();
@@ -76,6 +62,20 @@ export default function DeployPage() {
                 <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
                   {deployments.map((d) => {
                     const isLive = d.id === "railway";
+                    if (!isLive) {
+                      return (
+                        <div
+                          key={d.id}
+                          className="relative rounded-xl border border-white/[0.04] bg-white/[0.01] p-3 opacity-50 cursor-not-allowed select-none"
+                        >
+                          <span className="absolute top-2 right-2 rounded-full border border-white/20 bg-white/[0.06] px-1.5 py-0.5 text-[9px] font-medium text-muted-foreground">
+                            Coming soon
+                          </span>
+                          <BrandIcon id={d.id} size={32} rounded="lg" />
+                          <div className="mt-3 text-sm font-medium">{d.label}</div>
+                        </div>
+                      );
+                    }
                     return (
                       <button
                         key={d.id}
@@ -86,20 +86,15 @@ export default function DeployPage() {
                             : "border-white/[0.06] bg-white/[0.02]"
                         }`}
                       >
-                        {!isLive && (
-                          <span className="absolute top-2 right-2 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium text-amber-300">
-                            CLI only
-                          </span>
-                        )}
                         <div className="flex items-start justify-between">
                           <BrandIcon id={d.id} size={32} rounded="lg" />
-                          {config.deployment === d.id && isLive ? (
+                          {config.deployment === d.id ? (
                             <Check className="h-4 w-4 text-brand-300" />
                           ) : null}
                         </div>
                         <div className="mt-3 text-sm font-medium">{d.label}</div>
                         <div className="text-[11px] text-muted-foreground line-clamp-1">
-                          {isLive ? d.description : "CLI guide included"}
+                          {d.description}
                         </div>
                       </button>
                     );
@@ -108,61 +103,13 @@ export default function DeployPage() {
               </CardContent>
             </Card>
 
-            <CredentialsPanel />
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Globe2 className="h-4 w-4" /> Regions
-                </CardTitle>
-                <CardDescription>
-                  Primary region runs the stack. Additional regions become read
-                  replicas with low-latency failover.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="grid gap-3 md:grid-cols-2">
-                  {regions.map((r) => (
-                    <button
-                      key={r.id}
-                      onClick={() => patch({ region: r.id })}
-                      className={`flex items-center justify-between rounded-lg border p-3 text-left hover-raise ${
-                        config.region === r.id
-                          ? "border-brand-500/50 bg-brand-500/[0.06]"
-                          : "border-white/[0.06] bg-white/[0.02]"
-                      }`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <span className="text-lg">{r.flag}</span>
-                        <div>
-                          <div className="text-sm font-medium">{r.label}</div>
-                          <div className="text-[11px] text-muted-foreground font-mono">
-                            {r.id}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[11px] text-muted-foreground font-mono">
-                          {r.ms}ms
-                        </span>
-                        {config.region === r.id ? (
-                          <Badge variant="brand">primary</Badge>
-                        ) : null}
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-
-            <ScalingConfig />
+            <RailwayCredentialsPanel />
           </div>
 
           {/* right column */}
           <div className="space-y-4">
             <DeployHistoryCard />
             <BranchGateCard />
-            <DeploySummary />
             {config.deployment === "railway" ? (
               <RailwayDeployPanel />
             ) : step === "guide" ? (
@@ -467,12 +414,6 @@ function BranchGateCard() {
   );
 }
 
-function CredentialsPanel() {
-  const { config } = useStackStore();
-  if (config.deployment === "railway") return <RailwayCredentialsPanel />;
-  return <GenericCredentialsPanel />;
-}
-
 // Status-only panel — full token management lives in Settings → Integrations
 function RailwayCredentialsPanel() {
   const [hasToken, setHasToken] = React.useState<boolean | null>(null);
@@ -522,28 +463,6 @@ function RailwayCredentialsPanel() {
   );
 }
 
-// Placeholder panel for providers not yet wired up
-function GenericCredentialsPanel() {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Key className="h-4 w-4" /> Credentials
-        </CardTitle>
-        <CardDescription>
-          Direct deployment is currently available for Railway. For other
-          providers, use the step-by-step guide generated below.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <p className="text-xs text-muted-foreground">
-          Switch to <strong className="text-foreground">Railway</strong> in the
-          provider selector above to connect your account and deploy directly from Helios.
-        </p>
-      </CardContent>
-    </Card>
-  );
-}
 
 // ─── Railway direct deploy panel ─────────────────────────────────────────────
 
@@ -1025,121 +944,6 @@ function DeployStepRowV2({
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function ScalingConfig() {
-  const { config, patch } = useStackStore();
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Server className="h-4 w-4" /> Capacity & scaling
-        </CardTitle>
-        <CardDescription>
-          Replicas, autoscaler, resource limits.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-5">
-        <div>
-          <div className="flex items-center justify-between">
-            <span className="text-sm">Baseline replicas</span>
-            <span className="text-sm font-mono">{config.replicas}</span>
-          </div>
-          <Slider
-            value={[config.replicas]}
-            min={1}
-            max={12}
-            step={1}
-            onValueChange={(v) => patch({ replicas: v[0] })}
-            className="mt-3"
-          />
-        </div>
-        <Separator />
-        <div className="grid gap-3 md:grid-cols-2">
-          <ToggleRow
-            label="Autoscale"
-            desc="HPA target: CPU > 65%"
-            checked={config.autoscale}
-            onChange={(v) => patch({ autoscale: v })}
-            icon={<Zap className="h-3.5 w-3.5" />}
-          />
-          <ToggleRow
-            label="Kubernetes"
-            desc="Helm chart + Kustomize overlays"
-            checked={config.kubernetes}
-            onChange={(v) => patch({ kubernetes: v })}
-            icon={<Cpu className="h-3.5 w-3.5" />}
-          />
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function ToggleRow({
-  label,
-  desc,
-  checked,
-  onChange,
-  icon,
-}: {
-  label: string;
-  desc: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  icon?: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-center justify-between rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
-      <div className="flex items-center gap-2">
-        {icon ? (
-          <div className="grid h-7 w-7 place-items-center rounded-md border border-white/10 bg-white/[0.03] text-muted-foreground">
-            {icon}
-          </div>
-        ) : null}
-        <div>
-          <div className="text-sm font-medium">{label}</div>
-          <div className="text-xs text-muted-foreground">{desc}</div>
-        </div>
-      </div>
-      <Switch checked={checked} onCheckedChange={onChange} />
-    </div>
-  );
-}
-
-function DeploySummary() {
-  const { config } = useStackStore();
-  const deploy = deployments.find((d) => d.id === config.deployment)?.label;
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Deployment summary</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-2.5 text-xs">
-        <SummaryRow label="Provider" value={deploy ?? "—"} />
-        <SummaryRow label="Region" value={config.region} />
-        <SummaryRow label="Replicas" value={`${config.replicas}`} />
-        <SummaryRow label="Autoscale" value={config.autoscale ? "on" : "off"} />
-        <SummaryRow label="Kubernetes" value={config.kubernetes ? "on" : "off"} />
-        <Separator />
-        <div className="flex items-center justify-between">
-          <span className="flex items-center gap-2 text-muted-foreground">
-            <CircleDollarSign className="h-3.5 w-3.5" /> Est. monthly
-          </span>
-          <span className="font-semibold">$1,284</span>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function SummaryRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="font-medium">{value}</span>
     </div>
   );
 }

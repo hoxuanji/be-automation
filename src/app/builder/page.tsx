@@ -636,30 +636,45 @@ function RuntimePanel() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {languages.map((l) => (
-              <SelectableCard
-                key={l.id}
-                selected={config.language === l.id}
-                label={l.label}
-                description={l.description}
-                onClick={() => set("language", l.id)}
-                icon={<BrandIcon id={l.id} size={22} />}
-                badge={
-                  l.popular ? (
-                    <Badge variant="brand" className="ml-1">
-                      <Sparkles className="h-2.5 w-2.5" /> popular
-                    </Badge>
-                  ) : null
-                }
-                meta={l.tags?.map((t) => (
-                  <Badge key={t} variant="outline" className="text-[10px]">
-                    {t}
-                  </Badge>
-                ))}
-              />
-            ))}
-          </div>
+          {(() => {
+            const COMING_SOON_LANGS = new Set(["java", "kotlin"]);
+            return (
+              <div className="grid gap-3 sm:grid-cols-2">
+                {languages.map((l) => {
+                  const comingSoon = COMING_SOON_LANGS.has(l.id);
+                  return (
+                    <div key={l.id} className="relative">
+                      <SelectableCard
+                        selected={config.language === l.id}
+                        label={l.label}
+                        description={l.description}
+                        onClick={comingSoon ? undefined : () => set("language", l.id)}
+                        icon={<BrandIcon id={l.id} size={22} />}
+                        badge={
+                          l.popular ? (
+                            <Badge variant="brand" className="ml-1">
+                              <Sparkles className="h-2.5 w-2.5" /> popular
+                            </Badge>
+                          ) : null
+                        }
+                        meta={l.tags?.map((t) => (
+                          <Badge key={t} variant="outline" className="text-[10px]">
+                            {t}
+                          </Badge>
+                        ))}
+                        className={comingSoon ? "opacity-50 cursor-not-allowed pointer-events-none" : undefined}
+                      />
+                      {comingSoon && (
+                        <span className="pointer-events-none absolute top-2 right-2 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium text-amber-300">
+                          Coming soon
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </CardContent>
       </Card>
 
