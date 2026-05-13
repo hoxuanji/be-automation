@@ -37,7 +37,7 @@ export function migrationFiles(config: StackConfig, entities: Entity[]): Generat
 // ─── Go (golang-migrate) ─────────────────────────────────────────────────────
 
 function goMigrationFiles(config: StackConfig, up: string, down: string): GeneratedFile[] {
-  const module = `github.com/your-org/${safeName(config.name)}`;
+  const module = `github.com/your-username/${safeName(config.name)}`;
   return [
     { path: "migrations/000001_init.up.sql", content: up },
     { path: "migrations/000001_init.down.sql", content: down },

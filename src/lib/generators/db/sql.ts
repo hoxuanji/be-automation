@@ -111,7 +111,7 @@ function tableSql(entity: Entity, dialect: SqlDialect): string {
   return `CREATE TABLE IF NOT EXISTS ${tbl} (\n${cols.join(",\n")}\n);`;
 }
 
-function indexSql(entity: Entity, dialect: SqlDialect): string[] {
+function indexSql(entity: Entity, _dialect: SqlDialect): string[] {
   const tbl = tableName(entity);
   const out: string[] = [];
   for (const f of entity.fields) {

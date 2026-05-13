@@ -13,7 +13,7 @@ export function goGrpcFiles(
   entities: Entity[]
 ): GeneratedFile[] {
   const name = safeName(config.name);
-  const module = `github.com/your-org/${name}`;
+  const module = `github.com/your-username/${name}`;
   const pkg = name.replace(/-/g, "_") + "v1";
   const pkgPath = `${module}/gen/go/${name.replace(/-/g, "_")}/v1`;
 
@@ -140,7 +140,7 @@ func getenv(k, def string) string {
 `;
 }
 
-function goGrpcServer(pkg: string, pkgPath: string, entities: Entity[]): string {
+function goGrpcServer(pkg: string, pkgPath: string, _entities: Entity[]): string {
   return `package grpcserver
 
 // This package holds one server type per entity service. Each server embeds

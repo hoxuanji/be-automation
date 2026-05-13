@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { messages, config } = parsed.data;
+  const { messages, config, endpoints, entities } = parsed.data;
   const client = new Anthropic({ apiKey });
 
   // Prompt caching lives in the beta API — cast to any to avoid type mismatch
@@ -76,14 +76,14 @@ export async function POST(req: NextRequest) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const systemBlocks: any[] = [{ type: "text", text: SYSTEM_PROMPT }];
 
-  if (config) {
+  if (config || endpoints?.length || entities?.length) {
+    const ctx: Record<string, unknown> = {};
+    if (config) ctx.config = config;
+    if (endpoints?.length) ctx.endpoints = endpoints;
+    if (entities?.length) ctx.entities = entities;
     systemBlocks.push({
       type: "text",
-      text: `Current stack configuration:\n\n\`\`\`json\n${JSON.stringify(
-        config,
-        null,
-        2
-      )}\n\`\`\``,
+      text: `Current stack context:\n\n\`\`\`json\n${JSON.stringify(ctx, null, 2)}\n\`\`\``,
       cache_control: { type: "ephemeral" },
     });
   }

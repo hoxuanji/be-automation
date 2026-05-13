@@ -2,6 +2,7 @@ import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConf
 import { toPascal, toSnake, toKebab } from "./types";
 import { pyGrpcFiles } from "./grpc/python";
 import { needsAuth } from "./auth/providers";
+import { pyPatternRoute, pyPatternImports } from "./patterns/python";
 
 export function pythonFiles(
   config: StackConfig,
@@ -71,7 +72,7 @@ settings = Settings()
 
   files.push({
     path: "app/main.py",
-    content: appMain(config, endpoints, hasEntities && !isMongo ? entities : []),
+    content: appMain(config, endpoints, hasEntities && !isMongo ? entities : [], withAuth),
   });
 
   if (withAuth) {
@@ -376,10 +377,11 @@ function pyproject(config: StackConfig, withModels = false, withAuth = false) {
       : config.framework === "litestar"
       ? `litestar = { extras = ["standard"], version = "^2.12.0" }\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}`
       : `django = "^5.1.0"\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}`;
-  return `[project]
+  return `[tool.poetry]
 name = "${config.name}"
 version = "0.1.0"
-requires-python = ">=3.12"
+description = ""
+authors = []
 
 [tool.poetry.dependencies]
 python = "^3.12"
@@ -389,6 +391,10 @@ ${deps}
 pytest = "^8.3.0"
 httpx = "^0.27.0"
 pytest-asyncio = "^0.23.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
 `;
 }
 
@@ -476,7 +482,7 @@ RUN groupadd --system --gid 1001 app \\
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir poetry==1.8.3 \\
  && poetry config virtualenvs.create false \\
- && (poetry install --only main --no-root || pip install fastapi uvicorn pydantic pydantic-settings)
+ && poetry install --without dev --no-root
 COPY --chown=app:app . .
 
 USER app
@@ -485,10 +491,12 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
 `;
 }
 
-function appMain(config: StackConfig, endpoints: Endpoint[], entities: Entity[]) {
+function appMain(config: StackConfig, endpoints: Endpoint[], entities: Entity[], withAuth = false) {
   if (config.framework === "fastapi") {
+    const patternExtraImports = pyPatternImports(endpoints).join("\n");
     const routes = endpoints
       .map((e) => {
+        if (e.pattern) return pyPatternRoute(e, "fastapi", config, entities);
         const py = e.path.replace(/:([a-zA-Z0-9_]+)/g, "{$1}");
         const paramsDecl = (e.path.match(/:([a-zA-Z0-9_]+)/g) ?? [])
           .map((p) => `${p.slice(1)}: str`)
@@ -511,8 +519,8 @@ async def ${handlerName(e)}(${paramsDecl}):
 from .config import settings
 from .db import engine
 from .models import Base
-from .auth import auth_required
-${routerImports}
+${withAuth ? "from .auth import auth_required\n" : ""}${routerImports}
+${patternExtraImports}
 
 Base.metadata.create_all(bind=engine)
 
@@ -530,12 +538,15 @@ ${routes}
     }
 
     return `from contextlib import asynccontextmanager
+import math
+from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException, Header, Query, Response
+from fastapi.responses import JSONResponse
 
 from .config import settings
 from .logging_config import configure_logging
-from .auth import auth_required
+${withAuth ? "from .auth import auth_required\n" : ""}${patternExtraImports}
 
 
 configure_logging()

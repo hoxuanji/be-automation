@@ -3,7 +3,7 @@ import crypto from "crypto";
 import { signupSchema } from "@/lib/schema";
 import { hashPassword } from "@/lib/auth";
 import { signToken, buildSetCookieHeader } from "@/lib/auth";
-import { createUser, findUserByEmail } from "@/lib/db";
+import { createUser, findUserByEmail, createSession } from "@/lib/db";
 import { checkRateLimit, getRateLimitKey } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
@@ -38,7 +38,8 @@ export async function POST(req: NextRequest) {
   const passwordHash = await hashPassword(password);
   createUser(id, email.toLowerCase(), name, passwordHash);
 
-  const token = await signToken({ sub: id, email: email.toLowerCase(), name });
+  const { token, jti, expiresAt } = await signToken({ sub: id, email: email.toLowerCase(), name });
+  createSession(jti, id, expiresAt);
 
   return Response.json(
     { user: { id, email: email.toLowerCase(), name, hasApiKey: false } },

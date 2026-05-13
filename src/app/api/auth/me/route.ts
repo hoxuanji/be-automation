@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
-import { getCurrentUser } from "@/lib/auth";
-import { findUserById } from "@/lib/db";
+import { getCurrentUser, buildClearCookieHeader } from "@/lib/auth";
+import { findUserById, deleteUser } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -23,4 +23,16 @@ export async function GET(req: NextRequest) {
       hasApiKey: !!user.llm_api_key_enc,
     },
   });
+}
+
+export async function DELETE(req: NextRequest) {
+  const claims = await getCurrentUser(req);
+  if (!claims) return Response.json({ error: "unauthorized" }, { status: 401 });
+
+  deleteUser(claims.sub);
+
+  return Response.json(
+    { ok: true },
+    { headers: { "Set-Cookie": buildClearCookieHeader() } }
+  );
 }

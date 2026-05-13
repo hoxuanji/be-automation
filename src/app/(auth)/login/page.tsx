@@ -22,8 +22,10 @@ function OAuthResultHandler() {
   return null;
 }
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const returnTo = searchParams.get("returnTo") ?? "/dashboard";
   const [loading, setLoading] = React.useState(false);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
@@ -50,7 +52,7 @@ export default function LoginPage() {
         });
         return;
       }
-      router.push("/dashboard");
+      router.push(returnTo.startsWith("/") ? returnTo : "/dashboard");
       router.refresh();
     } catch {
       toast({ title: "Network error", kind: "error" });
@@ -61,7 +63,6 @@ export default function LoginPage() {
 
   return (
     <div className="space-y-6">
-      <React.Suspense fallback={null}><OAuthResultHandler /></React.Suspense>
       <div className="text-center">
         <div className="flex justify-center mb-5">
           <Logo />
@@ -113,14 +114,14 @@ export default function LoginPage() {
               placeholder="••••••••"
             />
           </div>
-          <Button
-            type="submit"
-            variant="glow"
-            className="w-full"
-            disabled={loading}
-          >
-            {loading ? "Signing in…" : "Sign in"}
-          </Button>
+          <div className="flex items-center justify-between">
+            <Button type="submit" variant="glow" disabled={loading}>
+              {loading ? "Signing in…" : "Sign in"}
+            </Button>
+            <Link href="/forgot-password" className="text-xs text-muted-foreground hover:text-foreground transition-colors">
+              Forgot password?
+            </Link>
+          </div>
         </form>
       </div>
 
@@ -131,5 +132,14 @@ export default function LoginPage() {
         </Link>
       </p>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <React.Suspense fallback={null}>
+      <OAuthResultHandler />
+      <LoginForm />
+    </React.Suspense>
   );
 }

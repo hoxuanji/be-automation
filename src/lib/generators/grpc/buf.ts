@@ -1,5 +1,4 @@
 import type { StackConfig } from "../types";
-import { safeName } from "../types";
 
 /**
  * Returns the `buf.yaml` + `buf.gen.yaml` + a Makefile proto target.
@@ -10,9 +9,6 @@ import { safeName } from "../types";
  *   - Deterministic plugin pinning via the BSR remote plugins
  */
 export function bufFiles(config: StackConfig): { path: string; content: string }[] {
-  const name = safeName(config.name);
-  const pkgDir = name.replace(/-/g, "_");
-
   // Per-language output plugin list. We emit config for the *selected* language
   // so the generated buf.gen.yaml isn't polluted with plugins the user doesn't need.
   const plugins: string[] = [];

@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import crypto from "crypto";
 import { signToken } from "@/lib/auth";
-import { upsertUserByGithub } from "@/lib/db";
+import { upsertUserByGithub, createSession } from "@/lib/db";
 import { getJwtSecret } from "@/lib/env";
 
 export const runtime = "nodejs";
@@ -115,7 +115,8 @@ export async function GET(req: NextRequest) {
       const resolvedName = ghUser.name ?? ghUser.login;
 
       const user = upsertUserByGithub(String(ghUser.id), resolvedEmail, resolvedName);
-      const jwtToken = await signToken({ sub: user.id, email: user.email, name: user.name });
+      const { token: jwtToken, jti, expiresAt } = await signToken({ sub: user.id, email: user.email, name: user.name });
+      createSession(jti, user.id, expiresAt);
 
       const maxAge = 86400 * 7;
       const cookieOpts = `Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${IS_PROD ? "; Secure" : ""}`;

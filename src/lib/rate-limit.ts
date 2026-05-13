@@ -1,19 +1,7 @@
-const buckets = new Map<string, { count: number; resetAt: number }>();
+import { checkRateLimitDb } from "./db";
 
-export function checkRateLimit(
-  key: string,
-  limit: number,
-  windowMs = 60_000
-): boolean {
-  const now = Date.now();
-  const b = buckets.get(key);
-  if (!b || b.resetAt < now) {
-    buckets.set(key, { count: 1, resetAt: now + windowMs });
-    return true;
-  }
-  if (b.count >= limit) return false;
-  b.count++;
-  return true;
+export function checkRateLimit(key: string, limit: number, windowMs = 60_000): boolean {
+  return checkRateLimitDb(key, limit, windowMs);
 }
 
 export function getRateLimitKey(req: Request): string {

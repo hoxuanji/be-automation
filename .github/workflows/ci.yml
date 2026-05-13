@@ -45,7 +45,14 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
-      - run: npm test
+      # First pass: regenerate snapshots (creates missing ones, updates stale ones).
+      # Second pass: assert nothing changed — if something differs the commit is the source of truth.
+      - name: Regenerate snapshots
+        run: UPDATE_SNAPSHOTS=1 npm test
+      - name: Assert no snapshot drift
+        run: |
+          git diff --exit-code src/lib/generators/__tests__/__snapshots__/ || \
+          (echo "Snapshot drift detected. Run 'UPDATE_SNAPSHOTS=1 npm test' locally on Node 22 and commit the updated snapshots." && exit 1)
 
   build:
     name: Production build
@@ -151,7 +158,7 @@ jobs:
         working-directory: /tmp/smoke-repo
         run: |
           npm install
-          npx tsc --noEmit || true
+          npx tsc --noEmit --skipLibCheck
 
       - name: Setup Python
         if: matrix.combo.language == 'python'
@@ -163,7 +170,8 @@ jobs:
         if: matrix.combo.language == 'python'
         working-directory: /tmp/smoke-repo
         run: |
-          python -m py_compile app/main.py || python -m py_compile manage.py
+          pip install -r requirements.txt -q
+          python -m py_compile $(find . -name "*.py" -not -path "./.venv/*" | head -20)
 
       - name: Setup Java
         if: matrix.combo.language == 'java' || matrix.combo.language == 'kotlin'

@@ -32,7 +32,7 @@ export function parsePrismaSchema(content: string): Entity[] {
       const fieldName = parts[0];
       if (!fieldName || fieldName === "@@" || fieldName.startsWith("@")) continue;
 
-      let rawType = parts[1].replace(/[?![\]]/g, "");
+      const rawType = parts[1].replace(/[?![\]]/g, "");
       const optional = parts[1].includes("?");
       const isId = line.includes("@id");
       const isUnique = line.includes("@unique");

@@ -44,6 +44,21 @@ export async function PATCH(
     return Response.json({ error: "invalid_json" }, { status: 400 });
   }
 
+  const { id } = await params;
+  const existing = getProjectById(id, claims.sub);
+  if (!existing) return Response.json({ error: "not_found" }, { status: 404 });
+
+  const raw = body as Record<string, unknown>;
+
+  // Rename-only: body has just { name }
+  if (raw.name && !raw.data) {
+    const name = String(raw.name).trim();
+    if (!name || name.length > 128) return Response.json({ error: "invalid_name" }, { status: 400 });
+    updateProject(id, claims.sub, name, existing.data);
+    return Response.json({ ok: true });
+  }
+
+  // Full update: validate with schema
   const parsed = projectPayloadSchema.safeParse(body);
   if (!parsed.success) {
     return Response.json(
@@ -51,11 +66,8 @@ export async function PATCH(
       { status: 400 }
     );
   }
-
-  const { id } = await params;
   const { name, data } = parsed.data;
   updateProject(id, claims.sub, name, JSON.stringify(data));
-
   return Response.json({ ok: true });
 }
 

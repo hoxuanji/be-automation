@@ -21,19 +21,6 @@ function safe(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9-_]+/g, "-").replace(/^-+|-+$/g, "") || "app";
 }
 
-/** Convert FieldType → Java type string */
-function javaType(t: FieldType): string {
-  switch (t) {
-    case "uuid":    return "java.util.UUID";
-    case "string":  return "String";
-    case "text":    return "String";
-    case "number":  return "Long";
-    case "boolean": return "Boolean";
-    case "date":    return "java.time.Instant";
-    case "json":    return "com.fasterxml.jackson.databind.JsonNode";
-  }
-}
-
 /** Short type for use inside method bodies / generics */
 function javaShortType(t: FieldType): string {
   switch (t) {

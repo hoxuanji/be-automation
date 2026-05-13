@@ -28,8 +28,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { config, endpoints, entities } = parsed.data;
-  const files = generate(config, endpoints, entities ?? []);
+  const { config, endpoints, entities, gitConfig, overrides } = parsed.data;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const generated = generate(config, endpoints, entities ?? [], gitConfig as any);
+  const files = overrides && Object.keys(overrides).length > 0
+    ? generated.map((f) => overrides[f.path] !== undefined ? { ...f, content: overrides[f.path] } : f)
+    : generated;
 
   const archive = archiver("zip", { zlib: { level: 9 } });
 

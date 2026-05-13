@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Check, Eye, EyeOff, Github, Key, Link2, Loader2, Lock, Shield, User, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Eye, EyeOff, FolderOpen, Github, Key, Link2, Loader2, Lock, Plus, Shield, Trash2, User, Users, X } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import {
   Card,
@@ -224,8 +224,14 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
+        {/* Team */}
+        <TeamCard />
+
         {/* Integrations */}
         <IntegrationsCard />
+
+        {/* Danger zone */}
+        <DangerZoneCard />
 
         {/* BYOK */}
         <Card>
@@ -306,6 +312,234 @@ export default function SettingsPage() {
         </Card>
       </div>
     </WorkspaceShell>
+  );
+}
+
+// ─── Team card ────────────────────────────────────────────────────────────────
+
+type TeamData = { id: string; name: string; role: string; memberCount: number };
+type Member = { user_id: string; name: string; email: string; role: string };
+
+function TeamCard() {
+  const [teams, setTeams] = React.useState<TeamData[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [creating, setCreating] = React.useState(false);
+  const [newTeamName, setNewTeamName] = React.useState("");
+  const [showCreate, setShowCreate] = React.useState(false);
+  const [expanded, setExpanded] = React.useState<string | null>(null);
+  const [members, setMembers] = React.useState<Record<string, Member[]>>({});
+  const [inviting, setInviting] = React.useState<string | null>(null);
+  const [removing, setRemoving] = React.useState<string | null>(null);
+  const { authUser } = useStackStore();
+
+  React.useEffect(() => {
+    fetch("/api/teams")
+      .then((r) => r.json())
+      .then((d: { teams?: TeamData[] }) => setTeams(d.teams ?? []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function createTeam() {
+    const name = newTeamName.trim();
+    if (!name) return;
+    setCreating(true);
+    try {
+      const res = await fetch("/api/teams", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const d = await res.json() as { team?: TeamData; error?: string };
+      if (!res.ok || !d.team) {
+        toast({ title: d.error ?? "Failed to create team", kind: "error" });
+      } else {
+        setTeams((prev) => [d.team!, ...prev]);
+        setNewTeamName("");
+        setShowCreate(false);
+        toast({ title: `Team "${d.team.name}" created`, kind: "success" });
+      }
+    } catch {
+      toast({ title: "Network error", kind: "error" });
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function loadMembers(teamId: string) {
+    if (members[teamId]) return;
+    try {
+      const res = await fetch(`/api/teams/${teamId}`);
+      const d = await res.json() as { members?: Member[] };
+      setMembers((prev) => ({ ...prev, [teamId]: d.members ?? [] }));
+    } catch {
+      toast({ title: "Failed to load members", kind: "error" });
+    }
+  }
+
+  function toggleExpand(teamId: string) {
+    if (expanded === teamId) {
+      setExpanded(null);
+    } else {
+      setExpanded(teamId);
+      void loadMembers(teamId);
+    }
+  }
+
+  async function copyInviteLink(teamId: string) {
+    setInviting(teamId);
+    try {
+      const res = await fetch(`/api/teams/${teamId}/invite`, { method: "POST" });
+      const d = await res.json() as { url?: string; error?: string };
+      if (!res.ok || !d.url) {
+        toast({ title: d.error ?? "Failed to create invite", kind: "error" });
+      } else {
+        await navigator.clipboard.writeText(d.url);
+        toast({ title: "Invite link copied!", description: "Valid for 7 days. Share it with your teammate.", kind: "success" });
+      }
+    } catch {
+      toast({ title: "Failed to create invite link", kind: "error" });
+    } finally {
+      setInviting(null);
+    }
+  }
+
+  async function removeMember(teamId: string, userId: string) {
+    setRemoving(userId);
+    try {
+      const res = await fetch(`/api/teams/${teamId}/members/${userId}`, { method: "DELETE" });
+      if (!res.ok) {
+        const d = await res.json() as { error?: string };
+        toast({ title: d.error ?? "Failed to remove member", kind: "error" });
+      } else {
+        setMembers((prev) => ({ ...prev, [teamId]: (prev[teamId] ?? []).filter((m) => m.user_id !== userId) }));
+        setTeams((prev) => prev.map((t) => t.id === teamId ? { ...t, memberCount: t.memberCount - 1 } : t));
+        toast({ title: "Member removed", kind: "success" });
+      }
+    } catch {
+      toast({ title: "Network error", kind: "error" });
+    } finally {
+      setRemoving(null);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <CardTitle className="flex items-center gap-2">
+            <Users className="h-4 w-4" /> Team
+          </CardTitle>
+          {!showCreate && (
+            <Button variant="secondary" size="sm" onClick={() => setShowCreate(true)}>
+              <Plus className="h-3.5 w-3.5" /> New team
+            </Button>
+          )}
+        </div>
+        <CardDescription>
+          Create a team, invite members via a shareable link, and collaborate on shared stacks.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {showCreate && (
+          <div className="flex gap-2">
+            <Input
+              autoFocus
+              placeholder="Team name"
+              value={newTeamName}
+              onChange={(e) => setNewTeamName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") void createTeam(); if (e.key === "Escape") { setShowCreate(false); setNewTeamName(""); } }}
+              maxLength={64}
+            />
+            <Button variant="secondary" size="sm" onClick={() => void createTeam()} disabled={creating || !newTeamName.trim()}>
+              {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Create"}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => { setShowCreate(false); setNewTeamName(""); }}>
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex items-center justify-center py-6">
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          </div>
+        ) : teams.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-2">
+            You&apos;re not in any teams yet. Create one or ask a teammate to share an invite link.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {teams.map((team) => (
+              <div key={team.id} className="rounded-lg border border-white/[0.06] overflow-hidden">
+                <button
+                  onClick={() => toggleExpand(team.id)}
+                  className="w-full flex items-center justify-between px-4 py-3 hover:bg-white/[0.02] transition-colors text-left"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500/10 border border-brand-500/20">
+                      <Users className="h-3.5 w-3.5 text-brand-300" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium">{team.name}</div>
+                      <div className="text-xs text-muted-foreground">{team.memberCount} member{team.memberCount !== 1 ? "s" : ""} · {team.role}</div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="h-7 text-xs px-2.5"
+                      disabled={inviting === team.id}
+                      onClick={(e) => { e.stopPropagation(); void copyInviteLink(team.id); }}
+                    >
+                      {inviting === team.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Copy className="h-3 w-3" />}
+                      Invite
+                    </Button>
+                    {expanded === team.id ? <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />}
+                  </div>
+                </button>
+
+                {expanded === team.id && (
+                  <div className="border-t border-white/[0.04] bg-white/[0.01]">
+                    <div className="px-4 py-3 space-y-2">
+                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">Members</p>
+                      {(members[team.id] ?? []).map((m) => (
+                        <div key={m.user_id} className="flex items-center justify-between">
+                          <div>
+                            <span className="text-xs font-medium">{m.name}</span>
+                            <span className="text-xs text-muted-foreground ml-2">{m.email}</span>
+                            {m.role === "owner" && <span className="ml-2 text-[10px] text-brand-300 border border-brand-500/30 rounded-full px-1.5 py-0.5">owner</span>}
+                          </div>
+                          {m.role !== "owner" && (team.role === "owner" || m.user_id === authUser?.id) && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 text-xs text-muted-foreground hover:text-red-300 px-2"
+                              disabled={removing === m.user_id}
+                              onClick={() => void removeMember(team.id, m.user_id)}
+                            >
+                              {removing === m.user_id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                              {m.user_id === authUser?.id ? "Leave" : "Remove"}
+                            </Button>
+                          )}
+                        </div>
+                      ))}
+                      {(members[team.id] ?? []).length === 0 && (
+                        <p className="text-xs text-muted-foreground">Loading members…</p>
+                      )}
+                    </div>
+                    <div className="border-t border-white/[0.04]">
+                      <TeamProjectsSection teamId={team.id} />
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -578,6 +812,127 @@ function RailwayIntegrationRow() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Danger zone ──────────────────────────────────────────────────────────────
+
+function DangerZoneCard() {
+  const { logout } = useStackStore();
+  const [confirming, setConfirming] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+
+  async function deleteAccount() {
+    setDeleting(true);
+    try {
+      const res = await fetch("/api/auth/me", { method: "DELETE" });
+      if (!res.ok) throw new Error();
+      toast({ title: "Account deleted", kind: "info" });
+      await logout();
+    } catch {
+      toast({ title: "Failed to delete account", kind: "error" });
+      setDeleting(false);
+      setConfirming(false);
+    }
+  }
+
+  return (
+    <Card className="border-red-500/20">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-red-300">
+          <AlertTriangle className="h-4 w-4" /> Danger zone
+        </CardTitle>
+        <CardDescription>
+          Permanently delete your account, all projects, and all data. This cannot be undone.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {!confirming ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-red-400 hover:text-red-300 hover:bg-red-500/10"
+            onClick={() => setConfirming(true)}
+          >
+            <Trash2 className="h-3.5 w-3.5" /> Delete my account
+          </Button>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-sm text-red-300/80">
+              Are you sure? All your projects, teams you own, and gallery stacks will be permanently deleted.
+            </p>
+            <div className="flex gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                onClick={() => void deleteAccount()}
+                disabled={deleting}
+              >
+                {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                Yes, delete everything
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setConfirming(false)}
+                disabled={deleting}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ─── Team projects section ────────────────────────────────────────────────────
+
+type TeamProject = { id: string; name: string; user_name: string; updated_at: number };
+
+function TeamProjectsSection({ teamId }: { teamId: string }) {
+  const [projects, setProjects] = React.useState<TeamProject[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [loaded, setLoaded] = React.useState(false);
+  const { loadProject } = useStackStore();
+
+  async function load() {
+    if (loaded) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/teams/${teamId}/projects`);
+      const d = await res.json() as { projects?: TeamProject[] };
+      setProjects(d.projects ?? []);
+      setLoaded(true);
+    } catch {
+      toast({ title: "Failed to load team projects", kind: "error" });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  React.useEffect(() => { void load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (loading) return <div className="px-4 py-3 flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> Loading projects…</div>;
+  if (projects.length === 0) return <p className="px-4 py-3 text-xs text-muted-foreground">No shared projects yet.</p>;
+
+  return (
+    <div className="px-4 py-3 space-y-1">
+      <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">Team projects</p>
+      {projects.map((p) => (
+        <button
+          key={p.id}
+          onClick={() => { loadProject(p.id); toast({ title: `Loaded "${p.name}"`, kind: "success" }); }}
+          className="w-full flex items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-white/[0.03] transition-colors"
+        >
+          <FolderOpen className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+          <span className="text-xs flex-1 truncate">{p.name}</span>
+          <span className="text-[10px] text-muted-foreground shrink-0">by {p.user_name}</span>
+        </button>
+      ))}
     </div>
   );
 }

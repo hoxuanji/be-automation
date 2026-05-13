@@ -10,14 +10,16 @@ import {
   CloudCog,
   Copy,
   Cpu,
+  ExternalLink,
   FileText,
+  Github,
   Globe2,
   Key,
   Loader2,
   MinusCircle,
+  RefreshCw,
   Rocket,
   Server,
-  Shield,
   Sparkles,
   Zap,
   X,
@@ -26,11 +28,10 @@ import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Separator } from "@/components/ui/separator";
-import { useStackStore } from "@/lib/store";
+import { useStackStore, type GithubRepo } from "@/lib/store";
 import { deployments } from "@/data/stack-options";
 import { toast } from "@/components/ui/toast";
 import { BrandIcon } from "@/components/shared/brand-icon";
@@ -73,28 +74,36 @@ export default function DeployPage() {
               </CardHeader>
               <CardContent>
                 <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-                  {deployments.map((d) => (
-                    <button
-                      key={d.id}
-                      onClick={() => patch({ deployment: d.id })}
-                      className={`group relative rounded-xl border p-3 text-left hover-raise ${
-                        config.deployment === d.id
-                          ? "border-brand-500/50 bg-brand-500/[0.06]"
-                          : "border-white/[0.06] bg-white/[0.02]"
-                      }`}
-                    >
-                      <div className="flex items-start justify-between">
-                        <BrandIcon id={d.id} size={32} rounded="lg" />
-                        {config.deployment === d.id ? (
-                          <Check className="h-4 w-4 text-brand-300" />
-                        ) : null}
-                      </div>
-                      <div className="mt-3 text-sm font-medium">{d.label}</div>
-                      <div className="text-[11px] text-muted-foreground line-clamp-1">
-                        {d.description}
-                      </div>
-                    </button>
-                  ))}
+                  {deployments.map((d) => {
+                    const isLive = d.id === "railway";
+                    return (
+                      <button
+                        key={d.id}
+                        onClick={() => patch({ deployment: d.id })}
+                        className={`group relative rounded-xl border p-3 text-left hover-raise ${
+                          config.deployment === d.id
+                            ? "border-brand-500/50 bg-brand-500/[0.06]"
+                            : "border-white/[0.06] bg-white/[0.02]"
+                        }`}
+                      >
+                        {!isLive && (
+                          <span className="absolute top-2 right-2 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium text-amber-300">
+                            CLI only
+                          </span>
+                        )}
+                        <div className="flex items-start justify-between">
+                          <BrandIcon id={d.id} size={32} rounded="lg" />
+                          {config.deployment === d.id && isLive ? (
+                            <Check className="h-4 w-4 text-brand-300" />
+                          ) : null}
+                        </div>
+                        <div className="mt-3 text-sm font-medium">{d.label}</div>
+                        <div className="text-[11px] text-muted-foreground line-clamp-1">
+                          {isLive ? d.description : "CLI guide included"}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               </CardContent>
             </Card>
@@ -151,6 +160,8 @@ export default function DeployPage() {
 
           {/* right column */}
           <div className="space-y-4">
+            <DeployHistoryCard />
+            <BranchGateCard />
             <DeploySummary />
             {config.deployment === "railway" ? (
               <RailwayDeployPanel />
@@ -227,6 +238,232 @@ function HeaderBlock({ step }: { step: "configure" | "guide" }) {
         </div>
       </div>
     </div>
+  );
+}
+
+type WorkflowRun = {
+  id: number;
+  name: string;
+  status: "queued" | "in_progress" | "completed";
+  conclusion: "success" | "failure" | "cancelled" | "skipped" | "timed_out" | null;
+  headBranch: string;
+  headSha: string;
+  headMessage: string;
+  createdAt: string;
+  htmlUrl: string;
+};
+
+function runStatusBadge(run: WorkflowRun) {
+  if (run.status === "queued") return <span className="inline-flex items-center gap-1 text-[10px] text-amber-300"><span className="h-1.5 w-1.5 rounded-full bg-amber-400" />queued</span>;
+  if (run.status === "in_progress") return <span className="inline-flex items-center gap-1 text-[10px] text-brand-300"><Loader2 className="h-2.5 w-2.5 animate-spin" />running</span>;
+  if (run.conclusion === "success") return <span className="inline-flex items-center gap-1 text-[10px] text-emerald-300"><Check className="h-2.5 w-2.5" />success</span>;
+  if (run.conclusion === "failure") return <span className="inline-flex items-center gap-1 text-[10px] text-red-400"><X className="h-2.5 w-2.5" />failed</span>;
+  return <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground"><MinusCircle className="h-2.5 w-2.5" />{run.conclusion ?? run.status}</span>;
+}
+
+function timeAgo(iso: string): string {
+  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
+}
+
+function RepoConnectForm({ onConnect }: { onConnect: (r: GithubRepo) => void }) {
+  const [input, setInput] = React.useState("");
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  function parse(v: string): { owner: string; repo: string } | null {
+    const c = v.trim().replace(/^https?:\/\/github\.com\//, "").replace(/\.git$/, "");
+    const [owner, repo] = c.split("/").filter(Boolean);
+    return owner && repo ? { owner, repo } : null;
+  }
+
+  async function connect() {
+    const p = parse(input);
+    if (!p) { setError("Enter owner/repo"); return; }
+    setLoading(true); setError(null);
+    const res = await fetch(`/api/github/repo?owner=${p.owner}&repo=${p.repo}`).catch(() => null);
+    if (!res?.ok) { setError("Cannot access repo — check name and token"); setLoading(false); return; }
+    const d = (await res.json()) as { defaultBranch?: string };
+    onConnect({ owner: p.owner, repo: p.repo, defaultBranch: d.defaultBranch ?? "main" });
+    setLoading(false);
+  }
+
+  return (
+    <div className="space-y-2">
+      <p className="text-[11px] text-muted-foreground">Connect a repo to see live workflow status.</p>
+      <div className="flex gap-2">
+        <input
+          value={input}
+          onChange={(e) => { setInput(e.target.value); setError(null); }}
+          onKeyDown={(e) => e.key === "Enter" && connect()}
+          placeholder="owner/repo"
+          className="flex-1 rounded-lg border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-xs font-mono placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-brand-500/40"
+        />
+        <Button variant="secondary" size="sm" onClick={connect} disabled={loading}>
+          {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : "Connect"}
+        </Button>
+      </div>
+      {error && <p className="text-[10px] text-red-400">{error}</p>}
+    </div>
+  );
+}
+
+function DeployHistoryCard() {
+  const { githubRepo, setGithubRepo } = useStackStore();
+  const [runs, setRuns] = React.useState<WorkflowRun[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [lastRefresh, setLastRefresh] = React.useState<Date | null>(null);
+
+  const hasLiveRun = runs.some((r) => r.status !== "completed");
+
+  const fetchRuns = React.useCallback(async () => {
+    if (!githubRepo) return;
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `/api/github/runs?owner=${githubRepo.owner}&repo=${githubRepo.repo}&per_page=8`
+      );
+      if (res.ok) {
+        const d = (await res.json()) as { runs: WorkflowRun[] };
+        setRuns(d.runs);
+        setLastRefresh(new Date());
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [githubRepo]);
+
+  React.useEffect(() => {
+    fetchRuns();
+  }, [fetchRuns]);
+
+  // Poll every 10s while a run is live
+  React.useEffect(() => {
+    if (!hasLiveRun || !githubRepo) return;
+    const id = setInterval(fetchRuns, 10_000);
+    return () => clearInterval(id);
+  }, [hasLiveRun, githubRepo, fetchRuns]);
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Github className="h-3.5 w-3.5" /> Deploy history
+          </CardTitle>
+          {githubRepo && (
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setGithubRepo(null)}
+                className="text-[10px] text-muted-foreground hover:text-foreground"
+              >
+                change
+              </button>
+              <button
+                onClick={fetchRuns}
+                disabled={loading}
+                className="text-muted-foreground hover:text-foreground"
+                title="Refresh"
+              >
+                <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
+              </button>
+            </div>
+          )}
+        </div>
+        {githubRepo && (
+          <p className="text-[10px] text-muted-foreground font-mono">
+            {githubRepo.owner}/{githubRepo.repo}
+            {lastRefresh && <span className="ml-2 not-mono">· {timeAgo(lastRefresh.toISOString())}</span>}
+          </p>
+        )}
+      </CardHeader>
+      <CardContent>
+        {!githubRepo ? (
+          <RepoConnectForm onConnect={(r) => { setGithubRepo(r); }} />
+        ) : runs.length === 0 && !loading ? (
+          <p className="text-xs text-muted-foreground">No workflow runs found.</p>
+        ) : (
+          <div className="space-y-2">
+            {runs.slice(0, 6).map((run) => (
+              <div key={run.id} className="flex items-start justify-between gap-2 rounded-lg border border-white/[0.04] bg-white/[0.02] p-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 mb-0.5">
+                    {runStatusBadge(run)}
+                    <span className="text-[10px] text-muted-foreground font-mono">{run.headSha}</span>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground truncate">{run.headMessage || run.name}</p>
+                  <p className="text-[9px] text-muted-foreground/60 mt-0.5 font-mono">{run.headBranch} · {timeAgo(run.createdAt)}</p>
+                </div>
+                <a
+                  href={run.htmlUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function BranchGateCard() {
+  const { gitConfig } = useStackStore();
+  const envs = gitConfig.deployEnvironments;
+  const prodEnv = envs.find((e) => e.name === "production") ?? envs[0];
+  const stagingEnv = envs.find((e) => e.name === "staging");
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-sm">
+          <MinusCircle className="h-3.5 w-3.5 text-amber-400" />
+          Branch protection
+        </CardTitle>
+        <CardDescription className="text-[11px]">
+          Only branches matching these patterns can trigger deployments.{" "}
+          <Link href="/git-settings" className="underline hover:text-foreground">
+            Edit in Git &amp; CI/CD →
+          </Link>
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2.5">
+        {prodEnv && (
+          <div className="space-y-1">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Production</p>
+            <div className="flex flex-wrap gap-1.5">
+              {prodEnv.targetBranches.map((b) => (
+                <span key={b} className="inline-flex items-center rounded-full border border-emerald-500/30 bg-emerald-500/[0.08] px-2 py-0.5 text-[10px] font-mono text-emerald-300">
+                  {b}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+        {stagingEnv && (
+          <div className="space-y-1">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Staging</p>
+            <div className="flex flex-wrap gap-1.5">
+              {stagingEnv.targetBranches.map((b) => (
+                <span key={b} className="inline-flex items-center rounded-full border border-brand-500/30 bg-brand-500/[0.08] px-2 py-0.5 text-[10px] font-mono text-brand-300">
+                  {b}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+        <p className="text-[10px] text-muted-foreground pt-1">
+          Commits on non-allowed branches will be blocked by the deploy workflow.
+        </p>
+      </CardContent>
+    </Card>
   );
 }
 

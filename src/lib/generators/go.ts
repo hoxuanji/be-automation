@@ -1,7 +1,8 @@
 import type { Endpoint, Entity, FieldType, GeneratedFile, StackConfig } from "./types";
 import { safeName, toPascal, toKebab, toSnake } from "./types";
 import { goGrpcFiles } from "./grpc/go";
-import { authProviderSpec, needsAuth } from "./auth/providers";
+import { needsAuth } from "./auth/providers";
+import { goApiHandlersFile, goHandlerMethodName } from "./patterns/go";
 
 export function goFiles(
   config: StackConfig,
@@ -19,12 +20,19 @@ export function goFiles(
     return files;
   }
 
-  const module = `github.com/your-org/${safeName(config.name)}`;
+  const module = `github.com/your-username/${safeName(config.name)}`;
   const files: GeneratedFile[] = [];
   const anyProtected = endpoints.some((e) => e.auth);
   const withAuth = needsAuth(config, anyProtected);
+  const hasPatterns = endpoints.some((e) => e.pattern);
+  const patternSet = new Set(endpoints.map((e) => e.pattern).filter(Boolean) as string[]);
+  const withPatternAuth = [...patternSet].some((p) => p.startsWith("auth_"));
+  const withPatternDb = [...patternSet].some((p) =>
+    p.startsWith("crud_") || p === "paginated_search" || p === "aggregate_stats" || p === "cache_read"
+  );
+  const needsGorm = entities.length > 0 || withPatternDb;
 
-  files.push({ path: "go.mod", content: goMod(module, config.framework, entities.length > 0, withAuth) });
+  files.push({ path: "go.mod", content: goMod(module, config.framework, needsGorm, withAuth, withPatternAuth) });
   files.push({ path: "Dockerfile", content: goDockerfile() });
   files.push({
     path: "cmd/api/main.go",
@@ -61,9 +69,20 @@ export function goFiles(
     });
   }
 
+  // Generate GORM adapter whenever entities or DB patterns require it
+  if (needsGorm && !(/sqlite/.test(config.database) && entities.length === 0)) {
+    if (!files.some((f) => f.path === "internal/db/gorm.go")) {
+      files.push({ path: "internal/db/gorm.go", content: goGormDB(config.database) });
+    }
+  }
+
   if (entities.length > 0) {
-    files.push({ path: "internal/models/models.go", content: goModels(module, entities) });
-    files.push({ path: "internal/db/gorm.go", content: goGormDB(config.database) });
+    if (!files.some((f) => f.path === "internal/models/models.go")) {
+      files.push({ path: "internal/models/models.go", content: goModels(module, entities) });
+    }
+    if (!files.some((f) => f.path === "internal/db/gorm.go")) {
+      files.push({ path: "internal/db/gorm.go", content: goGormDB(config.database) });
+    }
     for (const entity of entities) {
       files.push({
         path: `internal/handlers/${toSnake(entity.name)}.go`,
@@ -74,6 +93,11 @@ export function goFiles(
         content: goEntityTest(module, config.framework, entity),
       });
     }
+  }
+
+  // Pattern-based API handlers (custom endpoints from API builder)
+  if (hasPatterns) {
+    files.push(goApiHandlersFile(module, config.framework, config, endpoints, entities));
   }
 
   if (config.cache === "redis" || config.cache === "upstash" || config.cache === "dragonfly") {
@@ -433,7 +457,7 @@ func Test${pascal}Handler(t *testing.T) {
 \tr.GET("/${kebab}s", h.List)
 \tr.GET("/${kebab}s/:id", h.GetByID)
 \tr.POST("/${kebab}s", h.Create)
-\tr.PUT("/${kebab}s/:id", h.Update)
+\tr.PATCH("/${kebab}s/:id", h.Update)
 \tr.DELETE("/${kebab}s/:id", h.Delete)
 
 \tvar createdID string
@@ -472,7 +496,7 @@ func Test${pascal}Handler(t *testing.T) {
 \tt.Run("update", func(t *testing.T) {
 \t\tif createdID == "" { t.Skip("depends on create") }
 \t\tbody, _ := json.Marshal(${updateBody})
-\t\treq := httptest.NewRequest(http.MethodPut, "/${kebab}s/"+createdID, bytes.NewReader(body))
+\t\treq := httptest.NewRequest(http.MethodPatch, "/${kebab}s/"+createdID, bytes.NewReader(body))
 \t\treq.Header.Set("Content-Type", "application/json")
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, req)
@@ -524,7 +548,7 @@ func Test${pascal}Handler(t *testing.T) {
 \tapp.Get("/${kebab}s", h.List)
 \tapp.Get("/${kebab}s/:id", h.GetByID)
 \tapp.Post("/${kebab}s", h.Create)
-\tapp.Put("/${kebab}s/:id", h.Update)
+\tapp.Patch("/${kebab}s/:id", h.Update)
 \tapp.Delete("/${kebab}s/:id", h.Delete)
 
 \tvar createdID string
@@ -567,7 +591,7 @@ func Test${pascal}Handler(t *testing.T) {
 \tt.Run("update", func(t *testing.T) {
 \t\tif createdID == "" { t.Skip("depends on create") }
 \t\tbody, _ := json.Marshal(${updateBody})
-\t\treq := httptest.NewRequest(http.MethodPut, "/${kebab}s/"+createdID, bytes.NewReader(body))
+\t\treq := httptest.NewRequest(http.MethodPatch, "/${kebab}s/"+createdID, bytes.NewReader(body))
 \t\treq.Header.Set("Content-Type", "application/json")
 \t\tresp, err := app.Test(req)
 \t\tif err != nil { t.Fatal(err) }
@@ -619,7 +643,7 @@ func Test${pascal}Handler(t *testing.T) {
 \te.GET("/${kebab}s", h.List)
 \te.GET("/${kebab}s/:id", h.GetByID)
 \te.POST("/${kebab}s", h.Create)
-\te.PUT("/${kebab}s/:id", h.Update)
+\te.PATCH("/${kebab}s/:id", h.Update)
 \te.DELETE("/${kebab}s/:id", h.Delete)
 
 \tvar createdID string
@@ -658,7 +682,7 @@ func Test${pascal}Handler(t *testing.T) {
 \tt.Run("update", func(t *testing.T) {
 \t\tif createdID == "" { t.Skip("depends on create") }
 \t\tbody, _ := json.Marshal(${updateBody})
-\t\treq := httptest.NewRequest(http.MethodPut, "/${kebab}s/"+createdID, bytes.NewReader(body))
+\t\treq := httptest.NewRequest(http.MethodPatch, "/${kebab}s/"+createdID, bytes.NewReader(body))
 \t\treq.Header.Set("Content-Type", "application/json")
 \t\tw := httptest.NewRecorder()
 \t\te.ServeHTTP(w, req)
@@ -709,7 +733,7 @@ func Test${pascal}Handler(t *testing.T) {
 \tr.Get("/${kebab}s", h.List)
 \tr.Get("/${kebab}s/{id}", h.GetByID)
 \tr.Post("/${kebab}s", h.Create)
-\tr.Put("/${kebab}s/{id}", h.Update)
+\tr.Patch("/${kebab}s/{id}", h.Update)
 \tr.Delete("/${kebab}s/{id}", h.Delete)
 
 \tvar createdID string
@@ -748,7 +772,7 @@ func Test${pascal}Handler(t *testing.T) {
 \tt.Run("update", func(t *testing.T) {
 \t\tif createdID == "" { t.Skip("depends on create") }
 \t\tbody, _ := json.Marshal(${updateBody})
-\t\treq := httptest.NewRequest(http.MethodPut, "/${kebab}s/"+createdID, bytes.NewReader(body))
+\t\treq := httptest.NewRequest(http.MethodPatch, "/${kebab}s/"+createdID, bytes.NewReader(body))
 \t\treq.Header.Set("Content-Type", "application/json")
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, req)
@@ -885,7 +909,7 @@ function buildGORMTags(f: { type: FieldType; primaryKey?: boolean; unique: boole
   return tags.join(" ");
 }
 
-function goMod(module: string, framework: string, withEntities = false, withAuth = false) {
+function goMod(module: string, framework: string, withEntities = false, withAuth = false, withPatternAuth = false) {
   const frameworkDep: Record<string, string> = {
     gin: "\tgithub.com/gin-gonic/gin v1.10.0",
     fiber: "\tgithub.com/gofiber/fiber/v2 v2.52.0",
@@ -901,6 +925,11 @@ function goMod(module: string, framework: string, withEntities = false, withAuth
     // PEM parsing.
     ? "\tgithub.com/lestrrat-go/jwx/v2 v2.1.1"
     : "";
+  // Pattern auth handlers need bcrypt for password hashing and jwt/v5 for signing
+  const patternAuthDeps = withPatternAuth
+    ? "\tgithub.com/golang-jwt/jwt/v5 v5.2.1\n\tgolang.org/x/crypto v0.27.0\n\tgithub.com/google/uuid v1.6.0\n\tgithub.com/redis/go-redis/v9 v9.7.0"
+    : "";
+  const allDeps = [gormDeps, authDeps, patternAuthDeps].filter(Boolean).join("\n");
   return `module ${module}
 
 go 1.23
@@ -908,7 +937,7 @@ go 1.23
 require (
 ${frameworkDep[framework] ?? frameworkDep.gin}
 \tgithub.com/caarlos0/env/v11 v11.2.2
-${gormDeps}${gormDeps && authDeps ? "\n" : ""}${authDeps}
+${allDeps}
 )
 `;
 }
@@ -917,10 +946,10 @@ function goDockerfile() {
   return `# syntax=docker/dockerfile:1
 FROM golang:1.23-alpine AS build
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY go.mod ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
+RUN CGO_ENABLED=0 GOFLAGS=-mod=mod go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/api /api
@@ -1008,7 +1037,7 @@ function goServer(module: string, config: StackConfig, endpoints: Endpoint[], en
   const importCache = /redis|upstash|dragonfly/.test(config.cache)
     ? `\t"${module}/internal/cache"\n`
     : "";
-  const importHandlers = entities.length > 0
+  const importHandlers = (entities.length > 0 || endpoints.some((e) => e.pattern))
     ? `\t"${module}/internal/handlers"\n`
     : "";
 
@@ -1123,19 +1152,23 @@ function ginServer(
   importCache: string,
   importHandlers: string
 ) {
+  const hasPatterns = endpoints.some((e) => e.pattern);
   const routes = endpoints
-    .map(
-      (e) =>
-        `\tr.${e.method}("${goPath(e.path)}", ${e.auth ? "authRequired, " : ""}handle${handlerName(e)})`
-    )
+    .map((e) => {
+      const hname = hasPatterns
+        ? `apiH.${goHandlerMethodName(e)}`
+        : `handle${handlerName(e)}`;
+      return `\tr.${e.method}("${goPath(e.path)}", ${e.auth ? "authRequired, " : ""}${hname})`;
+    })
     .join("\n");
-  const handlers = endpoints
+  const inlineHandlers = hasPatterns ? "" : endpoints
     .map(
       (e) => `func handle${handlerName(e)}(c *gin.Context) {
 \tc.JSON(200, gin.H{"ok": true, "op": "${e.method} ${e.path}"})
 }`
     )
     .join("\n\n");
+  const apiHSetup = hasPatterns ? `\tapiH := handlers.NewAPIHandlers(log)\n` : "";
 
   const { setup: entitySetup, routes: entityRouteLines } = entityRoutes("gin", entities);
   const gormBlock = entities.length > 0 ? gormOpenBlock(config.database) : "";
@@ -1165,7 +1198,7 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 \tr := gin.New()
 \tr.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
 
-\tr.GET("/health", healthHandler)
+${apiHSetup}\tr.GET("/health", healthHandler)
 ${routes}
 ${gormBlock}${entitySetup}
 ${entityRouteLines}
@@ -1182,8 +1215,9 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error { return s.srv.Shutdown(ctx) }
+func (s *Server) Handler() http.Handler     { return s.engine }
 
-${handlers}
+${inlineHandlers}
 `;
 }
 
@@ -1196,19 +1230,23 @@ function fiberServer(
   importCache: string,
   importHandlers: string
 ) {
-  const routes = endpoints
-    .map(
-      (e) =>
-        `\tapp.${fiberMethod(e.method)}("${goPath(e.path)}", ${e.auth ? "authRequired, " : ""}handle${handlerName(e)})`
-    )
+  const hasPatternsF = endpoints.some((e) => e.pattern);
+  const routesF = endpoints
+    .map((e) => {
+      const hname = hasPatternsF
+        ? `apiH.${goHandlerMethodName(e)}`
+        : `handle${handlerName(e)}`;
+      return `\tapp.${fiberMethod(e.method)}("${goPath(e.path)}", ${e.auth ? "authRequired, " : ""}${hname})`;
+    })
     .join("\n");
-  const handlers = endpoints
+  const inlineHandlersF = hasPatternsF ? "" : endpoints
     .map(
       (e) => `func handle${handlerName(e)}(c *fiber.Ctx) error {
 \treturn c.JSON(fiber.Map{"ok": true, "op": "${e.method} ${e.path}"})
 }`
     )
     .join("\n\n");
+  const apiHSetupF = hasPatternsF ? `\tapiH := handlers.NewAPIHandlers(log)\n` : "";
 
   const { setup: entitySetup, routes: entityRouteLines } = entityRoutes("fiber", entities);
   const gormBlock = entities.length > 0 ? gormOpenBlock(config.database) : "";
@@ -1235,8 +1273,8 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 \tapp := fiber.New(fiber.Config{DisableStartupMessage: true})
 \tapp.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
 
-\tapp.Get("/health", healthHandler)
-${routes}
+${apiHSetupF}\tapp.Get("/health", healthHandler)
+${routesF}
 ${gormBlock}${entitySetup}
 ${entityRouteLines}
 
@@ -1245,8 +1283,9 @@ ${entityRouteLines}
 
 func (s *Server) Run() error { return s.app.Listen(":" + s.cfg.Port) }
 func (s *Server) Shutdown(ctx context.Context) error { return s.app.ShutdownWithContext(ctx) }
+func (s *Server) App() *fiber.App { return s.app }
 
-${handlers}
+${inlineHandlersF}
 `;
 }
 
@@ -1259,19 +1298,23 @@ function echoServer(
   importCache: string,
   importHandlers: string
 ) {
-  const routes = endpoints
-    .map(
-      (e) =>
-        `\te.${e.method}("${goPath(e.path)}", handle${handlerName(e)}${e.auth ? ", authRequired" : ""})`
-    )
+  const hasPatternsE = endpoints.some((e) => e.pattern);
+  const routesE = endpoints
+    .map((e) => {
+      const hname = hasPatternsE
+        ? `apiH.${goHandlerMethodName(e)}`
+        : `handle${handlerName(e)}`;
+      return `\te.${e.method}("${goPath(e.path)}", ${hname}${e.auth ? ", authRequired" : ""})`;
+    })
     .join("\n");
-  const handlers = endpoints
+  const inlineHandlersE = hasPatternsE ? "" : endpoints
     .map(
       (e) => `func handle${handlerName(e)}(c echo.Context) error {
 \treturn c.JSON(200, map[string]any{"ok": true, "op": "${e.method} ${e.path}"})
 }`
     )
     .join("\n\n");
+  const apiHSetupE = hasPatternsE ? `\tapiH := handlers.NewAPIHandlers(log)\n` : "";
 
   const { setup: entitySetup, routes: entityRouteLines } = entityRoutes("echo", entities);
   const gormBlock = entities.length > 0 ? gormOpenBlock(config.database) : "";
@@ -1282,6 +1325,7 @@ function echoServer(
 import (
 \t"context"
 \t"log/slog"
+\t"net/http"
 ${needsOS ? '\t"os"\n' : ""}
 \t"github.com/labstack/echo/v4"
 
@@ -1299,8 +1343,8 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 \te.HideBanner = true
 \te.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
 
-\te.GET("/health", healthHandler)
-${routes}
+${apiHSetupE}\te.GET("/health", healthHandler)
+${routesE}
 ${gormBlock}${entitySetup}
 ${entityRouteLines}
 
@@ -1309,8 +1353,9 @@ ${entityRouteLines}
 
 func (s *Server) Run() error { return s.e.Start(":" + s.cfg.Port) }
 func (s *Server) Shutdown(ctx context.Context) error { return s.e.Shutdown(ctx) }
+func (s *Server) Handler() http.Handler { return s.e }
 
-${handlers}
+${inlineHandlersE}
 `;
 }
 
@@ -1323,19 +1368,23 @@ function chiServer(
   importCache: string,
   importHandlers: string
 ) {
-  const routes = endpoints
-    .map(
-      (e) =>
-        `\tr.Method("${e.method}", "${goPath(e.path)}", http.HandlerFunc(handle${handlerName(e)}))`
-    )
+  const hasPatternsC = endpoints.some((e) => e.pattern);
+  const routesC = endpoints
+    .map((e) => {
+      const hname = hasPatternsC
+        ? `apiH.${goHandlerMethodName(e)}`
+        : `handle${handlerName(e)}`;
+      return `\tr.Method("${e.method}", "${goPath(e.path)}", http.HandlerFunc(${hname}))`;
+    })
     .join("\n");
-  const handlers = endpoints
+  const inlineHandlersC = hasPatternsC ? "" : endpoints
     .map(
       (e) => `func handle${handlerName(e)}(w http.ResponseWriter, r *http.Request) {
 \twriteJSON(w, 200, map[string]any{"ok": true, "op": "${e.method} ${e.path}"})
 }`
     )
     .join("\n\n");
+  const apiHSetupC = hasPatternsC ? `\tapiH := handlers.NewAPIHandlers(log)\n` : "";
 
   const { setup: entitySetup, routes: entityRouteLines } = entityRoutes("chi", entities);
   const gormBlock = entities.length > 0 ? gormOpenBlock(config.database) : "";
@@ -1364,8 +1413,8 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 \tr := chi.NewRouter()
 \tr.Use(recoverer(log), requestLog(log)${config.rateLimit ? ", rateLimit()" : ""}${config.tracing ? ", tracing()" : ""})
 
-\tr.Get("/health", healthHandler)
-${routes}
+${apiHSetupC}\tr.Get("/health", healthHandler)
+${routesC}
 ${gormBlock}${entitySetup}
 ${entityRouteLines}
 
@@ -1374,6 +1423,7 @@ ${entityRouteLines}
 
 func (s *Server) Run() error { return s.srv.ListenAndServe() }
 func (s *Server) Shutdown(ctx context.Context) error { return s.srv.Shutdown(ctx) }
+func (s *Server) Handler() http.Handler     { return s.srv.Handler }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 \tw.Header().Set("Content-Type", "application/json")
@@ -1381,7 +1431,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 \t_ = json.NewEncoder(w).Encode(v)
 }
 
-${handlers}
+${inlineHandlersC}
 `;
 }
 

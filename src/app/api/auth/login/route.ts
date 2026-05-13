@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { loginSchema } from "@/lib/schema";
 import { verifyPassword, signToken, buildSetCookieHeader } from "@/lib/auth";
-import { findUserByEmail } from "@/lib/db";
+import { findUserByEmail, createSession, pruneExpiredSessions } from "@/lib/db";
 import { checkRateLimit, getRateLimitKey } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
@@ -33,7 +33,9 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "invalid_credentials" }, { status: 401 });
   }
 
-  const token = await signToken({ sub: user.id, email: user.email, name: user.name });
+  const { token, jti, expiresAt } = await signToken({ sub: user.id, email: user.email, name: user.name });
+  createSession(jti, user.id, expiresAt);
+  pruneExpiredSessions();
 
   return Response.json(
     {

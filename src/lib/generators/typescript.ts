@@ -1,7 +1,8 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
-import { safeName, toPascal, toKebab, toCamel } from "./types";
+import { safeName, toKebab, toCamel } from "./types";
 import { tsGrpcFiles } from "./grpc/typescript";
 import { needsAuth } from "./auth/providers";
+import { tsPatternRoute, tsPatternImports } from "./patterns/typescript";
 
 function tsMockField(name: string, type: FieldType): string {
   switch (type) {
@@ -624,6 +625,7 @@ function pkgJson(name: string, framework: string, withPrisma = false, _db = "", 
           supertest: "^7.0.0",
           "@types/supertest": "^6.0.0",
           ...(framework === "express" ? { "@types/express": "^4.17.21", "@types/cors": "^2.8.17" } : {}),
+          ...(framework === "nestjs" ? { "@nestjs/testing": "^10.0.0" } : {}),
           ...(withPrisma ? { prisma: "^5.22.0" } : {}),
         },
       },
@@ -663,16 +665,16 @@ function tsDockerfile() {
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev || npm install --omit=dev
+RUN npm ci
 COPY . .
-RUN npm install typescript --no-save && npx tsc -p tsconfig.json
+RUN npm run build
 
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
+COPY package.json package-lock.json* ./
+RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/package.json ./package.json
 USER node
 EXPOSE 8080
 CMD ["node", "dist/main.js"]
@@ -850,7 +852,7 @@ describe("${pascal} routes", () => {
   }
 
   if (framework === "nestjs") {
-    return `import { describe, it, expect, beforeEach } from "vitest";
+    return `import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Test, TestingModule } from "@nestjs/testing";
 import { ${pascal}Controller } from "./${kebab}.controller";
 import { ${pascal}NestService } from "./${kebab}.service";
@@ -1115,10 +1117,12 @@ export class JwtAuthGuard implements CanActivate {
 }
 
 function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
+  const { needsBcrypt, needsJwt } = tsPatternImports(endpoints);
   const routes = endpoints
-    .map(
-      (e) =>
-        `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, ${e.auth ? "authRequired, " : ""}(req, res) => res.json({ ok: true, op: "${e.method} ${e.path}" }));`
+    .map((e) =>
+      e.pattern
+        ? tsPatternRoute(e, "express", config, entities)
+        : `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, ${e.auth ? "authRequired, " : ""}(req, res) => res.json({ ok: true, op: "${e.method} ${e.path}" }));`
     )
     .join("\n");
 
@@ -1136,7 +1140,7 @@ function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
 import helmet from "helmet";
 import cors from "cors";
 import pinoHttp from "pino-http";
-${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}import { authRequired } from "./middleware/auth";
+${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}import { authRequired } from "./middleware/auth";
 ${entityImports ? entityImports + "\n" : ""}
 // Comma-separated list of origins in ALLOWED_ORIGINS, e.g.
 // "https://app.example.com,https://admin.example.com". Omit to keep CORS
@@ -1267,9 +1271,10 @@ export function rateLimit(req: Request, res: Response, next: NextFunction) {
 
 function fastifyFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
   const routes = endpoints
-    .map(
-      (e) =>
-        `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, async () => ({ ok: true, op: "${e.method} ${e.path}" }));`
+    .map((e) =>
+      e.pattern
+        ? tsPatternRoute(e, "fastify", config, entities)
+        : `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, async () => ({ ok: true, op: "${e.method} ${e.path}" }));`
     )
     .join("\n");
 
@@ -1286,35 +1291,37 @@ function fastifyFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
       content: `import Fastify from "fastify";
 import helmet from "@fastify/helmet";
 ${entityImports ? entityImports + "\n" : ""}
-// Fastify's built-in logger (pino) already emits JSON, so no extra config needed.
-const app = Fastify({ logger: true });
-await app.register(helmet);
+async function main() {
+  // Fastify's built-in logger (pino) already emits JSON, so no extra config needed.
+  const app = Fastify({ logger: true });
+  await app.register(helmet);
 
-app.get("/health", async () => ({ ok: true }));
+  app.get("/health", async () => ({ ok: true }));
 ${routes}
 ${entityRegistrations}
-const port = Number(process.env.PORT ?? 8080);
-try {
+  const port = Number(process.env.PORT ?? 8080);
   await app.listen({ port, host: "0.0.0.0" });
-} catch (err) {
-  app.log.error(err);
-  process.exit(1);
+
+  // Graceful shutdown — Fastify's close() awaits in-flight requests and
+  // triggers all registered onClose hooks.
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.once(signal, async () => {
+      app.log.info({ signal }, "shutdown");
+      try {
+        await app.close();
+        process.exit(0);
+      } catch (err) {
+        app.log.error({ err }, "shutdown failed");
+        process.exit(1);
+      }
+    });
+  }
 }
 
-// Graceful shutdown — Fastify's close() awaits in-flight requests and
-// triggers all registered onClose hooks.
-for (const signal of ["SIGTERM", "SIGINT"] as const) {
-  process.once(signal, async () => {
-    app.log.info({ signal }, "shutdown");
-    try {
-      await app.close();
-      process.exit(0);
-    } catch (err) {
-      app.log.error({ err }, "shutdown failed");
-      process.exit(1);
-    }
-  });
-}
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
 `,
     },
   ];
@@ -1322,9 +1329,10 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
 
 function honoFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
   const routes = endpoints
-    .map(
-      (e) =>
-        `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, (c) => c.json({ ok: true, op: "${e.method} ${e.path}" }));`
+    .map((e) =>
+      e.pattern
+        ? tsPatternRoute(e, "hono", config, entities)
+        : `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, (c) => c.json({ ok: true, op: "${e.method} ${e.path}" }));`
     )
     .join("\n");
 

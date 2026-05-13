@@ -10,7 +10,7 @@ function isProd(): boolean {
   return process.env.NODE_ENV === "production";
 }
 
-let loggedDevFallback = new Set<string>();
+const loggedDevFallback = new Set<string>();
 
 function logDevFallback(name: string) {
   if (loggedDevFallback.has(name)) return;

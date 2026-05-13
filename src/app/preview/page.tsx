@@ -4,9 +4,11 @@ import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
+  ArrowLeft,
   ChevronRight,
   Copy,
   Download,
+  Edit3,
   FileCode,
   FileCog,
   FileJson,
@@ -15,18 +17,26 @@ import {
   FolderOpen,
   GitBranch,
   Github,
+  Globe,
   Loader2,
+  PlusCircle,
+  MinusCircle,
+  RotateCcw,
   Rocket,
   Search,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
+import dynamic from "next/dynamic";
+
+const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false, loading: () => null });
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useStackStore } from "@/lib/store";
+import type { StackConfig, Endpoint, Entity, AuthUser } from "@/lib/store";
 import { cn, formatBytes } from "@/lib/utils";
 import { DownloadRepoButton } from "@/components/shared/download-repo-button";
 import { toast } from "@/components/ui/toast";
@@ -128,12 +138,30 @@ function GithubParamHandler({
 }
 
 export default function PreviewPage() {
-  const { config, endpoints, entities } = useStackStore();
+  const { config, endpoints, entities, authUser } = useStackStore();
 
   const generatedFiles = React.useMemo(
     () => generate(config as unknown as GeneratorStackConfig, endpoints, entities),
     [config, endpoints, entities]
   );
+
+  // Track file paths from the first render for diff calculation
+  const baselineRef = React.useRef<string[] | null>(null);
+  const [changedFiles, setChangedFiles] = React.useState<{ added: string[]; removed: string[] } | null>(null);
+
+  React.useEffect(() => {
+    const currentPaths = generatedFiles.map((f) => f.path);
+    if (baselineRef.current === null) {
+      baselineRef.current = currentPaths;
+      return;
+    }
+    const baseline = new Set(baselineRef.current);
+    const current = new Set(currentPaths);
+    const added = currentPaths.filter((p) => !baseline.has(p));
+    const removed = baselineRef.current.filter((p) => !current.has(p));
+    setChangedFiles({ added, removed });
+    baselineRef.current = currentPaths;
+  }, [generatedFiles]);
 
   const tree = React.useMemo(() => buildTree(generatedFiles), [generatedFiles]);
 
@@ -160,6 +188,23 @@ export default function PreviewPage() {
   const [selected, setSelected] = React.useState(defaultSelected);
   const [ghStatus, setGhStatus] = React.useState<GhStatus | null>(null);
   const [pushing, setPushing] = React.useState(false);
+  const [showGalleryDialog, setShowGalleryDialog] = React.useState(false);
+  const [gallerySharing, setGallerySharing] = React.useState(false);
+  const [overrides, setOverrides] = React.useState<Record<string, string>>({});
+
+  function setOverride(path: string, content: string) {
+    setOverrides((prev) => ({ ...prev, [path]: content }));
+  }
+
+  function resetOverride(path: string) {
+    setOverrides((prev) => {
+      const next = { ...prev };
+      delete next[path];
+      return next;
+    });
+  }
+
+  const overrideCount = Object.keys(overrides).length;
 
   function downloadCollection() {
     const file = generatedFiles.find((f) => f.path === "api/postman_collection.json");
@@ -244,10 +289,25 @@ export default function PreviewPage() {
       breadcrumb={[
         { label: "Projects", href: "/dashboard" },
         { label: config.name },
-        { label: "Repository" },
+        { label: "Review & Download" },
       ]}
       actions={
         <>
+          <Button asChild variant="ghost" size="sm">
+            <Link href="/builder">
+              <ArrowLeft className="h-3.5 w-3.5" /> Back to builder
+            </Link>
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              if (!authUser) { window.location.href = "/login?returnTo=/preview"; return; }
+              setShowGalleryDialog(true);
+            }}
+          >
+            <Globe className="h-3.5 w-3.5" /> Share to gallery
+          </Button>
           <Button variant="secondary" size="sm" onClick={pushToGitHub} disabled={pushing}>
             {pushing ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -256,6 +316,12 @@ export default function PreviewPage() {
             )}
             {ghStatus?.connected ? `Push as ${ghStatus.login}` : "Connect GitHub"}
           </Button>
+          <DownloadRepoButton overrides={overrideCount > 0 ? overrides : undefined} />
+          {overrideCount > 0 && (
+            <Badge variant="brand" className="text-[10px]">
+              {overrideCount} edited
+            </Badge>
+          )}
           <Button asChild variant="glow" size="sm">
             <Link href="/deploy">
               <Rocket className="h-3.5 w-3.5" /> Deploy
@@ -265,6 +331,18 @@ export default function PreviewPage() {
       }
     >
       <React.Suspense fallback={null}><GithubParamHandler setGhStatus={setGhStatus} /></React.Suspense>
+
+      {showGalleryDialog && (
+        <GalleryShareDialog
+          config={config}
+          endpoints={endpoints}
+          entities={entities}
+          authUser={authUser}
+          sharing={gallerySharing}
+          setSharing={setGallerySharing}
+          onClose={() => setShowGalleryDialog(false)}
+        />
+      )}
 
       {entities.length === 0 && endpoints.length === 0 && (
         <div className="border-b border-amber-500/20 bg-amber-500/[0.06] px-6 py-3">
@@ -280,6 +358,15 @@ export default function PreviewPage() {
       )}
 
       <div className="max-w-[1280px] mx-auto p-6 md:p-8 space-y-6">
+        {/* Step indicator */}
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span className="text-foreground/50">Configure</span>
+          <ChevronRight className="h-3 w-3" />
+          <span className="font-medium text-brand-300">Review code</span>
+          <ChevronRight className="h-3 w-3" />
+          <span className="text-foreground/50">Download / Deploy</span>
+        </div>
+
         <HeaderBlock fileCount={flatFiles.length} totalBytes={totalBytes} />
 
         <div className="grid gap-6 lg:grid-cols-[320px,1fr]">
@@ -302,6 +389,15 @@ export default function PreviewPage() {
                   <TabsTrigger value="manifests">
                     <FileJson className="h-3.5 w-3.5" /> Manifests
                   </TabsTrigger>
+                  <TabsTrigger value="changes">
+                    <GitBranch className="h-3.5 w-3.5" />
+                    Changes
+                    {changedFiles && (changedFiles.added.length + changedFiles.removed.length) > 0 && (
+                      <Badge variant="brand" className="ml-1 h-4 px-1 text-[10px]">
+                        {changedFiles.added.length + changedFiles.removed.length}
+                      </Badge>
+                    )}
+                  </TabsTrigger>
                   <TabsTrigger value="audit">
                     <ShieldCheck className="h-3.5 w-3.5" /> Audit
                   </TabsTrigger>
@@ -318,13 +414,18 @@ export default function PreviewPage() {
                   <Button variant="secondary" size="sm" onClick={downloadCollection}>
                     <Download className="h-3.5 w-3.5" /> Postman
                   </Button>
-                  <DownloadRepoButton />
                 </div>
               </div>
 
               <TabsContent value="code">
                 {selectedNode ? (
-                  <CodeViewer path={selected} node={selectedNode} />
+                  <CodeViewer
+                    path={selected}
+                    node={selectedNode}
+                    override={overrides[selected]}
+                    onEdit={(content) => setOverride(selected, content)}
+                    onReset={() => resetOverride(selected)}
+                  />
                 ) : null}
               </TabsContent>
 
@@ -334,6 +435,10 @@ export default function PreviewPage() {
 
               <TabsContent value="manifests">
                 <ManifestsGrid generatedFiles={generatedFiles} />
+              </TabsContent>
+
+              <TabsContent value="changes">
+                <DiffTab changedFiles={changedFiles} totalFiles={flatFiles.length} />
               </TabsContent>
 
               <TabsContent value="audit">
@@ -503,38 +608,98 @@ function TreeRow({
   );
 }
 
-function CodeViewer({ path, node }: { path: string; node: TreeNode }) {
+function CodeViewer({
+  path,
+  node,
+  override,
+  onEdit,
+  onReset,
+}: {
+  path: string;
+  node: TreeNode;
+  override?: string;
+  onEdit: (content: string) => void;
+  onReset: () => void;
+}) {
+  const [editing, setEditing] = React.useState(false);
+  const displayContent = override ?? node.content ?? "";
+  const isModified = override !== undefined;
+
   async function copy() {
     try {
-      await navigator.clipboard.writeText(node.content ?? "");
+      await navigator.clipboard.writeText(displayContent);
       toast({ title: "File contents copied", description: path, kind: "success" });
     } catch {
       toast({ title: "Copy failed", kind: "error" });
     }
   }
+
+  function handleReset() {
+    onReset();
+    setEditing(false);
+  }
+
+  const monacoLang = node.lang === "tsx" ? "typescript" : node.lang === "dotenv" ? "plaintext" : node.lang ?? "plaintext";
+
   return (
     <Card className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-2.5">
-        <span className="text-xs font-mono text-muted-foreground truncate">
-          {path}
+        <span className="flex items-center gap-2 min-w-0">
+          <span className="text-xs font-mono text-muted-foreground truncate">{path}</span>
+          {isModified && (
+            <Badge variant="brand" className="text-[10px] shrink-0">edited</Badge>
+          )}
         </span>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <Badge variant="outline">{node.lang ?? "text"}</Badge>
+          {isModified && (
+            <Button variant="ghost" size="icon" onClick={handleReset} aria-label="Reset file">
+              <RotateCcw className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          <Button
+            variant={editing ? "secondary" : "ghost"}
+            size="icon"
+            onClick={() => setEditing((e) => !e)}
+            aria-label={editing ? "View mode" : "Edit file"}
+          >
+            <Edit3 className="h-3.5 w-3.5" />
+          </Button>
           <Button variant="ghost" size="icon" onClick={copy} aria-label="Copy file">
             <Copy className="h-3.5 w-3.5" />
           </Button>
         </div>
       </div>
-      <pre className="p-4 text-[12.5px] font-mono leading-relaxed text-white/85 overflow-auto max-h-[560px]">
-        {(node.content ?? "").split("\n").map((ln, i) => (
-          <div key={i} className="flex gap-3">
-            <span className="select-none text-white/20 w-6 text-right shrink-0">
-              {i + 1}
-            </span>
-            <span className="whitespace-pre">{ln}</span>
-          </div>
-        ))}
-      </pre>
+      {editing ? (
+        <div className="h-[560px]">
+          <MonacoEditor
+            height="560px"
+            language={monacoLang}
+            value={displayContent}
+            theme="vs-dark"
+            onChange={(val) => { if (val !== undefined) onEdit(val); }}
+            options={{
+              fontSize: 12.5,
+              minimap: { enabled: false },
+              scrollBeyondLastLine: false,
+              lineNumbers: "on",
+              wordWrap: "off",
+              tabSize: 2,
+            }}
+          />
+        </div>
+      ) : (
+        <pre className="p-4 text-[12.5px] font-mono leading-relaxed text-white/85 overflow-auto max-h-[560px]">
+          {displayContent.split("\n").map((ln, i) => (
+            <div key={i} className="flex gap-3">
+              <span className="select-none text-white/20 w-6 text-right shrink-0">
+                {i + 1}
+              </span>
+              <span className="whitespace-pre">{ln}</span>
+            </div>
+          ))}
+        </pre>
+      )}
     </Card>
   );
 }
@@ -628,6 +793,167 @@ function ManifestsGrid({ generatedFiles }: { generatedFiles: GeneratedFile[] }) 
           No deployment manifests in the current configuration.
         </p>
       )}
+    </div>
+  );
+}
+
+function DiffTab({
+  changedFiles,
+  totalFiles,
+}: {
+  changedFiles: { added: string[]; removed: string[] } | null;
+  totalFiles: number;
+}) {
+  if (!changedFiles || (changedFiles.added.length === 0 && changedFiles.removed.length === 0)) {
+    return (
+      <Card>
+        <CardContent className="py-8 text-center text-xs text-muted-foreground">
+          <GitBranch className="h-6 w-6 mx-auto mb-2 opacity-30" />
+          No changes since you opened this preview. Edit your stack in the builder to see file diffs here.
+        </CardContent>
+      </Card>
+    );
+  }
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          Stack diff
+          <Badge variant="brand">{changedFiles.added.length + changedFiles.removed.length} file{changedFiles.added.length + changedFiles.removed.length === 1 ? "" : "s"} changed</Badge>
+        </CardTitle>
+        <CardDescription>
+          {changedFiles.added.length} added · {changedFiles.removed.length} removed · {totalFiles} total
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-1">
+        {changedFiles.added.map((p) => (
+          <div key={p} className="flex items-center gap-2 rounded px-2 py-1 bg-emerald-500/[0.06] border border-emerald-500/20">
+            <PlusCircle className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+            <span className="font-mono text-[11px] text-emerald-200">{p}</span>
+          </div>
+        ))}
+        {changedFiles.removed.map((p) => (
+          <div key={p} className="flex items-center gap-2 rounded px-2 py-1 bg-red-500/[0.06] border border-red-500/20">
+            <MinusCircle className="h-3.5 w-3.5 text-red-400 shrink-0" />
+            <span className="font-mono text-[11px] text-red-200 line-through">{p}</span>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function GalleryShareDialog({
+  config,
+  endpoints,
+  entities,
+  authUser,
+  sharing,
+  setSharing,
+  onClose,
+}: {
+  config: StackConfig;
+  endpoints: Endpoint[];
+  entities: Entity[];
+  authUser: AuthUser | null;
+  sharing: boolean;
+  setSharing: (v: boolean) => void;
+  onClose: () => void;
+}) {
+  const [title, setTitle] = React.useState(config.name);
+  const [description, setDescription] = React.useState("");
+  const [useCase, setUseCase] = React.useState("");
+
+  async function submit() {
+    if (!title.trim()) {
+      toast({ title: "Title is required", kind: "error" });
+      return;
+    }
+    setSharing(true);
+    try {
+      const safeConfig = { ...config, envVars: [] };
+      const stackUrl = btoa(JSON.stringify({ config: safeConfig, endpoints, entities }));
+      const res = await fetch("/api/gallery", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: title.trim(),
+          description: description.trim() || undefined,
+          useCase: useCase.trim() || undefined,
+          language: config.language,
+          framework: config.framework,
+          stackUrl,
+        }),
+      });
+      if (!res.ok) throw new Error("server error");
+      toast({ title: "Shared to gallery!", description: "Your stack is now publicly visible.", kind: "success" });
+      onClose();
+    } catch {
+      toast({ title: "Share failed", description: "Please try again.", kind: "error" });
+    } finally {
+      setSharing(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <Card className="w-full max-w-md glass-strong">
+        <div className="flex items-center justify-between border-b border-white/[0.06] p-5">
+          <div className="flex items-center gap-2">
+            <Globe className="h-4 w-4 text-brand-300" />
+            <span className="font-semibold text-sm">Share to gallery</span>
+          </div>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-lg leading-none">×</button>
+        </div>
+        <div className="p-5 space-y-4">
+          <div className="space-y-1.5">
+            <label className="text-xs text-muted-foreground">Title *</label>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              maxLength={100}
+              className="w-full rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500/40"
+              placeholder="My awesome stack"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs text-muted-foreground">Description</label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              maxLength={500}
+              rows={3}
+              className="w-full rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500/40 resize-none"
+              placeholder="What this stack is good for…"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs text-muted-foreground">Use case</label>
+              <input
+                value={useCase}
+                onChange={(e) => setUseCase(e.target.value)}
+                maxLength={64}
+                className="w-full rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500/40"
+                placeholder="SaaS, API gateway…"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs text-muted-foreground">Author</label>
+              <div className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-muted-foreground">
+                {authUser?.name ?? "—"}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <Button variant="secondary" size="sm" onClick={onClose} disabled={sharing}>Cancel</Button>
+            <Button variant="glow" size="sm" onClick={submit} disabled={sharing}>
+              {sharing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Globe className="h-3.5 w-3.5" />}
+              Share
+            </Button>
+          </div>
+        </div>
+      </Card>
     </div>
   );
 }

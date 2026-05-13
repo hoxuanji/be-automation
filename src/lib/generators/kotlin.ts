@@ -812,7 +812,6 @@ function springKtController(
   entity: Entity
 ): string {
   const camelRepo = toCamel(pascal) + "Repository";
-  const camelVar = toCamel(entity.name);
 
   const pkField = entity.fields.find((f) => f.primaryKey);
   const pkCol = pkField ? toCamel(pkField.name) : "id";

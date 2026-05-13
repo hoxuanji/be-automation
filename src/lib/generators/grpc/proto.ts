@@ -57,7 +57,7 @@ export function generateProto(
   endpointCount: number
 ): ProtoFile {
   const pkg = safeName(config.name).replace(/-/g, "_") + ".v1";
-  const goPackageOption = `github.com/your-org/${safeName(config.name)}/gen/go/${pkg.replace(/\./g, "/")};${pkg.split(".")[0]}v1`;
+  const goPackageOption = `github.com/your-username/${safeName(config.name)}/gen/go/${pkg.replace(/\./g, "/")};${pkg.split(".")[0]}v1`;
   const javaPackageOption = `dev.helios.${pkg.replace(/\./g, ".")}`;
 
   const wkt = new Set<"timestamp">();

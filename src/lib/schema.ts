@@ -87,12 +87,18 @@ export const endpointSchema = z.object({
   auth: z.boolean(),
   requestSchema: z.string().optional(),
   responseSchema: z.string().optional(),
+  pattern: z.string().max(64).optional(),
+  logic: z.string().max(2000).optional(),
 });
 
 export const generateRequestSchema = z.object({
   config: stackConfigSchema,
   endpoints: z.array(endpointSchema).max(200),
   entities: z.array(entitySchema).max(50).optional(),
+  // gitConfig is passed through as-is; shape is validated client-side
+  gitConfig: z.record(z.unknown()).optional(),
+  // path → content overrides applied after generation (edit-before-download)
+  overrides: z.record(z.string().max(1_000_000)).optional(),
 });
 
 export const aiChatRequestSchema = z.object({
@@ -106,6 +112,8 @@ export const aiChatRequestSchema = z.object({
     .min(1)
     .max(20),
   config: stackConfigSchema.optional(),
+  endpoints: z.array(endpointSchema).max(200).optional(),
+  entities: z.array(entitySchema).max(50).optional(),
 });
 
 export const aiSuggestRequestSchema = z.object({
@@ -151,6 +159,20 @@ export const projectPayloadSchema = z.object({
     relations: z.array(relationSchema).max(200).optional(),
   }),
 });
+
+// ─── Gallery API schema ───────────────────────────────────────────────────────
+
+export const gallerySubmitSchema = z.object({
+  title: z.string().min(1).max(100),
+  description: z.string().max(500).optional(),
+  author: z.string().max(64).optional(),
+  language: z.enum(["go", "typescript", "python", "rust", "java", "kotlin"]),
+  framework: z.string().min(1).max(64),
+  useCase: z.string().max(64).optional(),
+  stackUrl: z.string().min(1).max(20000),
+});
+
+export type GallerySubmit = z.infer<typeof gallerySubmitSchema>;
 
 export type GenerateRequest = z.infer<typeof generateRequestSchema>;
 export type AiChatRequest = z.infer<typeof aiChatRequestSchema>;

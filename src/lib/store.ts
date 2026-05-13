@@ -1,6 +1,8 @@
 "use client";
 
 import { create } from "zustand";
+import { persist, createJSONStorage } from "zustand/middleware";
+import { type GitConfig, type WorkflowConfig, defaultGitConfig } from "./git-config";
 
 export type StackConfig = {
   name: string;
@@ -35,6 +37,8 @@ export type Endpoint = {
   auth: boolean;
   requestSchema?: string;
   responseSchema?: string;
+  pattern?: string;
+  logic?: string;
 };
 
 export type FieldType =
@@ -88,6 +92,12 @@ export type AuthUser = {
   hasApiKey: boolean;
 };
 
+export type GithubRepo = {
+  owner: string;
+  repo: string;
+  defaultBranch: string;
+};
+
 const STORAGE_KEY = "helios:projects";
 
 function readStoredProjects(): SavedProject[] {
@@ -108,8 +118,12 @@ function writeStoredProjects(projects: SavedProject[]) {
   }
 }
 
+export type { GitConfig, WorkflowConfig };
+
 type State = {
   config: StackConfig;
+  gitConfig: GitConfig;
+  githubRepo: GithubRepo | null;
   endpoints: Endpoint[];
   entities: Entity[];
   relations: Relation[];
@@ -120,8 +134,13 @@ type State = {
 
   // Config mutations
   setWorkspace: (w: string) => void;
+  setGithubRepo: (r: GithubRepo | null) => void;
   set: <K extends keyof StackConfig>(k: K, v: StackConfig[K]) => void;
   patch: (p: Partial<StackConfig>) => void;
+  setGitConfig: (g: GitConfig) => void;
+  patchGitConfig: (p: Partial<GitConfig>) => void;
+  patchWorkflow: (id: string, patch: Partial<WorkflowConfig>) => void;
+  resetGitConfig: () => void;
 
   // Endpoint mutations
   setEndpoints: (endpoints: Endpoint[]) => void;
@@ -224,12 +243,29 @@ const initialEntities: Entity[] = [
   },
 ];
 
-export const useStackStore = create<State>((set, get) => ({
+export const useStackStore = create<State>()(
+  persist(
+    (set, get) => ({
   workspace: "Acme Co.",
   workspaces: ["Acme Co.", "Helios Labs", "Personal"],
   setWorkspace: (w) => set({ workspace: w }),
   savedProjects: [],
   authUser: null,
+  gitConfig: defaultGitConfig(),
+  githubRepo: null,
+  setGithubRepo: (r) => set({ githubRepo: r }),
+  setGitConfig: (g) => set({ gitConfig: g }),
+  patchGitConfig: (p) => set((s) => ({ gitConfig: { ...s.gitConfig, ...p } })),
+  patchWorkflow: (id, patch) =>
+    set((s) => ({
+      gitConfig: {
+        ...s.gitConfig,
+        workflows: s.gitConfig.workflows.map((w) =>
+          w.id === id ? { ...w, ...patch } : w
+        ),
+      },
+    })),
+  resetGitConfig: () => set({ gitConfig: defaultGitConfig() }),
   config: {
     name: "helios-api",
     language: "go",
@@ -455,4 +491,18 @@ export const useStackStore = create<State>((set, get) => ({
     writeStoredProjects(updated);
     set({ savedProjects: updated });
   },
-}));
+    }),
+    {
+      name: "helios:stack",
+      storage: createJSONStorage(() => localStorage),
+      partialize: (s) => ({
+        config: s.config,
+        gitConfig: s.gitConfig,
+        githubRepo: s.githubRepo,
+        endpoints: s.endpoints,
+        entities: s.entities,
+        relations: s.relations,
+      }),
+    }
+  )
+);

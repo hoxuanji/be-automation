@@ -9,7 +9,7 @@ function jwtSecret(): Uint8Array {
   return _jwtSecret;
 }
 
-const PROTECTED = ["/dashboard", "/builder", "/api-builder", "/preview", "/deploy", "/settings"];
+const PROTECTED = ["/dashboard", "/builder", "/api-builder", "/preview", "/deploy", "/settings", "/git-settings", "/editor", "/templates", "/gallery", "/from-repo"];
 const AUTH_ONLY = ["/login", "/signup"];
 
 function matchesAny(path: string, prefixes: string[]) {
@@ -29,7 +29,8 @@ export async function middleware(req: NextRequest) {
   }
 
   if (matchesAny(pathname, PROTECTED) && !authenticated) {
-    return NextResponse.redirect(new URL("/login", req.url));
+    const returnTo = encodeURIComponent(pathname);
+    return NextResponse.redirect(new URL(`/login?returnTo=${returnTo}`, req.url));
   }
 
   if (matchesAny(pathname, AUTH_ONLY) && authenticated) {

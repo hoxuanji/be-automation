@@ -21,15 +21,18 @@ import {
   Search,
   Trash2,
   History,
+  Users,
+  ChevronDown,
+  Loader2,
 } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { AIAssistant } from "@/components/shared/ai-assistant";
 import { toast } from "@/components/ui/toast";
 import { useStackStore, type SavedProject } from "@/lib/store";
 import type { StackConfig } from "@/lib/generators/types";
+import { cn } from "@/lib/utils";
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -127,13 +130,36 @@ const quickActions = [
   { label: "New stack", desc: "Start from scratch", icon: Boxes, href: "/builder" },
   { label: "API contract", desc: "Design endpoints", icon: FileCode2, href: "/api-builder" },
   { label: "Connect cloud", desc: "AWS / GCP / Azure", icon: Cloud, href: "/deploy" },
-  { label: "Import repo", desc: "Analyze existing", icon: FolderGit2, action: "import" as const },
+  { label: "Import repo", desc: "Analyze existing", icon: FolderGit2, href: "/from-repo" },
 ];
+
+function PersistenceWarning() {
+  const [show, setShow] = React.useState(false);
+
+  React.useEffect(() => {
+    fetch("/api/health")
+      .then((r) => r.json())
+      .then((d: { storage?: string }) => { if (d.storage === "ephemeral") setShow(true); })
+      .catch(() => {});
+  }, []);
+
+  if (!show) return null;
+
+  return (
+    <div className="border-b border-amber-500/20 bg-amber-500/[0.06] px-6 py-3">
+      <div className="max-w-6xl mx-auto flex items-center justify-between gap-4 flex-wrap">
+        <p className="text-xs text-amber-200/80">
+          <strong className="font-medium">Storage warning:</strong> Your database is on an ephemeral filesystem and will reset on the next deploy. Mount a persistent volume or connect a managed database to keep your data.
+        </p>
+        <button onClick={() => setShow(false)} className="text-amber-400/60 hover:text-amber-300 text-sm leading-none shrink-0">✕</button>
+      </div>
+    </div>
+  );
+}
 
 export default function DashboardPage() {
   const { savedProjects, loadSavedProjects, deleteProject, authUser } = useStackStore();
   const [filter, setFilter] = React.useState("");
-  const router = useRouter();
 
   React.useEffect(() => {
     void loadSavedProjects();
@@ -150,8 +176,8 @@ export default function DashboardPage() {
   return (
     <WorkspaceShell
       breadcrumb={[{ label: "Dashboard" }]}
-      right={<AIAssistant />}
     >
+      <PersistenceWarning />
       <div className="mx-auto max-w-6xl p-6 md:p-8 space-y-8">
         <HeaderBlock name={authUser?.name} projectCount={savedProjects.length} />
 
@@ -225,19 +251,10 @@ export default function DashboardPage() {
                   placeholder="Filter projects"
                 />
               </label>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() =>
-                  toast({
-                    title: "Import a repository",
-                    description:
-                      "Paste a GitHub URL in the AI panel to audit it.",
-                    kind: "info",
-                  })
-                }
-              >
-                <GitBranch className="h-3.5 w-3.5" /> Import
+              <Button asChild variant="secondary" size="sm">
+                <Link href="/from-repo">
+                  <GitBranch className="h-3.5 w-3.5" /> Import
+                </Link>
               </Button>
               <Button asChild variant="glow" size="sm">
                 <Link href="/builder">
@@ -249,12 +266,31 @@ export default function DashboardPage() {
 
           <div className="mt-4 grid gap-3 md:grid-cols-2">
             {savedProjects.length === 0 ? (
-              <div className="md:col-span-2 rounded-xl border border-dashed border-white/[0.08] bg-white/[0.01] p-8 text-center space-y-2">
-                <FolderGit2 className="h-8 w-8 text-muted-foreground mx-auto" />
-                <div className="text-sm font-medium">No saved projects yet</div>
-                <p className="text-xs text-muted-foreground">
-                  Open the builder, configure your stack, and hit Save.
-                </p>
+              <div className="md:col-span-2 rounded-xl border border-dashed border-white/[0.08] bg-white/[0.01] p-8 space-y-5">
+                <div className="text-center space-y-3">
+                  <div className="mx-auto h-12 w-12 rounded-xl bg-gradient-to-br from-brand-500/20 to-purple-500/20 border border-white/[0.06] grid place-items-center">
+                    <FolderGit2 className="h-6 w-6 text-brand-300" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold">No projects yet</div>
+                    <p className="text-xs text-muted-foreground mt-1 max-w-xs mx-auto">
+                      Start from a template or configure your own stack from scratch — your first repo takes under 2 minutes.
+                    </p>
+                  </div>
+                  <div className="flex items-center justify-center gap-2">
+                    <Button asChild variant="glow" size="sm">
+                      <Link href="/builder"><Plus className="h-3.5 w-3.5" /> Start from scratch</Link>
+                    </Button>
+                  </div>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2 text-center">Or pick a template</p>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {templates.map((t) => (
+                      <TemplateCard key={t.id} template={t} />
+                    ))}
+                  </div>
+                </div>
               </div>
             ) : filtered.length === 0 ? (
               <div className="md:col-span-2 rounded-xl border border-white/[0.06] bg-white/[0.02] p-8 text-center">
@@ -282,6 +318,8 @@ export default function DashboardPage() {
             ))}
           </div>
         </section>
+
+        <TeamProjectsSection />
 
         <RecentSaves />
       </div>
@@ -511,6 +549,139 @@ function TemplateCard({ template }: { template: Template }) {
         </div>
       </div>
     </button>
+  );
+}
+
+type Team = { id: string; name: string; role: string; memberCount: number };
+type TeamProject = { id: string; name: string; updated_at: number; user_name: string };
+
+function TeamProjectsSection() {
+  const { authUser } = useStackStore();
+  const [teams, setTeams] = React.useState<Team[]>([]);
+  const [projects, setProjects] = React.useState<Record<string, TeamProject[]>>({});
+  const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
+  const [loading, setLoading] = React.useState(false);
+  const router = useRouter();
+
+  React.useEffect(() => {
+    if (!authUser) return;
+    setLoading(true);
+    fetch("/api/teams")
+      .then((r) => r.json())
+      .then((d: { teams?: Team[] }) => {
+        const t = d.teams ?? [];
+        setTeams(t);
+        // Auto-expand first team, load its projects
+        if (t.length > 0) {
+          setExpanded({ [t[0].id]: true });
+          return fetchTeamProjects(t[0].id);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser]);
+
+  async function fetchTeamProjects(teamId: string) {
+    if (projects[teamId]) return;
+    try {
+      const r = await fetch(`/api/teams/${teamId}/projects`);
+      const d = await r.json() as { projects?: TeamProject[] };
+      setProjects((prev) => ({ ...prev, [teamId]: d.projects ?? [] }));
+    } catch {}
+  }
+
+  function toggle(teamId: string) {
+    setExpanded((prev) => {
+      const next = { ...prev, [teamId]: !prev[teamId] };
+      if (next[teamId]) void fetchTeamProjects(teamId);
+      return next;
+    });
+  }
+
+  if (!authUser || (teams.length === 0 && !loading)) return null;
+
+  return (
+    <section>
+      <SectionHeader
+        title="Team projects"
+        subtitle="Projects shared across your team workspaces"
+      />
+      {loading ? (
+        <div className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading teams…
+        </div>
+      ) : (
+        <div className="mt-4 space-y-3">
+          {teams.map((team) => (
+            <div key={team.id} className="rounded-xl border border-white/[0.06] bg-white/[0.02] overflow-hidden">
+              <button
+                type="button"
+                onClick={() => toggle(team.id)}
+                className="w-full flex items-center justify-between p-4 hover:bg-white/[0.02] group"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="grid h-8 w-8 place-items-center rounded-lg border border-white/10 bg-white/[0.03]">
+                    <Users className="h-4 w-4 text-muted-foreground" />
+                  </div>
+                  <div className="text-left">
+                    <div className="text-sm font-medium">{team.name}</div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {team.memberCount} member{team.memberCount !== 1 ? "s" : ""} · {team.role}
+                    </div>
+                  </div>
+                </div>
+                <ChevronDown
+                  className={cn(
+                    "h-4 w-4 text-muted-foreground transition-transform",
+                    expanded[team.id] && "rotate-180"
+                  )}
+                />
+              </button>
+              {expanded[team.id] && (
+                <div className="border-t border-white/[0.04]">
+                  {!projects[team.id] ? (
+                    <div className="flex items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
+                      <Loader2 className="h-3 w-3 animate-spin" /> Loading projects…
+                    </div>
+                  ) : projects[team.id].length === 0 ? (
+                    <div className="px-4 py-3 text-xs text-muted-foreground">
+                      No projects yet for this team.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-white/[0.04]">
+                      {projects[team.id].map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => {
+                            toast({ title: `Opening "${p.name}"`, description: `by ${p.user_name}`, kind: "info" });
+                            router.push("/builder");
+                          }}
+                          className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-white/[0.02] group"
+                        >
+                          <div className="grid h-6 w-6 place-items-center rounded-md border border-white/10 bg-white/[0.03] shrink-0">
+                            <Database className="h-3 w-3 text-muted-foreground" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <span className="text-xs font-medium truncate">{p.name}</span>
+                          </div>
+                          <div className="flex items-center gap-3 shrink-0 text-[11px] text-muted-foreground">
+                            <span>{p.user_name}</span>
+                            <span>{relativeTime(new Date(p.updated_at * 1000).toISOString())}</span>
+                            <ArrowRight className="h-3 w-3 opacity-0 group-hover:opacity-100 transition-opacity" />
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

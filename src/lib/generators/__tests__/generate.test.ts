@@ -1,6 +1,6 @@
 import { describe, it, before } from "node:test";
 import { strict as assert } from "node:assert";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generate } from "../index.ts";

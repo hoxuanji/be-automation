@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { ArrowRight, Check, ChevronRight, LayoutGrid, Rocket, Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { useStackStore } from "@/lib/store";
 import { BrandIcon } from "@/components/shared/brand-icon";
 import { cn } from "@/lib/utils";

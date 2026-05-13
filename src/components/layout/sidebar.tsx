@@ -7,6 +7,8 @@ import {
   Boxes,
   Network,
   FolderGit2,
+  GitBranch,
+  Pencil,
   Rocket,
   Star,
   Settings,
@@ -32,8 +34,10 @@ const nav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutGrid },
   { href: "/builder", label: "Stack Builder", icon: Boxes, badge: "AI" },
   { href: "/api-builder", label: "API Contracts", icon: Network },
+  { href: "/git-settings", label: "Git & CI/CD", icon: GitBranch },
   { href: "/templates", label: "Templates", icon: Star },
   { href: "/preview", label: "Repository", icon: FolderGit2 },
+  { href: "/editor", label: "Code Editor", icon: Pencil },
   { href: "/deploy", label: "Deploy", icon: Rocket },
 ];
 

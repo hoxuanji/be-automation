@@ -1,7 +1,9 @@
 import { SignJWT, jwtVerify } from "jose";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import { NextRequest } from "next/server";
 import { getJwtSecret } from "./env";
+import { sessionExists } from "./db";
 
 const COOKIE_NAME = "helios_token";
 // Defer reading the secret until first use so that a dev process without
@@ -34,15 +36,20 @@ export type JWTPayload = {
   sub: string;
   email: string;
   name: string;
+  jti: string;
 };
 
-export async function signToken(payload: JWTPayload): Promise<string> {
-  return new SignJWT({ email: payload.email, name: payload.name })
+export async function signToken(payload: Omit<JWTPayload, "jti">): Promise<{ token: string; jti: string; expiresAt: number }> {
+  const jti = crypto.randomUUID();
+  const expiresAt = Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7; // 7d
+  const token = await new SignJWT({ email: payload.email, name: payload.name })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(payload.sub)
-    .setExpirationTime("7d")
+    .setJti(jti)
+    .setExpirationTime(expiresAt)
     .setIssuedAt()
     .sign(jwtSecret());
+  return { token, jti, expiresAt };
 }
 
 export async function verifyToken(token: string): Promise<JWTPayload | null> {
@@ -52,6 +59,7 @@ export async function verifyToken(token: string): Promise<JWTPayload | null> {
       sub: payload.sub as string,
       email: payload.email as string,
       name: payload.name as string,
+      jti: payload.jti as string,
     };
   } catch {
     return null;
@@ -73,7 +81,10 @@ export async function getCurrentUser(
 ): Promise<JWTPayload | null> {
   const token = getTokenFromRequest(req);
   if (!token) return null;
-  return verifyToken(token);
+  const payload = await verifyToken(token);
+  if (!payload) return null;
+  if (!sessionExists(payload.jti)) return null;
+  return payload;
 }
 
 // ─── Cookie helpers ──────────────────────────────────────────────────────────

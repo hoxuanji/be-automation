@@ -69,6 +69,83 @@ function openDb(): Database.Database {
     // Column already exists — no-op
   }
 
+  // Idempotent migration: sessions + password reset
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      jti        TEXT PRIMARY KEY,
+      user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      token      TEXT PRIMARY KEY,
+      user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at INTEGER NOT NULL,
+      used_at    INTEGER
+    );
+  `);
+
+  // Idempotent migration: teams
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS teams (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      owner_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS team_members (
+      team_id   TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role      TEXT NOT NULL DEFAULT 'member',
+      joined_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      PRIMARY KEY (team_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS team_invites (
+      token        TEXT PRIMARY KEY,
+      team_id      TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      email        TEXT,
+      invited_by   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at   INTEGER NOT NULL,
+      accepted_at  INTEGER,
+      accepted_by  TEXT REFERENCES users(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(user_id);
+    CREATE INDEX IF NOT EXISTS idx_team_invites_team ON team_invites(team_id);
+  `);
+
+  // Idempotent migration: public stack gallery
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gallery_stacks (
+      id          TEXT PRIMARY KEY,
+      title       TEXT NOT NULL,
+      description TEXT,
+      language    TEXT NOT NULL,
+      framework   TEXT NOT NULL,
+      use_case    TEXT,
+      author      TEXT,
+      stack_url   TEXT NOT NULL,
+      stars       INTEGER NOT NULL DEFAULT 0,
+      created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_gallery_language ON gallery_stacks(language);
+    CREATE INDEX IF NOT EXISTS idx_gallery_stars ON gallery_stacks(stars DESC);
+  `);
+
+  // Idempotent migration: gallery owner + rate_limits
+  try { db.exec("ALTER TABLE gallery_stacks ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE SET NULL"); } catch {}
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS rate_limits (
+      key      TEXT PRIMARY KEY,
+      count    INTEGER NOT NULL DEFAULT 1,
+      reset_at INTEGER NOT NULL
+    );
+  `);
+
   return db;
 }
 
@@ -134,9 +211,9 @@ export function upsertUserByGithub(
     return { ...existing, github_id: githubId };
   }
 
-  const id = require("crypto").randomUUID() as string;
+  const id = crypto.randomUUID();
   // No real password — GitHub-only account
-  const passwordHash = require("crypto").randomBytes(32).toString("hex");
+  const passwordHash = crypto.randomBytes(32).toString("hex");
   db.prepare(
     "INSERT INTO users (id, email, name, password_hash, github_id) VALUES (?, ?, ?, ?, ?)"
   ).run(id, email.toLowerCase(), name, passwordHash, githubId);
@@ -287,4 +364,214 @@ export function decryptApiKey(enc: string): string {
     decipher.update(Buffer.from(encHex, "hex")).toString("utf8") +
     decipher.final("utf8")
   );
+}
+
+// ─── Session helpers ──────────────────────────────────────────────────────────
+
+export function createSession(jti: string, userId: string, expiresAt: number): void {
+  getDb().prepare("INSERT OR IGNORE INTO sessions (jti, user_id, expires_at) VALUES (?, ?, ?)").run(jti, userId, expiresAt);
+}
+
+export function sessionExists(jti: string): boolean {
+  const row = getDb().prepare("SELECT 1 FROM sessions WHERE jti = ? AND expires_at > unixepoch()").get(jti);
+  return !!row;
+}
+
+export function deleteSession(jti: string): void {
+  getDb().prepare("DELETE FROM sessions WHERE jti = ?").run(jti);
+}
+
+export function deleteUserSessions(userId: string): void {
+  getDb().prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+}
+
+export function pruneExpiredSessions(): void {
+  getDb().prepare("DELETE FROM sessions WHERE expires_at <= unixepoch()").run();
+}
+
+// ─── Password reset helpers ───────────────────────────────────────────────────
+
+export function createPasswordResetToken(token: string, userId: string, expiresAt: number): void {
+  getDb().prepare("INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES (?, ?, ?)").run(token, userId, expiresAt);
+}
+
+export function getPasswordResetToken(token: string): { token: string; user_id: string; expires_at: number; used_at: number | null } | undefined {
+  return getDb().prepare("SELECT * FROM password_reset_tokens WHERE token = ?").get(token) as { token: string; user_id: string; expires_at: number; used_at: number | null } | undefined;
+}
+
+export function markPasswordResetUsed(token: string): void {
+  getDb().prepare("UPDATE password_reset_tokens SET used_at = unixepoch() WHERE token = ?").run(token);
+}
+
+// ─── Stats helpers ────────────────────────────────────────────────────────────
+
+export function countAllProjects(): number {
+  const row = getDb().prepare("SELECT COUNT(*) as n FROM projects").get() as { n: number };
+  return row.n;
+}
+
+// ─── Team helpers ─────────────────────────────────────────────────────────────
+
+export type TeamRow = { id: string; name: string; owner_id: string; created_at: number };
+export type TeamMemberRow = { team_id: string; user_id: string; role: string; joined_at: number; name?: string; email?: string };
+export type TeamInviteRow = { token: string; team_id: string; email: string | null; invited_by: string; expires_at: number; accepted_at: number | null; accepted_by: string | null };
+
+export function createTeam(id: string, name: string, ownerId: string): void {
+  const db = getDb();
+  db.prepare("INSERT INTO teams (id, name, owner_id) VALUES (?, ?, ?)").run(id, name, ownerId);
+  db.prepare("INSERT INTO team_members (team_id, user_id, role) VALUES (?, ?, 'owner')").run(id, ownerId);
+}
+
+export function getTeam(teamId: string): TeamRow | undefined {
+  return getDb().prepare("SELECT * FROM teams WHERE id = ?").get(teamId) as TeamRow | undefined;
+}
+
+export function listUserTeams(userId: string): (TeamRow & { role: string; memberCount: number })[] {
+  return getDb().prepare(`
+    SELECT t.*, tm.role,
+      (SELECT COUNT(*) FROM team_members WHERE team_id = t.id) AS memberCount
+    FROM teams t
+    JOIN team_members tm ON tm.team_id = t.id AND tm.user_id = ?
+    ORDER BY t.created_at DESC
+  `).all(userId) as (TeamRow & { role: string; memberCount: number })[];
+}
+
+export function listTeamMembers(teamId: string): TeamMemberRow[] {
+  return getDb().prepare(`
+    SELECT tm.*, u.name, u.email
+    FROM team_members tm
+    JOIN users u ON u.id = tm.user_id
+    WHERE tm.team_id = ?
+    ORDER BY tm.role DESC, tm.joined_at ASC
+  `).all(teamId) as TeamMemberRow[];
+}
+
+export function getTeamMember(teamId: string, userId: string): TeamMemberRow | undefined {
+  return getDb().prepare("SELECT * FROM team_members WHERE team_id = ? AND user_id = ?").get(teamId, userId) as TeamMemberRow | undefined;
+}
+
+export function addTeamMember(teamId: string, userId: string, role: string): void {
+  getDb().prepare("INSERT OR IGNORE INTO team_members (team_id, user_id, role) VALUES (?, ?, ?)").run(teamId, userId, role);
+}
+
+export function removeTeamMember(teamId: string, userId: string): void {
+  getDb().prepare("DELETE FROM team_members WHERE team_id = ? AND user_id = ? AND role != 'owner'").run(teamId, userId);
+}
+
+export function deleteTeam(teamId: string, ownerId: string): void {
+  getDb().prepare("DELETE FROM teams WHERE id = ? AND owner_id = ?").run(teamId, ownerId);
+}
+
+export function createTeamInvite(token: string, teamId: string, email: string | null, invitedBy: string, expiresAt: number): void {
+  getDb().prepare("INSERT INTO team_invites (token, team_id, email, invited_by, expires_at) VALUES (?, ?, ?, ?, ?)").run(token, teamId, email, invitedBy, expiresAt);
+}
+
+export function getTeamInvite(token: string): TeamInviteRow | undefined {
+  return getDb().prepare("SELECT * FROM team_invites WHERE token = ?").get(token) as TeamInviteRow | undefined;
+}
+
+export function acceptTeamInvite(token: string, userId: string): void {
+  getDb().prepare("UPDATE team_invites SET accepted_at = unixepoch(), accepted_by = ? WHERE token = ?").run(userId, token);
+}
+
+export function listTeamInvites(teamId: string): TeamInviteRow[] {
+  return getDb().prepare("SELECT * FROM team_invites WHERE team_id = ? ORDER BY expires_at DESC").all(teamId) as TeamInviteRow[];
+}
+
+// ─── Gallery helpers ──────────────────────────────────────────────────────────
+
+export type GalleryRow = {
+  id: string;
+  title: string;
+  description: string | null;
+  language: string;
+  framework: string;
+  use_case: string | null;
+  author: string | null;
+  owner_id: string | null;
+  stack_url: string;
+  stars: number;
+  created_at: number;
+};
+
+export function createGalleryStack(row: Omit<GalleryRow, "stars" | "created_at">): void {
+  getDb()
+    .prepare(
+      `INSERT INTO gallery_stacks (id, title, description, language, framework, use_case, author, stack_url, owner_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(row.id, row.title, row.description ?? null, row.language, row.framework, row.use_case ?? null, row.author ?? null, row.stack_url, row.owner_id ?? null);
+}
+
+export function listGalleryStacks(opts: { language?: string; q?: string; limit?: number; offset?: number } = {}): GalleryRow[] {
+  const { language, q, limit = 24, offset = 0 } = opts;
+  let sql = "SELECT * FROM gallery_stacks WHERE 1=1";
+  const params: (string | number)[] = [];
+  if (language) {
+    sql += " AND language = ?";
+    params.push(language);
+  }
+  if (q) {
+    sql += " AND (title LIKE ? OR description LIKE ? OR framework LIKE ?)";
+    const like = `%${q}%`;
+    params.push(like, like, like);
+  }
+  sql += " ORDER BY stars DESC, created_at DESC LIMIT ? OFFSET ?";
+  params.push(limit, offset);
+  return getDb().prepare(sql).all(...params) as GalleryRow[];
+}
+
+export function starGalleryStack(id: string): void {
+  getDb()
+    .prepare("UPDATE gallery_stacks SET stars = stars + 1 WHERE id = ?")
+    .run(id);
+}
+
+export function deleteGalleryStack(id: string, ownerId: string): boolean {
+  const result = getDb()
+    .prepare("DELETE FROM gallery_stacks WHERE id = ? AND owner_id = ?")
+    .run(id, ownerId);
+  return result.changes > 0;
+}
+
+// ─── Account deletion ─────────────────────────────────────────────────────────
+
+export function deleteUser(userId: string): void {
+  // ON DELETE CASCADE removes sessions, projects, team ownerships, and team memberships
+  getDb().prepare("DELETE FROM users WHERE id = ?").run(userId);
+}
+
+// ─── Team project helpers ─────────────────────────────────────────────────────
+
+export type TeamProjectRow = ProjectRow & { user_name: string };
+
+export function listProjectsForTeamMembers(teamId: string): TeamProjectRow[] {
+  return getDb().prepare(`
+    SELECT p.*, u.name AS user_name
+    FROM projects p
+    JOIN users u ON u.id = p.user_id
+    JOIN team_members tm ON tm.user_id = p.user_id
+    WHERE tm.team_id = ?
+    ORDER BY p.updated_at DESC
+    LIMIT 50
+  `).all(teamId) as TeamProjectRow[];
+}
+
+// ─── Rate limit helpers (SQLite-backed, survives restarts) ────────────────────
+
+export function checkRateLimitDb(key: string, limit: number, windowMs = 60_000): boolean {
+  const db = getDb();
+  const now = Date.now();
+  const row = db.prepare("SELECT count, reset_at FROM rate_limits WHERE key = ?").get(key) as { count: number; reset_at: number } | undefined;
+  if (!row || row.reset_at < now) {
+    db.prepare("INSERT OR REPLACE INTO rate_limits (key, count, reset_at) VALUES (?, 1, ?)").run(key, now + windowMs);
+    return true;
+  }
+  if (row.count >= limit) return false;
+  db.prepare("UPDATE rate_limits SET count = count + 1 WHERE key = ?").run(key);
+  return true;
+}
+
+export function pruneRateLimits(): void {
+  getDb().prepare("DELETE FROM rate_limits WHERE reset_at < ?").run(Date.now());
 }
