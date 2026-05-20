@@ -293,6 +293,7 @@ function cacheRead(table: string): string {
 }
 
 function customHandler(e: Endpoint): string {
+  if (e.logicCode) return e.logicCode;
   return `async def handler():
     # ${e.logic || e.summary || "TODO: implement handler logic"}
     return {"ok": True, "op": "${e.method} ${e.path}"}`;

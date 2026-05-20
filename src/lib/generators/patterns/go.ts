@@ -644,6 +644,7 @@ function cacheRead(fw: Fw, table: string): string {
 }
 
 function customHandler(fw: Fw, e: Endpoint): string {
+  if (e.logicCode) return e.logicCode;
   const x = fwCtx(fw);
   return `\t// ${e.logic || e.summary || "TODO: implement handler logic"}
 \t// Pattern: custom — implement business logic here.

@@ -1,6 +1,8 @@
 import type { Endpoint, Entity, FieldType, GeneratedFile, StackConfig } from "./types";
 import { safeName, toPascal, toKebab, toSnake } from "./types";
 import { goGrpcFiles } from "./grpc/go";
+import { goGraphqlFiles } from "./graphql/go";
+import { isGraphqlSupported } from "./types";
 import { needsAuth } from "./auth/providers";
 import { goApiHandlersFile, goHandlerMethodName } from "./patterns/go";
 
@@ -17,6 +19,16 @@ export function goFiles(
     files.push({ path: "Dockerfile", content: goDockerfile() });
     files.push({ path: "internal/config/config.go", content: goConfig() });
     files.push(...goGrpcFiles(config, entities));
+    return files;
+  }
+
+  // GraphQL replaces the HTTP server with a gqlgen-driven /graphql route.
+  // Same structure as gRPC: keep the language-shared files, swap the entry.
+  if (config.api === "graphql" && isGraphqlSupported(config.language)) {
+    const files: GeneratedFile[] = [];
+    files.push({ path: "Dockerfile", content: goDockerfile() });
+    files.push({ path: "internal/config/config.go", content: goConfig() });
+    files.push(...goGraphqlFiles(config, entities));
     return files;
   }
 

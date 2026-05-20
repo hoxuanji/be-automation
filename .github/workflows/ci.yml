@@ -80,7 +80,9 @@ jobs:
           - { label: "python-fastapi", language: "python", framework: "fastapi" }
           - { label: "rust-axum", language: "rust", framework: "axum" }
           - { label: "java-spring", language: "java", framework: "spring", javaVersion: "21" }
+          - { label: "java-quarkus", language: "java", framework: "quarkus", javaVersion: "21" }
           - { label: "kotlin-ktor", language: "kotlin", framework: "ktor", javaVersion: "21" }
+          - { label: "kotlin-spring-kt", language: "kotlin", framework: "spring-kt", javaVersion: "21" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

@@ -1,5 +1,4 @@
 import { SignJWT, jwtVerify } from "jose";
-import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { NextRequest } from "next/server";
 import { getJwtSecret } from "./env";
@@ -15,19 +14,6 @@ function jwtSecret(): Uint8Array {
     _jwtSecret = new TextEncoder().encode(getJwtSecret());
   }
   return _jwtSecret;
-}
-
-// ─── Password ────────────────────────────────────────────────────────────────
-
-export async function hashPassword(password: string): Promise<string> {
-  return bcrypt.hash(password, 12);
-}
-
-export async function verifyPassword(
-  password: string,
-  hash: string
-): Promise<boolean> {
-  return bcrypt.compare(password, hash);
 }
 
 // ─── JWT ─────────────────────────────────────────────────────────────────────

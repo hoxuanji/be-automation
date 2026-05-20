@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Eye, EyeOff, FolderOpen, Github, Key, Link2, Loader2, Lock, Plus, Shield, Trash2, User, Users, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Eye, EyeOff, FolderOpen, Github, Key, Link2, Loader2, Plus, Shield, Trash2, User, Users, X } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import {
   Card,
@@ -23,7 +23,6 @@ export default function SettingsPage() {
   const [emailVal, setEmailVal] = React.useState(authUser?.email ?? "");
   const [showKey, setShowKey] = React.useState(false);
   const [profileSaving, setProfileSaving] = React.useState(false);
-  const [pwSaving, setPwSaving] = React.useState(false);
   const [keySaving, setKeySaving] = React.useState(false);
 
   React.useEffect(() => {
@@ -49,33 +48,6 @@ export default function SettingsPage() {
       toast({ title: "Failed to update profile", kind: "error" });
     } finally {
       setProfileSaving(false);
-    }
-  }
-
-  async function savePassword(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setPwSaving(true);
-    const fd = new FormData(e.currentTarget);
-    const password = fd.get("password") as string;
-    const confirm = fd.get("confirm") as string;
-    if (password !== confirm) {
-      toast({ title: "Passwords don't match", kind: "error" });
-      setPwSaving(false);
-      return;
-    }
-    try {
-      const res = await fetch("/api/auth/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      if (!res.ok) throw new Error();
-      toast({ title: "Password updated", kind: "success" });
-      (e.target as HTMLFormElement).reset();
-    } catch {
-      toast({ title: "Failed to update password", kind: "error" });
-    } finally {
-      setPwSaving(false);
     }
   }
 
@@ -172,53 +144,6 @@ export default function SettingsPage() {
                 disabled={profileSaving}
               >
                 {profileSaving ? "Saving…" : "Save profile"}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
-
-        {/* Password */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Lock className="h-4 w-4" /> Password
-            </CardTitle>
-            <CardDescription>Choose a new password.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form onSubmit={savePassword} className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
-                  New password
-                </label>
-                <Input
-                  name="password"
-                  type="password"
-                  required
-                  minLength={8}
-                  autoComplete="new-password"
-                  placeholder="8+ characters"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
-                  Confirm password
-                </label>
-                <Input
-                  name="confirm"
-                  type="password"
-                  required
-                  autoComplete="new-password"
-                  placeholder="Repeat password"
-                />
-              </div>
-              <Button
-                type="submit"
-                variant="secondary"
-                size="sm"
-                disabled={pwSaving}
-              >
-                {pwSaving ? "Saving…" : "Change password"}
               </Button>
             </form>
           </CardContent>
@@ -563,7 +488,13 @@ function IntegrationsCard() {
       <CardContent className="space-y-3">
         <GitHubIntegrationRow />
         <div className="border-t border-white/[0.04]" />
-        <RailwayIntegrationRow />
+        <ProviderIntegrationRow provider="railway" />
+        <div className="border-t border-white/[0.04]" />
+        <ProviderIntegrationRow provider="render" />
+        <div className="border-t border-white/[0.04]" />
+        <ProviderIntegrationRow provider="fly" />
+        <div className="border-t border-white/[0.04]" />
+        <ProviderIntegrationRow provider="vercel" />
       </CardContent>
     </Card>
   );
@@ -641,24 +572,81 @@ function GitHubIntegrationRow() {
   );
 }
 
-function RailwayIntegrationRow() {
+type DeployProviderId = "railway" | "render" | "fly" | "vercel";
+
+const PROVIDER_INTEGRATION: Record<
+  DeployProviderId,
+  {
+    label: string;
+    verifyEndpoint: string;
+    tokenLabel: string;
+    tokenLinkUrl: string;
+    tokenLinkText: string;
+    placeholder: string;
+    extractIdentity: (resp: Record<string, unknown>) => string | null;
+  }
+> = {
+  railway: {
+    label: "Railway",
+    verifyEndpoint: "/api/railway/verify",
+    tokenLabel: "Personal API Token",
+    tokenLinkUrl: "https://railway.app/account/tokens",
+    tokenLinkText: "railway.app/account/tokens",
+    placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    extractIdentity: (r) =>
+      typeof r.email === "string" ? r.email : typeof r.name === "string" ? r.name : null,
+  },
+  render: {
+    label: "Render",
+    verifyEndpoint: "/api/render/verify",
+    tokenLabel: "Personal API Key",
+    tokenLinkUrl: "https://dashboard.render.com/u/settings#api-keys",
+    tokenLinkText: "dashboard.render.com/u/settings#api-keys",
+    placeholder: "rnd_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    extractIdentity: (r) =>
+      typeof r.name === "string" ? r.name : typeof r.email === "string" ? r.email : null,
+  },
+  fly: {
+    label: "Fly",
+    verifyEndpoint: "/api/fly/verify",
+    tokenLabel: "Personal Access Token",
+    tokenLinkUrl: "https://fly.io/user/personal_access_tokens",
+    tokenLinkText: "fly.io/user/personal_access_tokens",
+    placeholder: "fo1_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    extractIdentity: (r) =>
+      typeof r.name === "string" ? r.name : typeof r.orgSlug === "string" ? `org: ${r.orgSlug}` : null,
+  },
+  vercel: {
+    label: "Vercel",
+    verifyEndpoint: "/api/vercel/verify",
+    tokenLabel: "Personal Access Token",
+    tokenLinkUrl: "https://vercel.com/account/tokens",
+    tokenLinkText: "vercel.com/account/tokens",
+    placeholder: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    extractIdentity: (r) =>
+      typeof r.username === "string" ? `@${r.username}` : typeof r.email === "string" ? r.email : null,
+  },
+};
+
+function ProviderIntegrationRow({ provider }: { provider: DeployProviderId }) {
+  const meta = PROVIDER_INTEGRATION[provider];
   const [maskedToken, setMaskedToken] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [expanded, setExpanded] = React.useState(false);
   const [token, setToken] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState<{ message: string; hint?: string } | null>(null);
-  const [verifiedEmail, setVerifiedEmail] = React.useState<string | null>(null);
+  const [verifiedIdentity, setVerifiedIdentity] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     fetch("/api/deploy/credentials")
       .then((r) => r.json())
-      .then((d: { creds?: { railway?: { token?: string } } }) => {
-        setMaskedToken(d.creds?.railway?.token ?? null);
+      .then((d: { creds?: Record<string, { token?: string }> }) => {
+        setMaskedToken(d.creds?.[provider]?.token ?? null);
       })
       .catch(() => setMaskedToken(null))
       .finally(() => setLoading(false));
-  }, []);
+  }, [provider]);
 
   async function saveToken() {
     const t = token.trim();
@@ -666,26 +654,29 @@ function RailwayIntegrationRow() {
     setSaving(true);
     setError(null);
     try {
-      const vRes = await fetch("/api/railway/verify", {
+      const vRes = await fetch(meta.verifyEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token: t }),
       });
-      const vData = await vRes.json() as { email?: string; error?: string; hint?: string };
+      const vData = (await vRes.json()) as Record<string, unknown> & {
+        error?: string;
+        hint?: string;
+      };
       if (!vRes.ok) {
         setError({ message: vData.error ?? "Invalid token", hint: vData.hint });
         return;
       }
-      setVerifiedEmail(vData.email ?? null);
+      setVerifiedIdentity(meta.extractIdentity(vData));
       await fetch("/api/deploy/credentials", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: "railway", fields: { token: t } }),
+        body: JSON.stringify({ provider, fields: { token: t } }),
       });
       setMaskedToken(`••••${t.slice(-4)}`);
       setToken("");
       setExpanded(false);
-      toast({ title: "Railway token saved", kind: "success" });
+      toast({ title: `${meta.label} token saved`, kind: "success" });
     } catch {
       setError({ message: "Request failed", hint: "Check your network and try again." });
     } finally {
@@ -694,10 +685,10 @@ function RailwayIntegrationRow() {
   }
 
   async function remove() {
-    await fetch("/api/deploy/credentials?provider=railway", { method: "DELETE" });
+    await fetch(`/api/deploy/credentials?provider=${provider}`, { method: "DELETE" });
     setMaskedToken(null);
-    setVerifiedEmail(null);
-    toast({ title: "Railway token removed", kind: "info" });
+    setVerifiedIdentity(null);
+    toast({ title: `${meta.label} token removed`, kind: "info" });
   }
 
   const hasToken = !!maskedToken;
@@ -707,17 +698,17 @@ function RailwayIntegrationRow() {
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="grid h-9 w-9 place-items-center rounded-lg border border-white/10 bg-white/[0.03]">
-            <BrandIcon id="railway" size={20} />
+            <BrandIcon id={provider} size={20} />
           </div>
           <div>
-            <div className="text-sm font-medium">Railway</div>
+            <div className="text-sm font-medium">{meta.label}</div>
             <div className="text-xs text-muted-foreground">
               {loading ? (
                 "Checking…"
               ) : hasToken ? (
                 <span className="flex items-center gap-1.5">
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                  {verifiedEmail ?? maskedToken}
+                  {verifiedIdentity ?? maskedToken}
                 </span>
               ) : (
                 "No token saved"
@@ -764,21 +755,21 @@ function RailwayIntegrationRow() {
         <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 space-y-2.5">
           <div className="flex items-center justify-between">
             <label className="text-xs text-muted-foreground">
-              Personal API Token from{" "}
+              {meta.tokenLabel} from{" "}
               <a
-                href="https://railway.app/account/tokens"
+                href={meta.tokenLinkUrl}
                 target="_blank"
                 rel="noreferrer"
                 className="underline hover:text-foreground"
               >
-                railway.app/account/tokens
+                {meta.tokenLinkText}
               </a>
             </label>
             <Badge variant="purple"><Shield className="h-2.5 w-2.5" /> encrypted</Badge>
           </div>
           <Input
             type="password"
-            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+            placeholder={meta.placeholder}
             value={token}
             onChange={(e) => { setToken(e.target.value); setError(null); }}
             onKeyDown={(e) => { if (e.key === "Enter") void saveToken(); }}
@@ -815,7 +806,6 @@ function RailwayIntegrationRow() {
     </div>
   );
 }
-
 // ─── Danger zone ──────────────────────────────────────────────────────────────
 
 function DangerZoneCard() {

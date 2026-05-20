@@ -1,6 +1,8 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { toPascal, toSnake, toKebab } from "./types";
 import { pyGrpcFiles } from "./grpc/python";
+import { pythonGraphqlFiles } from "./graphql/python";
+import { isGraphqlSupported } from "./types";
 import { needsAuth } from "./auth/providers";
 import { pyPatternRoute, pyPatternImports } from "./patterns/python";
 
@@ -12,6 +14,13 @@ export function pythonFiles(
   // gRPC mode replaces the FastAPI / Django / Litestar bootstrap entirely.
   if (config.api === "grpc") {
     return pyGrpcFiles(config, entities);
+  }
+
+  // GraphQL mode replaces FastAPI with a Strawberry-mounted FastAPI app —
+  // structurally similar but the resolver layout is the source of truth, not
+  // the route table. Same dispatch shape as gRPC.
+  if (config.api === "graphql" && isGraphqlSupported(config.language)) {
+    return pythonGraphqlFiles(config, entities);
   }
 
   const files: GeneratedFile[] = [];

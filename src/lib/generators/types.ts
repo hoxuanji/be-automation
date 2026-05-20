@@ -79,6 +79,14 @@ export function isGrpcSupported(language: "go" | "typescript" | "python" | "rust
   return language === "go" || language === "typescript" || language === "python";
 }
 
+// Languages where Helios emits a real GraphQL server bootstrap. Other languages
+// fall back to REST and the README surfaces a warning. Same shape as
+// isGrpcSupported on purpose — both follow the schema-first language-shared
+// dispatch pattern in index.ts.
+export function isGraphqlSupported(language: "go" | "typescript" | "python" | "rust" | "java" | "kotlin"): boolean {
+  return language === "go" || language === "typescript" || language === "python";
+}
+
 // Heuristic: treat any env var as sensitive if its key or value looks like a
 // credential. Used to redact values out of committed artifacts (.env.example,
 // README) even when the user forgets to flip the `secret` toggle.

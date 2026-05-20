@@ -179,7 +179,7 @@ const PRICING_TIERS = [
     description: "For solo developers getting started.",
     features: ["5 generated stacks / month", "All 6 languages", "Download as zip", "Public gallery access", "Community support"],
     cta: "Start for free",
-    href: "/signup",
+    href: "/login",
     highlight: false,
   },
   {
@@ -189,7 +189,7 @@ const PRICING_TIERS = [
     description: "For developers who ship regularly.",
     features: ["Unlimited stacks", "GitHub push integration", "Railway one-click deploy", "Private gallery stacks", "Team (up to 5 members)", "Priority support"],
     cta: "Get started",
-    href: "/signup",
+    href: "/login",
     highlight: true,
   },
   {
@@ -267,7 +267,7 @@ function SiteHeader() {
             <Link href="/login">Sign in</Link>
           </Button>
           <Button asChild variant="glow" size="sm">
-            <Link href="/signup">
+            <Link href="/login">
               Get started
               <ArrowRight className="h-3.5 w-3.5" />
             </Link>

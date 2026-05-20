@@ -7,15 +7,16 @@ import { javaFiles } from "./java";
 import { kotlinFiles } from "./kotlin";
 import { generateProto } from "./grpc/proto";
 import { bufFiles } from "./grpc/buf";
+import { generateGraphqlSchema } from "./graphql/schema";
 import { migrationFiles } from "./db/migrations";
 import { clientSdkFiles } from "./client-sdk";
 import { contractTestFiles } from "./contract-tests";
-import { isGrpcSupported } from "./types";
+import { isGrpcSupported, isGraphqlSupported } from "./types";
 import type { Endpoint, Entity, GeneratedFile, StackConfig } from "./types";
 import { safeName } from "./types";
 import type { GitConfig } from "../git-config";
 
-export { isGrpcSupported } from "./types";
+export { isGrpcSupported, isGraphqlSupported } from "./types";
 
 export function generate(
   config: StackConfig,
@@ -36,6 +37,19 @@ export function generate(
       files.push(f);
     }
   }
+
+  // Schema-first GraphQL: emit the SDL once, then each language attaches its
+  // own server. We drop the SDL even for unsupported languages so users have
+  // a starting point if they want to wire up a third-party GraphQL server.
+  const wantsGraphql = config.api === "graphql";
+  const graphqlActive = wantsGraphql && isGraphqlSupported(config.language);
+
+  if (wantsGraphql) {
+    const sdl = generateGraphqlSchema(config, entities, endpoints.length);
+    files.push({ path: sdl.path, content: sdl.content });
+  }
+
+  void graphqlActive; // language entry points re-check this; kept for symmetry
 
   switch (config.language) {
     case "go":

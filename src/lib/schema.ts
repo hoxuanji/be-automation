@@ -45,6 +45,7 @@ export const stackConfigSchema = z.object({
     .min(1)
     .max(64)
     .regex(/^[a-z0-9][a-z0-9-_]*$/, "lowercase letters, digits, - or _ only"),
+  owner: z.string().max(64).optional().default(""),
   language: z.enum([
     "go",
     "typescript",
@@ -89,6 +90,7 @@ export const endpointSchema = z.object({
   responseSchema: z.string().optional(),
   pattern: z.string().max(64).optional(),
   logic: z.string().max(2000).optional(),
+  logicCode: z.string().max(10000).optional(),
 });
 
 export const generateRequestSchema = z.object({
@@ -122,21 +124,11 @@ export const aiSuggestRequestSchema = z.object({
 
 // ─── Auth schemas ─────────────────────────────────────────────────────────────
 
-export const signupSchema = z.object({
-  email: z.string().email(),
-  name: z.string().min(2).max(64),
-  password: z.string().min(8).max(128),
-});
-
-export const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1).max(128),
-});
-
+// Helios is SSO-only. signup/login/password schemas were removed when the
+// email-password flow was deleted; keep only the post-signin profile editor.
 export const updateSettingsSchema = z.object({
   name: z.string().min(2).max(64).optional(),
   email: z.string().email().optional(),
-  password: z.string().min(8).max(128).optional(),
   apiKey: z.string().max(200).optional().nullable(),
 });
 
@@ -149,6 +141,18 @@ export const relationSchema = z.object({
   type: z.enum(["one-to-many", "many-to-many", "one-to-one"]),
   label: z.string().optional(),
 });
+
+// ─── Project sharing ─────────────────────────────────────────────────────────
+
+export const createShareSchema = z.object({
+  principal: z.discriminatedUnion("type", [
+    z.object({ type: z.literal("user"), userId: z.string().min(1).max(64) }),
+    z.object({ type: z.literal("team"), teamId: z.string().min(1).max(64) }),
+  ]),
+  permission: z.enum(["view", "edit"]),
+});
+
+export type CreateShareRequest = z.infer<typeof createShareSchema>;
 
 export const projectPayloadSchema = z.object({
   name: z.string().min(1).max(128),

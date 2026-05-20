@@ -1,0 +1,177 @@
+[
+  {
+    "path": ".editorconfig",
+    "lines": 10,
+    "size": 147
+  },
+  {
+    "path": ".env.example",
+    "lines": 37,
+    "size": 1983
+  },
+  {
+    "path": ".github/workflows/ci.yml",
+    "lines": 67,
+    "size": 1799
+  },
+  {
+    "path": ".gitignore",
+    "lines": 33,
+    "size": 314
+  },
+  {
+    "path": "alembic.ini",
+    "lines": 39,
+    "size": 572
+  },
+  {
+    "path": "api/openapi.yaml",
+    "lines": 56,
+    "size": 1222
+  },
+  {
+    "path": "api/postman_collection.json",
+    "lines": 166,
+    "size": 4122
+  },
+  {
+    "path": "app/__init__.py",
+    "lines": 1,
+    "size": 0
+  },
+  {
+    "path": "app/graphql_store.py",
+    "lines": 13,
+    "size": 285
+  },
+  {
+    "path": "app/main.py",
+    "lines": 49,
+    "size": 1234
+  },
+  {
+    "path": "app/schema.py",
+    "lines": 171,
+    "size": 4071
+  },
+  {
+    "path": "DEPLOY.md",
+    "lines": 79,
+    "size": 2387
+  },
+  {
+    "path": "deploy/helm/Chart.yaml",
+    "lines": 21,
+    "size": 519
+  },
+  {
+    "path": "deploy/helm/templates/deployment.yaml",
+    "lines": 22,
+    "size": 490
+  },
+  {
+    "path": "deploy/helm/templates/service.yaml",
+    "lines": 12,
+    "size": 220
+  },
+  {
+    "path": "deploy/helm/values.yaml",
+    "lines": 63,
+    "size": 1195
+  },
+  {
+    "path": "deploy/k8s/deployment.yaml",
+    "lines": 63,
+    "size": 2037
+  },
+  {
+    "path": "deploy/k8s/hpa.yaml",
+    "lines": 19,
+    "size": 350
+  },
+  {
+    "path": "deploy/k8s/Makefile",
+    "lines": 36,
+    "size": 1371
+  },
+  {
+    "path": "deploy/k8s/pdb.yaml",
+    "lines": 10,
+    "size": 150
+  },
+  {
+    "path": "deploy/k8s/secrets.example.env",
+    "lines": 20,
+    "size": 442
+  },
+  {
+    "path": "deploy/k8s/service.yaml",
+    "lines": 13,
+    "size": 174
+  },
+  {
+    "path": "deploy/prometheus.yml",
+    "lines": 9,
+    "size": 152
+  },
+  {
+    "path": "docker-compose.yml",
+    "lines": 53,
+    "size": 1195
+  },
+  {
+    "path": "Dockerfile",
+    "lines": 20,
+    "size": 650
+  },
+  {
+    "path": "graphql/schema.graphql",
+    "lines": 83,
+    "size": 1576
+  },
+  {
+    "path": "migrations/env.py",
+    "lines": 51,
+    "size": 1439
+  },
+  {
+    "path": "migrations/script.py.mako",
+    "lines": 24,
+    "size": 469
+  },
+  {
+    "path": "migrations/versions/0001_init.py",
+    "lines": 39,
+    "size": 1362
+  },
+  {
+    "path": "pyproject.toml",
+    "lines": 21,
+    "size": 513
+  },
+  {
+    "path": "QUICKSTART.md",
+    "lines": 105,
+    "size": 2468
+  },
+  {
+    "path": "README.md",
+    "lines": 63,
+    "size": 2193
+  },
+  {
+    "path": "sdk/test-app_client.py",
+    "lines": 65,
+    "size": 2338
+  },
+  {
+    "path": "sdk/test-app-client.ts",
+    "lines": 76,
+    "size": 2175
+  },
+  {
+    "path": "tests/test_contracts.py",
+    "lines": 44,
+    "size": 1417
+  }
+]

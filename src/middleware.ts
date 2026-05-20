@@ -10,7 +10,7 @@ function jwtSecret(): Uint8Array {
 }
 
 const PROTECTED = ["/dashboard", "/builder", "/api-builder", "/preview", "/deploy", "/settings", "/git-settings", "/editor", "/templates", "/gallery", "/from-repo"];
-const AUTH_ONLY = ["/login", "/signup"];
+const AUTH_ONLY = ["/login"];
 
 function matchesAny(path: string, prefixes: string[]) {
   return prefixes.some((p) => path === p || path.startsWith(p + "/"));

@@ -548,7 +548,8 @@ function BusinessLogicPanel({
         }
         setPreview(code);
       }
-      onUpdate({ logic: code });
+      onUpdate({ logicCode: code });
+      setPreview(null);
       toast({ title: "Logic generated", kind: "success" });
     } catch {
       toast({ title: "Network error", kind: "error" });
@@ -632,15 +633,37 @@ function BusinessLogicPanel({
             placeholder={`Describe the business logic for ${endpoint.method} ${endpoint.path}…\n\nExample: List active users ordered by last login. Include pagination. Filter by role if ?role= is provided.`}
             className="w-full min-h-[100px] rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2.5 text-xs text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-brand-500/40 resize-none"
           />
-          {(preview ?? endpoint.logic) && (
+          {preview && (
             <div className="rounded-lg border border-white/[0.06] overflow-hidden">
               <div className="flex items-center justify-between border-b border-white/[0.06] px-3 py-2">
-                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Generated handler</span>
+                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Generating…</span>
                 <Badge variant="outline">{config.language}</Badge>
               </div>
               <pre className="p-3 text-[11px] font-mono text-white/80 overflow-auto max-h-[320px] leading-relaxed">
-                <code>{preview ?? endpoint.logic}</code>
+                <code>{preview}</code>
               </pre>
+            </div>
+          )}
+          {!preview && endpoint.logicCode && (
+            <div className="rounded-lg border border-emerald-500/20 overflow-hidden">
+              <div className="flex items-center justify-between border-b border-emerald-500/10 px-3 py-2">
+                <span className="text-[10px] uppercase tracking-wider text-emerald-400">Handler code — injected into generated files</span>
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline">{config.language}</Badge>
+                  <button
+                    onClick={() => onUpdate({ logicCode: undefined })}
+                    className="text-[10px] text-muted-foreground hover:text-red-400 transition-colors"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <textarea
+                value={endpoint.logicCode}
+                onChange={(e) => onUpdate({ logicCode: e.target.value })}
+                spellCheck={false}
+                className="w-full p-3 text-[11px] font-mono text-white/80 bg-transparent focus:outline-none resize-none min-h-[200px] max-h-[400px]"
+              />
             </div>
           )}
         </CardContent>

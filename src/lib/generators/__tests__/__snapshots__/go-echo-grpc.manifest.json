@@ -1,0 +1,197 @@
+[
+  {
+    "path": ".editorconfig",
+    "lines": 10,
+    "size": 147
+  },
+  {
+    "path": ".env.example",
+    "lines": 37,
+    "size": 1983
+  },
+  {
+    "path": ".github/workflows/ci.yml",
+    "lines": 70,
+    "size": 1855
+  },
+  {
+    "path": ".gitignore",
+    "lines": 30,
+    "size": 264
+  },
+  {
+    "path": "api/openapi.yaml",
+    "lines": 56,
+    "size": 1222
+  },
+  {
+    "path": "api/postman_collection.json",
+    "lines": 166,
+    "size": 4116
+  },
+  {
+    "path": "buf.gen.yaml",
+    "lines": 9,
+    "size": 201
+  },
+  {
+    "path": "buf.yaml",
+    "lines": 10,
+    "size": 92
+  },
+  {
+    "path": "cmd/api/main.go",
+    "lines": 64,
+    "size": 1565
+  },
+  {
+    "path": "cmd/migrate/main.go",
+    "lines": 77,
+    "size": 1878
+  },
+  {
+    "path": "DEPLOY.md",
+    "lines": 79,
+    "size": 2387
+  },
+  {
+    "path": "deploy/helm/Chart.yaml",
+    "lines": 21,
+    "size": 519
+  },
+  {
+    "path": "deploy/helm/templates/deployment.yaml",
+    "lines": 22,
+    "size": 490
+  },
+  {
+    "path": "deploy/helm/templates/service.yaml",
+    "lines": 12,
+    "size": 220
+  },
+  {
+    "path": "deploy/helm/values.yaml",
+    "lines": 63,
+    "size": 1195
+  },
+  {
+    "path": "deploy/k8s/deployment.yaml",
+    "lines": 63,
+    "size": 1983
+  },
+  {
+    "path": "deploy/k8s/hpa.yaml",
+    "lines": 19,
+    "size": 350
+  },
+  {
+    "path": "deploy/k8s/Makefile",
+    "lines": 36,
+    "size": 1371
+  },
+  {
+    "path": "deploy/k8s/pdb.yaml",
+    "lines": 10,
+    "size": 150
+  },
+  {
+    "path": "deploy/k8s/secrets.example.env",
+    "lines": 20,
+    "size": 442
+  },
+  {
+    "path": "deploy/k8s/service.yaml",
+    "lines": 14,
+    "size": 198
+  },
+  {
+    "path": "deploy/prometheus.yml",
+    "lines": 9,
+    "size": 152
+  },
+  {
+    "path": "docker-compose.yml",
+    "lines": 53,
+    "size": 1195
+  },
+  {
+    "path": "Dockerfile",
+    "lines": 14,
+    "size": 336
+  },
+  {
+    "path": "go.mod",
+    "lines": 13,
+    "size": 286
+  },
+  {
+    "path": "internal/api/contract/contract_test.go",
+    "lines": 115,
+    "size": 2876
+  },
+  {
+    "path": "internal/config/config.go",
+    "lines": 22,
+    "size": 476
+  },
+  {
+    "path": "internal/grpcserver/health.go",
+    "lines": 6,
+    "size": 256
+  },
+  {
+    "path": "internal/grpcserver/post_service.go",
+    "lines": 45,
+    "size": 1502
+  },
+  {
+    "path": "internal/grpcserver/server.go",
+    "lines": 13,
+    "size": 429
+  },
+  {
+    "path": "internal/grpcserver/user_service.go",
+    "lines": 45,
+    "size": 1502
+  },
+  {
+    "path": "Makefile",
+    "lines": 18,
+    "size": 414
+  },
+  {
+    "path": "migrations/000001_init.down.sql",
+    "lines": 5,
+    "size": 92
+  },
+  {
+    "path": "migrations/000001_init.up.sql",
+    "lines": 23,
+    "size": 791
+  },
+  {
+    "path": "proto/test_app/v1/service.proto",
+    "lines": 121,
+    "size": 2977
+  },
+  {
+    "path": "QUICKSTART.md",
+    "lines": 104,
+    "size": 2326
+  },
+  {
+    "path": "README.md",
+    "lines": 66,
+    "size": 2106
+  },
+  {
+    "path": "sdk/test-app_client.py",
+    "lines": 65,
+    "size": 2338
+  },
+  {
+    "path": "sdk/test-app-client.ts",
+    "lines": 76,
+    "size": 2175
+  }
+]

@@ -1,10 +1,11 @@
 import { NextRequest } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import {
-  getProjectById,
-  updateProject,
+  getProjectByIdRaw,
+  updateProjectRaw,
   deleteProjectById,
 } from "@/lib/db";
+import { getProjectAccess, canRead, canWrite, canManage } from "@/lib/permissions";
 import { projectPayloadSchema } from "@/lib/schema";
 
 export const runtime = "nodejs";
@@ -17,7 +18,10 @@ export async function GET(
   if (!claims) return Response.json({ error: "unauthorized" }, { status: 401 });
 
   const { id } = await params;
-  const row = getProjectById(id, claims.sub);
+  const access = getProjectAccess(id, claims.sub);
+  if (!canRead(access)) return Response.json({ error: "not_found" }, { status: 404 });
+
+  const row = getProjectByIdRaw(id);
   if (!row) return Response.json({ error: "not_found" }, { status: 404 });
 
   return Response.json({
@@ -25,6 +29,10 @@ export async function GET(
       id: row.id,
       name: row.name,
       savedAt: new Date(row.updated_at * 1000).toISOString(),
+      // Surface effective permission so the UI can render read-only mode
+      // without a second round-trip.
+      permission: access,
+      ownerId: row.user_id,
       ...JSON.parse(row.data),
     },
   });
@@ -45,7 +53,11 @@ export async function PATCH(
   }
 
   const { id } = await params;
-  const existing = getProjectById(id, claims.sub);
+  const access = getProjectAccess(id, claims.sub);
+  if (!canRead(access)) return Response.json({ error: "not_found" }, { status: 404 });
+  if (!canWrite(access)) return Response.json({ error: "forbidden" }, { status: 403 });
+
+  const existing = getProjectByIdRaw(id);
   if (!existing) return Response.json({ error: "not_found" }, { status: 404 });
 
   const raw = body as Record<string, unknown>;
@@ -54,7 +66,7 @@ export async function PATCH(
   if (raw.name && !raw.data) {
     const name = String(raw.name).trim();
     if (!name || name.length > 128) return Response.json({ error: "invalid_name" }, { status: 400 });
-    updateProject(id, claims.sub, name, existing.data);
+    updateProjectRaw(id, name, existing.data);
     return Response.json({ ok: true });
   }
 
@@ -67,7 +79,7 @@ export async function PATCH(
     );
   }
   const { name, data } = parsed.data;
-  updateProject(id, claims.sub, name, JSON.stringify(data));
+  updateProjectRaw(id, name, JSON.stringify(data));
   return Response.json({ ok: true });
 }
 
@@ -79,6 +91,14 @@ export async function DELETE(
   if (!claims) return Response.json({ error: "unauthorized" }, { status: 401 });
 
   const { id } = await params;
+  const access = getProjectAccess(id, claims.sub);
+  // Only the owner can delete — editors keep the project, deletion is final.
+  if (!canManage(access)) {
+    return Response.json(
+      { error: canRead(access) ? "forbidden" : "not_found" },
+      { status: canRead(access) ? 403 : 404 }
+    );
+  }
   deleteProjectById(id, claims.sub);
   return Response.json({ ok: true });
 }

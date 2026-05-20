@@ -192,21 +192,25 @@ function MyProjectsMenu() {
   );
 }
 
+const TABS = [
+  { id: "runtime",    label: "Runtime",    icon: Cpu },
+  { id: "database",   label: "Database",   icon: Database },
+  { id: "cache",      label: "Cache",      icon: Zap },
+  { id: "queue",      label: "Queue",      icon: Workflow },
+  { id: "api",        label: "APIs",       icon: Network },
+  { id: "security",   label: "Security",   icon: ShieldCheck },
+  { id: "deploy",     label: "Deployment", icon: Rocket },
+  { id: "scaling",    label: "Scaling",    icon: Scale },
+  { id: "cicd",       label: "CI/CD",      icon: GitBranch },
+  { id: "monitoring", label: "Monitoring", icon: Terminal },
+];
+
 export default function BuilderPage() {
   const { config, gitConfig, endpoints, entities, set, saveCurrentProject } = useStackStore();
   const router = useRouter();
   const [saving, setSaving] = React.useState(false);
   const [downloading, setDownloading] = React.useState(false);
-  const [openGroups, setOpenGroups] = React.useState(new Set(["core"]));
-
-  function toggleGroup(id: string) {
-    setOpenGroups((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
+  const [activeTab, setActiveTab] = React.useState("runtime");
 
   const saveRef = React.useRef(saveCurrentProject);
   React.useEffect(() => { saveRef.current = saveCurrentProject; });
@@ -323,16 +327,28 @@ export default function BuilderPage() {
         <QuickStart />
 
         <div className="grid gap-6 lg:grid-cols-[1fr,320px]">
-          <div className="space-y-3 min-w-0">
-            <AccordionSection
-              id="core"
-              label="Core Stack"
-              subtitle="Language, database, cache, queue"
-              icon={Cpu}
-              open={openGroups.has("core")}
-              onToggle={() => toggleGroup("core")}
-            >
-              <RuntimePanel />
+          <div className="min-w-0 space-y-4">
+            <div className="flex overflow-x-auto no-scrollbar border-b border-white/[0.06]">
+              {TABS.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveTab(tab.id)}
+                  className={cn(
+                    "flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-4 py-2.5 text-xs font-medium transition-colors",
+                    activeTab === tab.id
+                      ? "border-brand-400 text-foreground"
+                      : "border-transparent text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <tab.icon className="h-3.5 w-3.5" />
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {activeTab === "runtime" && <RuntimePanel />}
+            {activeTab === "database" && (
               <OptionPanel
                 title="Database"
                 description="Pick your primary datastore. Helios will generate migrations, typed clients, and connection pooling for you."
@@ -341,6 +357,8 @@ export default function BuilderPage() {
                 onSelect={(id) => set("database", id)}
                 icon={<Database className="h-4 w-4" />}
               />
+            )}
+            {activeTab === "cache" && (
               <OptionPanel
                 title="Cache"
                 description="Accelerate hot paths — sessions, rate limiting, pub/sub."
@@ -349,6 +367,8 @@ export default function BuilderPage() {
                 onSelect={(id) => set("cache", id)}
                 icon={<Zap className="h-4 w-4" />}
               />
+            )}
+            {activeTab === "queue" && (
               <OptionPanel
                 title="Message Queue"
                 description="Decouple services with durable messaging, pub/sub or streaming."
@@ -357,44 +377,28 @@ export default function BuilderPage() {
                 onSelect={(id) => set("queue", id)}
                 icon={<Workflow className="h-4 w-4" />}
               />
-            </AccordionSection>
-
-            <AccordionSection
-              id="api"
-              label="API & Models"
-              subtitle="API style, auth, data models, security"
-              icon={Network}
-              open={openGroups.has("api")}
-              onToggle={() => toggleGroup("api")}
-            >
-              {config.language === "python" &&
-                (config.framework === "django" || config.framework === "litestar") &&
-                entities.length > 0 && (
-                <div className="flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-xs">
-                  <span className="text-amber-400 mt-0.5">⚠</span>
-                  <div>
-                    <span className="font-medium text-amber-300">Full CRUD generation is FastAPI-only right now.</span>
-                    <span className="text-amber-300/70 ml-1">
-                      {config.framework === "django" ? "Django" : "Litestar"} will generate models but no route handlers. Switch to FastAPI for complete output.
-                    </span>
+            )}
+            {activeTab === "api" && (
+              <div className="space-y-6">
+                {config.language === "python" &&
+                  (config.framework === "django" || config.framework === "litestar") &&
+                  entities.length > 0 && (
+                  <div className="flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-xs">
+                    <span className="text-amber-400 mt-0.5">⚠</span>
+                    <div>
+                      <span className="font-medium text-amber-300">Full CRUD generation is FastAPI-only right now.</span>
+                      <span className="text-amber-300/70 ml-1">
+                        {config.framework === "django" ? "Django" : "Litestar"} will generate models but no route handlers. Switch to FastAPI for complete output.
+                      </span>
+                    </div>
                   </div>
-                </div>
-              )}
-              <div className="space-y-3">
+                )}
                 <EntityBuilder />
+                <ApiPanel />
               </div>
-              <ApiPanel />
-              <SecurityPanel />
-            </AccordionSection>
-
-            <AccordionSection
-              id="deploy"
-              label="Deploy & Ops"
-              subtitle="Deployment target, scaling, CI/CD, monitoring"
-              icon={Rocket}
-              open={openGroups.has("deploy")}
-              onToggle={() => toggleGroup("deploy")}
-            >
+            )}
+            {activeTab === "security" && <SecurityPanel />}
+            {activeTab === "deploy" && (
               <OptionPanel
                 title="Deployment target"
                 description="Where should Helios ship this stack? One-click deploy included."
@@ -403,23 +407,29 @@ export default function BuilderPage() {
                 onSelect={(id) => set("deployment", id)}
                 icon={<Rocket className="h-4 w-4" />}
               />
-              <ScalingPanel />
-              <OptionPanel
-                title="CI / CD"
-                description="Pipeline generated with security scans, matrix tests, and preview deploys."
-                options={cicd}
-                selected={config.cicd}
-                onSelect={(id) => set("cicd", id)}
-                icon={<GitBranch className="h-4 w-4" />}
-              />
-              {config.cicd === "gh-actions" && <GitHubConnectPanel />}
-              <a
-                href="/git-settings"
-                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-brand-300 transition-colors"
-              >
-                <GitBranch className="h-3.5 w-3.5" />
-                Configure branch rules & PR strategy →
-              </a>
+            )}
+            {activeTab === "scaling" && <ScalingPanel />}
+            {activeTab === "cicd" && (
+              <div className="space-y-4">
+                <OptionPanel
+                  title="CI / CD"
+                  description="Pipeline generated with security scans, matrix tests, and preview deploys."
+                  options={cicd}
+                  selected={config.cicd}
+                  onSelect={(id) => set("cicd", id)}
+                  icon={<GitBranch className="h-4 w-4" />}
+                />
+                {config.cicd === "gh-actions" && <GitHubConnectPanel />}
+                <a
+                  href="/git-settings"
+                  className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-brand-300 transition-colors"
+                >
+                  <GitBranch className="h-3.5 w-3.5" />
+                  Configure branch rules & PR strategy →
+                </a>
+              </div>
+            )}
+            {activeTab === "monitoring" && (
               <OptionPanel
                 title="Monitoring"
                 description="Traces, metrics, logs — wired in with sensible defaults."
@@ -428,7 +438,7 @@ export default function BuilderPage() {
                 onSelect={(id) => set("monitoring", id)}
                 icon={<Terminal className="h-4 w-4" />}
               />
-            </AccordionSection>
+            )}
           </div>
 
           <div className="space-y-4">
@@ -544,48 +554,6 @@ function QuickStart() {
           <Button variant="glow" size="sm" onClick={go}>
             <Eye className="h-3.5 w-3.5" /> Preview & download
           </Button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AccordionSection({
-  label,
-  subtitle,
-  icon: Icon,
-  open,
-  onToggle,
-  children,
-}: {
-  id: string;
-  label: string;
-  subtitle: string;
-  icon: React.ElementType;
-  open: boolean;
-  onToggle: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-xl border border-white/[0.06] overflow-hidden">
-      <button
-        onClick={onToggle}
-        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-white/[0.02] transition-colors"
-      >
-        <div className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-white/10 bg-white/[0.03]">
-          <Icon className="h-4 w-4" />
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-semibold">{label}</div>
-          <div className="text-[11px] text-muted-foreground">{subtitle}</div>
-        </div>
-        <ChevronDown
-          className={`h-4 w-4 text-muted-foreground transition-transform duration-200 ${open ? "rotate-180" : ""}`}
-        />
-      </button>
-      {open && (
-        <div className="border-t border-white/[0.06] p-4 space-y-6">
-          {children}
         </div>
       )}
     </div>
@@ -882,7 +850,7 @@ function OptionPanel({
   );
 }
 
-const COMING_SOON_APIS = new Set<string>(["graphql", "trpc"]);
+const COMING_SOON_APIS = new Set<string>();
 
 function ApiPanel() {
   const { config, set } = useStackStore();
@@ -892,6 +860,7 @@ function ApiPanel() {
     { id: "graphql", label: "GraphQL", description: "Typed queries with a single endpoint." },
     { id: "trpc", label: "tRPC", description: "Full-stack type-safety for TS monorepos." },
   ];
+  const isTsOnly = (id: string) => id === "trpc" && config.language !== "typescript";
   return (
     <div className="space-y-6">
       <Card>
@@ -912,9 +881,15 @@ function ApiPanel() {
                   selected={config.api === a.id}
                   label={a.label}
                   description={a.description}
-                  onClick={() => set("api", a.id)}
+                  onClick={isTsOnly(a.id) ? undefined : () => set("api", a.id)}
                   icon={<Network className="h-4 w-4" />}
+                  className={isTsOnly(a.id) ? "opacity-50 cursor-not-allowed pointer-events-none" : undefined}
                 />
+                {isTsOnly(a.id) && (
+                  <span className="pointer-events-none absolute top-2 right-2 rounded-full border border-white/20 bg-white/[0.06] px-1.5 py-0.5 text-[9px] font-medium text-muted-foreground">
+                    TS only
+                  </span>
+                )}
                 {COMING_SOON_APIS.has(a.id) && (
                   <span className="pointer-events-none absolute top-2 right-2 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium text-amber-300">
                     coming soon
@@ -923,11 +898,6 @@ function ApiPanel() {
               </div>
             ))}
           </div>
-          {COMING_SOON_APIS.has(config.api) && (
-            <div className="rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2.5 text-xs text-amber-200/80">
-              <strong className="font-medium">Note:</strong> {config.api === "graphql" ? "GraphQL" : "tRPC"} generation is in development. Your stack will be generated as REST until it ships — select REST to avoid surprises in your download.
-            </div>
-          )}
         </CardContent>
       </Card>
 

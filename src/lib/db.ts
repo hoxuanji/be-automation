@@ -62,6 +62,15 @@ function openDb(): Database.Database {
     // Column already exists — no-op
   }
 
+  // Idempotent migration: bitbucket_id (mirror of github_id). Helios has
+  // moved to SSO-only auth, so users may sign in with either provider.
+  try {
+    db.exec("ALTER TABLE users ADD COLUMN bitbucket_id TEXT");
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_bitbucket_id ON users(bitbucket_id) WHERE bitbucket_id IS NOT NULL");
+  } catch {
+    // Column already exists — no-op
+  }
+
   // Idempotent migration: deploy provider credentials (AES-256-GCM encrypted JSON blob)
   try {
     db.exec("ALTER TABLE users ADD COLUMN deploy_creds_enc TEXT");
@@ -69,7 +78,7 @@ function openDb(): Database.Database {
     // Column already exists — no-op
   }
 
-  // Idempotent migration: sessions + password reset
+  // Idempotent migration: sessions
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
       jti        TEXT PRIMARY KEY,
@@ -78,14 +87,10 @@ function openDb(): Database.Database {
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-
-    CREATE TABLE IF NOT EXISTS password_reset_tokens (
-      token      TEXT PRIMARY KEY,
-      user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      expires_at INTEGER NOT NULL,
-      used_at    INTEGER
-    );
   `);
+  // Helios is SSO-only — no password reset table is created. Existing dbs may
+  // still have a `password_reset_tokens` row from before the migration; it's
+  // harmless and unused.
 
   // Idempotent migration: teams
   db.exec(`
@@ -156,6 +161,26 @@ function openDb(): Database.Database {
     );
   `);
 
+  // Project sharing — explicit row per (project, principal). Principal is
+  // either a single user or a whole team; the CHECK enforces exactly one.
+  // Permission is the access level granted; ownership is still derived from
+  // projects.user_id (no row in this table for the owner).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS project_shares (
+      id         TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      team_id    TEXT REFERENCES teams(id) ON DELETE CASCADE,
+      user_id    TEXT REFERENCES users(id) ON DELETE CASCADE,
+      permission TEXT NOT NULL CHECK (permission IN ('view','edit')),
+      granted_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      CHECK ((team_id IS NULL) <> (user_id IS NULL))
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_shares_project ON project_shares(project_id);
+    CREATE INDEX IF NOT EXISTS idx_project_shares_team    ON project_shares(team_id);
+    CREATE INDEX IF NOT EXISTS idx_project_shares_user    ON project_shares(user_id);
+  `);
+
   return db;
 }
 
@@ -175,6 +200,7 @@ export type UserRow = {
   password_hash: string;
   llm_api_key_enc: string | null;
   github_id: string | null;
+  bitbucket_id: string | null;
   created_at: number;
 };
 
@@ -230,6 +256,36 @@ export function upsertUserByGithub(
   return db.prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow;
 }
 
+// Mirrors upsertUserByGithub: link an existing email-matched account to a
+// Bitbucket account, or create a fresh row when neither bitbucket_id nor a
+// matching email is on file. Helios is SSO-only so the password_hash column
+// is left as a random throwaway (kept NOT NULL for backward compatibility
+// with the original schema; nothing reads it).
+export function upsertUserByBitbucket(
+  bitbucketId: string,
+  email: string,
+  name: string
+): UserRow {
+  const db = getDb();
+  const existing =
+    (db.prepare("SELECT * FROM users WHERE bitbucket_id = ?").get(bitbucketId) as UserRow | undefined) ??
+    (email ? (db.prepare("SELECT * FROM users WHERE email = ?").get(email.toLowerCase()) as UserRow | undefined) : undefined);
+
+  if (existing) {
+    if (!existing.bitbucket_id) {
+      db.prepare("UPDATE users SET bitbucket_id = ? WHERE id = ?").run(bitbucketId, existing.id);
+    }
+    return { ...existing, bitbucket_id: bitbucketId };
+  }
+
+  const id = crypto.randomUUID();
+  const passwordHash = crypto.randomBytes(32).toString("hex");
+  db.prepare(
+    "INSERT INTO users (id, email, name, password_hash, bitbucket_id) VALUES (?, ?, ?, ?, ?)"
+  ).run(id, email.toLowerCase(), name, passwordHash, bitbucketId);
+  return db.prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow;
+}
+
 export function findUserById(id: string): UserRow | undefined {
   return getDb()
     .prepare("SELECT * FROM users WHERE id = ?")
@@ -238,18 +294,13 @@ export function findUserById(id: string): UserRow | undefined {
 
 export function updateUserProfile(
   id: string,
-  updates: { name?: string; email?: string; passwordHash?: string }
+  updates: { name?: string; email?: string }
 ): void {
   const db = getDb();
   if (updates.name !== undefined)
     db.prepare("UPDATE users SET name = ? WHERE id = ?").run(updates.name, id);
   if (updates.email !== undefined)
     db.prepare("UPDATE users SET email = ? WHERE id = ?").run(updates.email, id);
-  if (updates.passwordHash !== undefined)
-    db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
-      updates.passwordHash,
-      id
-    );
 }
 
 export function updateUserApiKey(
@@ -300,6 +351,29 @@ export function getProjectById(
   return getDb()
     .prepare("SELECT * FROM projects WHERE id = ? AND user_id = ?")
     .get(id, userId) as ProjectRow | undefined;
+}
+
+// Returns a project regardless of ownership. Callers MUST have already
+// verified access via getProjectAccess() before calling this — never expose
+// it on a route without a permission check.
+export function getProjectByIdRaw(id: string): ProjectRow | undefined {
+  return getDb()
+    .prepare("SELECT * FROM projects WHERE id = ?")
+    .get(id) as ProjectRow | undefined;
+}
+
+// Update without an ownership filter — used by routes after the caller has
+// already verified the user has at least edit access via getProjectAccess.
+export function updateProjectRaw(
+  id: string,
+  name: string,
+  data: string
+): void {
+  getDb()
+    .prepare(
+      "UPDATE projects SET name = ?, data = ?, updated_at = unixepoch() WHERE id = ?"
+    )
+    .run(name, data, id);
 }
 
 export function updateProject(
@@ -397,20 +471,6 @@ export function deleteUserSessions(userId: string): void {
 
 export function pruneExpiredSessions(): void {
   getDb().prepare("DELETE FROM sessions WHERE expires_at <= unixepoch()").run();
-}
-
-// ─── Password reset helpers ───────────────────────────────────────────────────
-
-export function createPasswordResetToken(token: string, userId: string, expiresAt: number): void {
-  getDb().prepare("INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES (?, ?, ?)").run(token, userId, expiresAt);
-}
-
-export function getPasswordResetToken(token: string): { token: string; user_id: string; expires_at: number; used_at: number | null } | undefined {
-  return getDb().prepare("SELECT * FROM password_reset_tokens WHERE token = ?").get(token) as { token: string; user_id: string; expires_at: number; used_at: number | null } | undefined;
-}
-
-export function markPasswordResetUsed(token: string): void {
-  getDb().prepare("UPDATE password_reset_tokens SET used_at = unixepoch() WHERE token = ?").run(token);
 }
 
 // ─── Stats helpers ────────────────────────────────────────────────────────────
@@ -571,6 +631,142 @@ export function listProjectsForTeamMembers(teamId: string): TeamProjectRow[] {
     ORDER BY p.updated_at DESC
     LIMIT 50
   `).all(teamId) as TeamProjectRow[];
+}
+
+// ─── Project share helpers ───────────────────────────────────────────────────
+
+export type ProjectShareRow = {
+  id: string;
+  project_id: string;
+  team_id: string | null;
+  user_id: string | null;
+  permission: "view" | "edit";
+  granted_by: string;
+  created_at: number;
+};
+
+export type SharedProjectRow = ProjectRow & {
+  permission: "view" | "edit";
+  shared_via: "user" | "team";
+  shared_team_id: string | null;
+  owner_name: string;
+};
+
+export function createProjectShare(
+  id: string,
+  projectId: string,
+  principal: { type: "user"; userId: string } | { type: "team"; teamId: string },
+  permission: "view" | "edit",
+  grantedBy: string
+): void {
+  getDb()
+    .prepare(
+      `INSERT INTO project_shares
+         (id, project_id, team_id, user_id, permission, granted_by)
+         VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      id,
+      projectId,
+      principal.type === "team" ? principal.teamId : null,
+      principal.type === "user" ? principal.userId : null,
+      permission,
+      grantedBy
+    );
+}
+
+export function deleteProjectShare(id: string, projectId: string): void {
+  // project_id is included in the WHERE so a hostile share id from another
+  // project can't be deleted by passing the wrong project context.
+  getDb()
+    .prepare("DELETE FROM project_shares WHERE id = ? AND project_id = ?")
+    .run(id, projectId);
+}
+
+export function listProjectShares(projectId: string): ProjectShareRow[] {
+  return getDb()
+    .prepare(
+      "SELECT * FROM project_shares WHERE project_id = ? ORDER BY created_at DESC"
+    )
+    .all(projectId) as ProjectShareRow[];
+}
+
+/**
+ * Returns the highest permission level the user has on a project. The order
+ * is owner > edit > view. Used by routes and the permissions helper to
+ * decide what to allow.
+ */
+export function getProjectAccessRow(
+  projectId: string,
+  userId: string
+): { level: "owner" | "edit" | "view" } | null {
+  const db = getDb();
+
+  // Owner check is cheapest — projects.user_id is indexed.
+  const owner = db
+    .prepare("SELECT 1 FROM projects WHERE id = ? AND user_id = ?")
+    .get(projectId, userId) as { 1: number } | undefined;
+  if (owner) return { level: "owner" };
+
+  // Direct user share OR membership in any shared team. The MAX(...) trick
+  // collapses both rows into the highest permission.
+  const row = db
+    .prepare(
+      `SELECT
+         MAX(CASE WHEN permission = 'edit' THEN 2 ELSE 1 END) AS rank
+       FROM project_shares ps
+       LEFT JOIN team_members tm
+         ON tm.team_id = ps.team_id AND tm.user_id = ?
+       WHERE ps.project_id = ?
+         AND (ps.user_id = ? OR tm.user_id IS NOT NULL)`
+    )
+    .get(userId, projectId, userId) as { rank: number | null } | undefined;
+
+  if (!row || row.rank === null) return null;
+  return { level: row.rank === 2 ? "edit" : "view" };
+}
+
+/**
+ * Lists projects shared with a user (directly or via team membership), with
+ * the effective permission and owner name attached. Used by the
+ * `/api/shared-with-me` endpoint.
+ */
+export function listSharedWithUser(userId: string): SharedProjectRow[] {
+  // We deliberately UNION direct shares and team shares rather than join in
+  // both directions — the rank arithmetic stays simple and the query plan is
+  // legible when we add new principal types later.
+  const rows = getDb()
+    .prepare(
+      `SELECT
+         p.*,
+         MAX(CASE WHEN ps.permission = 'edit' THEN 2 ELSE 1 END) AS rank,
+         u.name AS owner_name,
+         CASE WHEN ps.user_id IS NOT NULL THEN 'user' ELSE 'team' END AS shared_via,
+         ps.team_id AS shared_team_id
+       FROM project_shares ps
+       JOIN projects p ON p.id = ps.project_id
+       JOIN users u    ON u.id = p.user_id
+       LEFT JOIN team_members tm
+         ON tm.team_id = ps.team_id AND tm.user_id = ?
+       WHERE (ps.user_id = ? OR tm.user_id IS NOT NULL)
+         AND p.user_id <> ?
+       GROUP BY p.id
+       ORDER BY p.updated_at DESC
+       LIMIT 100`
+    )
+    .all(userId, userId, userId) as Array<
+    ProjectRow & {
+      rank: number;
+      owner_name: string;
+      shared_via: "user" | "team";
+      shared_team_id: string | null;
+    }
+  >;
+
+  return rows.map((r) => ({
+    ...r,
+    permission: r.rank === 2 ? "edit" : "view",
+  }));
 }
 
 // ─── Rate limit helpers (SQLite-backed, survives restarts) ────────────────────

@@ -67,8 +67,9 @@ export function Topbar({
           </DropdownTrigger>
           <DropdownContent align="end">
             <DropdownLabel>Signed in as</DropdownLabel>
-            <div className="px-2.5 pb-2 text-xs font-medium">
-              {authUser?.email ?? "—"}
+            <div className="px-2.5 pb-2">
+              <div className="text-xs font-medium">{authUser?.name ?? "—"}</div>
+              {authUser?.email && <div className="text-[10px] text-muted-foreground">{authUser.email}</div>}
             </div>
             <DropdownSeparator />
             <a

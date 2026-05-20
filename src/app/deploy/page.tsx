@@ -61,7 +61,7 @@ export default function DeployPage() {
               <CardContent>
                 <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
                   {deployments.map((d) => {
-                    const isLive = d.id === "railway";
+                    const isLive = d.id === "railway" || d.id === "render" || d.id === "fly" || d.id === "vercel";
                     if (!isLive) {
                       return (
                         <div
@@ -103,15 +103,15 @@ export default function DeployPage() {
               </CardContent>
             </Card>
 
-            <RailwayCredentialsPanel />
+            <CredentialsPanel provider={liveProvider(config.deployment)} />
           </div>
 
           {/* right column */}
           <div className="space-y-4">
             <DeployHistoryCard />
             <BranchGateCard />
-            {config.deployment === "railway" ? (
-              <RailwayDeployPanel />
+            {isLiveProvider(config.deployment) ? (
+              <DeployPanel provider={liveProvider(config.deployment)} />
             ) : step === "guide" ? (
               <DeployGuide onBack={() => setStep("configure")} />
             ) : (
@@ -414,27 +414,50 @@ function BranchGateCard() {
   );
 }
 
+// ─── Provider-aware helpers ──────────────────────────────────────────────────
+
+type LiveProvider = "railway" | "render" | "fly" | "vercel";
+
+function isLiveProvider(id: string): id is LiveProvider {
+  return id === "railway" || id === "render" || id === "fly" || id === "vercel";
+}
+
+// Narrows the deployment id to a known live provider, defaulting to railway
+// (the canonical first-class provider) when the current selection isn't live.
+// Used by CredentialsPanel which always renders something.
+function liveProvider(id: string): LiveProvider {
+  return isLiveProvider(id) ? id : "railway";
+}
+
+const PROVIDER_META: Record<LiveProvider, { label: string; tokenLabel: string }> = {
+  railway: { label: "Railway",  tokenLabel: "Railway Personal API Token" },
+  render:  { label: "Render",   tokenLabel: "Render Personal API Key" },
+  fly:     { label: "Fly",      tokenLabel: "Fly Personal Access Token" },
+  vercel:  { label: "Vercel",   tokenLabel: "Vercel Personal Access Token" },
+};
+
 // Status-only panel — full token management lives in Settings → Integrations
-function RailwayCredentialsPanel() {
+function CredentialsPanel({ provider }: { provider: LiveProvider }) {
   const [hasToken, setHasToken] = React.useState<boolean | null>(null);
+  const meta = PROVIDER_META[provider];
 
   React.useEffect(() => {
     fetch("/api/deploy/credentials")
       .then((r) => r.json())
-      .then((d: { creds?: { railway?: { token?: string } } }) => {
-        setHasToken(!!d.creds?.railway?.token);
+      .then((d: { creds?: Record<string, { token?: string }> }) => {
+        setHasToken(!!d.creds?.[provider]?.token);
       })
       .catch(() => setHasToken(false));
-  }, []);
+  }, [provider]);
 
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <Key className="h-4 w-4" /> Railway credentials
+          <Key className="h-4 w-4" /> {meta.label} credentials
         </CardTitle>
         <CardDescription>
-          Manage your Railway API token in{" "}
+          Manage your {meta.tokenLabel} in{" "}
           <a href="/settings" className="underline hover:text-foreground">
             Settings → Integrations
           </a>
@@ -464,54 +487,152 @@ function RailwayCredentialsPanel() {
 }
 
 
-// ─── Railway direct deploy panel ─────────────────────────────────────────────
+// ─── Deploy panel ───────────────────────────────────────────────────────────
 
 type DeployPhase = "idle" | "deploying" | "done" | "error";
 
 type DeployResult = {
+  provider: LiveProvider;
   projectUrl: string;
   domain: string | null;
   fullName: string;
   githubUrl: string;
+  nextStep?: { message: string; command?: string };
 };
 
-// Ordered UI stages. Server pipeline stages map into these; `railway_env`
-// collapses into `project`, and `generate` collapses into `push` — the user
-// doesn't care about those distinctions.
-const UI_STAGES = ["push", "project", "service", "variables", "domain"] as const;
-type UiStage = (typeof UI_STAGES)[number];
-
-const STAGE_LABELS: Record<UiStage, string> = {
-  push: "Pushing code to GitHub",
-  project: "Creating Railway project",
-  service: "Linking repository",
-  variables: "Setting environment variables",
-  domain: "Provisioning public domain",
-};
-
-function mapServerStage(stage: string): UiStage | null {
-  switch (stage) {
-    case "generate":
-    case "github_push":
-      return "push";
-    case "railway_project":
-    case "railway_env":
-      return "project";
-    case "railway_service":
-      return "service";
-    case "railway_variables":
-      return "variables";
-    case "railway_domain":
-      return "domain";
-    default:
-      return null;
+// Per-provider UI stage list. We collapse server-side micro-stages into
+// user-facing rows so the timeline is readable at a glance. The keys
+// double as a deterministic render order.
+const PROVIDER_UI: Record<
+  LiveProvider,
+  {
+    stages: readonly string[];
+    labels: Record<string, string>;
+    mapServerStage: (s: string) => string | null;
+    deployingMessage: string;
+    successMessage: string;
   }
-}
+> = {
+  railway: {
+    stages: ["push", "project", "service", "variables", "domain"] as const,
+    labels: {
+      push: "Pushing code to GitHub",
+      project: "Creating Railway project",
+      service: "Linking repository",
+      variables: "Setting environment variables",
+      domain: "Provisioning public domain",
+    },
+    mapServerStage(s) {
+      switch (s) {
+        case "generate":
+        case "github_push":
+          return "push";
+        case "railway_project":
+        case "railway_env":
+          return "project";
+        case "railway_service":
+          return "service";
+        case "railway_variables":
+          return "variables";
+        case "railway_domain":
+          return "domain";
+        default:
+          return null;
+      }
+    },
+    deployingMessage:
+      "Railway is building your Docker image. Check the dashboard to follow build progress.",
+    successMessage: "Deployment started",
+  },
+  render: {
+    stages: ["push", "owner", "service"] as const,
+    labels: {
+      push: "Pushing code to GitHub",
+      owner: "Resolving Render account",
+      service: "Creating Render web service",
+    },
+    mapServerStage(s) {
+      switch (s) {
+        case "generate":
+        case "github_push":
+          return "push";
+        case "render_owner":
+          return "owner";
+        case "render_service":
+          return "service";
+        default:
+          return null;
+      }
+    },
+    deployingMessage:
+      "Render is building your service from the GitHub repo. The first deploy can take a few minutes.",
+    successMessage: "Service created",
+  },
+  fly: {
+    stages: ["push", "org", "app", "secrets", "handoff"] as const,
+    labels: {
+      push: "Pushing code to GitHub",
+      org: "Resolving Fly organization",
+      app: "Creating Fly app",
+      secrets: "Setting secrets",
+      handoff: "Awaiting first build",
+    },
+    mapServerStage(s) {
+      switch (s) {
+        case "generate":
+        case "github_push":
+          return "push";
+        case "fly_org":
+          return "org";
+        case "fly_app":
+          return "app";
+        case "fly_secrets":
+          return "secrets";
+        case "fly_handoff":
+          return "handoff";
+        default:
+          return null;
+      }
+    },
+    deployingMessage:
+      "Fly app provisioned. Run flyctl deploy from the cloned repo to ship the first image.",
+    successMessage: "App provisioned",
+  },
+  vercel: {
+    stages: ["push", "project", "env", "domain"] as const,
+    labels: {
+      push: "Pushing code to GitHub",
+      project: "Creating Vercel project",
+      env: "Setting environment variables",
+      domain: "Resolving deployment URL",
+    },
+    mapServerStage(s) {
+      switch (s) {
+        case "generate":
+        case "github_push":
+          return "push";
+        case "vercel_project":
+          return "project";
+        case "vercel_env":
+          return "env";
+        case "vercel_domain":
+          return "domain";
+        default:
+          return null;
+      }
+    },
+    deployingMessage:
+      "Vercel is building your first deployment from the GitHub repo. It will be live at your .vercel.app URL in moments.",
+    successMessage: "Project created",
+  },
+};
 
 type StageState = "waiting" | "active" | "done" | "skipped";
 
-function initialStages(): Record<UiStage, StageState> {
-  return { push: "waiting", project: "waiting", service: "waiting", variables: "waiting", domain: "waiting" };
+function initialStages(stages: readonly string[]): Record<string, StageState> {
+  const out: Record<string, StageState> = {};
+  for (const s of stages) out[s] = "waiting";
+  return out;
 }
 
 async function* parseSseStream(body: ReadableStream<Uint8Array>): AsyncGenerator<{ event: string; data: string }> {
@@ -542,49 +663,62 @@ async function* parseSseStream(body: ReadableStream<Uint8Array>): AsyncGenerator
   }
 }
 
-function RailwayDeployPanel() {
+function DeployPanel({ provider }: { provider: LiveProvider }) {
+  const meta = PROVIDER_META[provider];
+  const ui = PROVIDER_UI[provider];
+  const stagesList = ui.stages;
+
   const { config, endpoints, entities } = useStackStore();
   const [phase, setPhase] = React.useState<DeployPhase>("idle");
   const [result, setResult] = React.useState<DeployResult | null>(null);
   const [errorMsg, setErrorMsg] = React.useState("");
   const [errorHint, setErrorHint] = React.useState("");
-  const [errorPartial, setErrorPartial] = React.useState<{ projectId?: string; serviceId?: string } | null>(null);
+  const [errorPartial, setErrorPartial] = React.useState<{ projectId?: string; serviceId?: string; appName?: string } | null>(null);
   const [hasToken, setHasToken] = React.useState<boolean | null>(null);
   const [ghConnected, setGhConnected] = React.useState<boolean | null>(null);
-  const [stages, setStages] = React.useState<Record<UiStage, StageState>>(initialStages);
-  const [stageDetail, setStageDetail] = React.useState<Partial<Record<UiStage, string>>>({});
+  const [stages, setStages] = React.useState<Record<string, StageState>>(() => initialStages(stagesList));
+  const [stageDetail, setStageDetail] = React.useState<Record<string, string>>({});
   const [warnings, setWarnings] = React.useState<string[]>([]);
 
   React.useEffect(() => {
     Promise.all([
-      fetch("/api/deploy/credentials").then((r) => r.json()) as Promise<{ creds?: { railway?: { token?: string } } }>,
+      fetch("/api/deploy/credentials").then((r) => r.json()) as Promise<{ creds?: Record<string, { token?: string }> }>,
       fetch("/api/auth/github/status").then((r) => r.json()) as Promise<{ connected: boolean }>,
     ])
       .then(([creds, gh]) => {
-        setHasToken(!!creds.creds?.railway?.token);
+        setHasToken(!!creds.creds?.[provider]?.token);
         setGhConnected(gh.connected);
       })
       .catch(() => { setHasToken(false); setGhConnected(false); });
-  }, []);
+  }, [provider]);
+
+  // Re-init stage map when the provider changes.
+  React.useEffect(() => {
+    setStages(initialStages(stagesList));
+    setStageDetail({});
+    setWarnings([]);
+  }, [stagesList]);
 
   async function deploy() {
     setPhase("deploying");
     setErrorMsg("");
     setErrorHint("");
     setErrorPartial(null);
-    setStages(initialStages());
+    setStages(initialStages(stagesList));
     setStageDetail({});
     setWarnings([]);
 
-    let currentStage: UiStage | null = null;
-    const markActive = (s: UiStage) => {
+    let currentStage: string | null = null;
+    const markActive = (s: string) => {
       setStages((prev) => {
         const next = { ...prev };
-        // Any earlier stage that was `active` becomes `done`.
-        for (const key of UI_STAGES) {
+        // Any earlier stage that was `active` becomes `done`. Stages we
+        // skipped over (still `waiting`) also collapse to `done` so the
+        // checklist visibly progresses without flicker.
+        for (const key of stagesList) {
           if (key === s) break;
           if (next[key] === "active") next[key] = "done";
-          if (next[key] === "waiting") next[key] = "done"; // skipped-forward = done
+          if (next[key] === "waiting") next[key] = "done";
         }
         next[s] = "active";
         return next;
@@ -593,7 +727,7 @@ function RailwayDeployPanel() {
     const markDoneAll = () => {
       setStages((prev) => {
         const next = { ...prev };
-        for (const key of UI_STAGES) {
+        for (const key of stagesList) {
           if (next[key] === "active" || next[key] === "waiting") next[key] = "done";
         }
         return next;
@@ -604,14 +738,14 @@ function RailwayDeployPanel() {
       const res = await fetch("/api/deploy/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-        body: JSON.stringify({ config, endpoints, entities }),
+        body: JSON.stringify({ provider, config, endpoints, entities }),
       });
       if (!res.ok || !res.body) {
         const data = await res.json().catch(() => ({} as Record<string, unknown>)) as {
           error?: string;
           message?: string;
           hint?: string;
-          partial?: { projectId?: string; serviceId?: string };
+          partial?: { projectId?: string; serviceId?: string; appName?: string };
         };
         setPhase("error");
         setErrorMsg(data.message ?? data.error ?? "Deployment failed");
@@ -626,10 +760,10 @@ function RailwayDeployPanel() {
 
         if (frame.event === "stage") {
           const p = payload as { stage: string; message?: string };
-          const ui = mapServerStage(p.stage);
-          if (ui) {
-            currentStage = ui;
-            markActive(ui);
+          const uiStage = ui.mapServerStage(p.stage);
+          if (uiStage) {
+            currentStage = uiStage;
+            markActive(uiStage);
           }
           continue;
         }
@@ -643,7 +777,10 @@ function RailwayDeployPanel() {
         if (frame.event === "warn") {
           const p = payload as { message?: string };
           if (p.message) setWarnings((w) => [...w, p.message!]);
-          if (currentStage === "domain") {
+          // Railway-specific: a domain creation warn means the domain stage
+          // was skipped. Other providers don't have an analogous skippable
+          // stage, so leave the timeline alone.
+          if (provider === "railway" && currentStage === "domain") {
             setStages((prev) => ({ ...prev, domain: "skipped" }));
           }
           continue;
@@ -654,7 +791,7 @@ function RailwayDeployPanel() {
               error?: string;
               message?: string;
               hint?: string;
-              partial?: { projectId?: string; serviceId?: string };
+              partial?: { projectId?: string; serviceId?: string; appName?: string };
             };
           };
           const err = p.error ?? {};
@@ -667,18 +804,22 @@ function RailwayDeployPanel() {
         if (frame.event === "done") {
           const p = payload as {
             result: {
+              provider?: LiveProvider;
               projectUrl: string;
               domain: string | null;
               fullName: string;
               githubUrl: string;
+              nextStep?: { message: string; command?: string };
             };
           };
           markDoneAll();
           setResult({
+            provider: p.result.provider ?? provider,
             projectUrl: p.result.projectUrl,
             domain: p.result.domain,
             fullName: p.result.fullName,
             githubUrl: p.result.githubUrl,
+            nextStep: p.result.nextStep,
           });
           setPhase("done");
           return;
@@ -688,7 +829,7 @@ function RailwayDeployPanel() {
       // Stream ended without a `done` or `error` frame — treat as error.
       setPhase("error");
       setErrorMsg("Deployment ended unexpectedly");
-      setErrorHint("The connection closed before the deploy finished. Check the Railway dashboard and retry.");
+      setErrorHint(`The connection closed before the deploy finished. Check the ${meta.label} dashboard and retry.`);
     } catch (err) {
       setPhase("error");
       setErrorMsg("Network error");
@@ -698,13 +839,37 @@ function RailwayDeployPanel() {
 
   const canDeploy = hasToken && ghConnected;
 
+  // Build a partial-state recovery link when the provider returned one.
+  let partialRecovery: { href: string; label: string } | null = null;
+  if (errorPartial?.projectId && provider === "railway") {
+    partialRecovery = {
+      href: `https://railway.app/project/${errorPartial.projectId}`,
+      label: "open in Railway",
+    };
+  } else if (errorPartial?.serviceId && provider === "render") {
+    partialRecovery = {
+      href: `https://dashboard.render.com/web/${errorPartial.serviceId}`,
+      label: "open in Render",
+    };
+  } else if (errorPartial?.appName && provider === "fly") {
+    partialRecovery = {
+      href: `https://fly.io/apps/${errorPartial.appName}`,
+      label: "open in Fly",
+    };
+  } else if (errorPartial?.projectId && provider === "vercel") {
+    partialRecovery = {
+      href: `https://vercel.com/dashboard`,
+      label: "open Vercel dashboard",
+    };
+  }
+
   return (
     <Card className="relative overflow-hidden">
       <div className="pointer-events-none absolute -inset-20 aurora animate-aurora opacity-20" />
       <div className="relative p-5 space-y-4">
         <div className="flex items-center gap-2">
-          <BrandIcon id="railway" size={20} rounded="sm" />
-          <span className="text-sm font-semibold">Deploy to Railway</span>
+          <BrandIcon id={provider} size={20} rounded="sm" />
+          <span className="text-sm font-semibold">Deploy to {meta.label}</span>
         </div>
 
         {/* Prerequisites */}
@@ -726,12 +891,14 @@ function RailwayDeployPanel() {
               }
             />
             <PrereqRow
-              label="Railway token saved"
+              label={`${meta.label} token saved`}
               ok={hasToken === true}
               loading={hasToken === null}
               action={
                 hasToken === false ? (
-                  <span className="text-xs text-muted-foreground">↑ Enter token above</span>
+                  <a href="/settings" className="text-xs text-brand-300 hover:underline">
+                    Add in Settings →
+                  </a>
                 ) : null
               }
             />
@@ -748,18 +915,18 @@ function RailwayDeployPanel() {
             disabled={!canDeploy}
           >
             <Rocket className="h-4 w-4" />
-            Deploy to Railway
+            Deploy to {meta.label}
           </Button>
         )}
 
         {/* Deploying */}
         {phase === "deploying" && (
           <div className="space-y-3">
-            {UI_STAGES.map((s) => (
+            {stagesList.map((s) => (
               <DeployStepRowV2
                 key={s}
-                label={STAGE_LABELS[s]}
-                state={stages[s]}
+                label={ui.labels[s]}
+                state={stages[s] ?? "waiting"}
                 detail={stageDetail[s]}
               />
             ))}
@@ -776,11 +943,11 @@ function RailwayDeployPanel() {
         {/* Success */}
         {phase === "done" && result && (
           <div className="space-y-3">
-            {UI_STAGES.map((s) => (
+            {stagesList.map((s) => (
               <DeployStepRowV2
                 key={s}
-                label={STAGE_LABELS[s]}
-                state={stages[s]}
+                label={ui.labels[s]}
+                state={stages[s] ?? "waiting"}
                 detail={stageDetail[s]}
               />
             ))}
@@ -794,10 +961,8 @@ function RailwayDeployPanel() {
             )}
 
             <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] p-3 space-y-2.5">
-              <p className="text-xs font-medium text-emerald-300">Deployment started</p>
-              <p className="text-xs text-muted-foreground">
-                Railway is building your Docker image. Check the dashboard to follow build progress.
-              </p>
+              <p className="text-xs font-medium text-emerald-300">{ui.successMessage}</p>
+              <p className="text-xs text-muted-foreground">{ui.deployingMessage}</p>
               <div className="flex flex-col gap-1.5 pt-0.5">
                 <a
                   href={result.projectUrl}
@@ -805,7 +970,7 @@ function RailwayDeployPanel() {
                   rel="noreferrer"
                   className="inline-flex items-center gap-1.5 text-xs text-brand-300 hover:underline"
                 >
-                  <Rocket className="h-3 w-3" /> Open Railway dashboard
+                  <Rocket className="h-3 w-3" /> Open {meta.label} dashboard
                 </a>
                 <a
                   href={result.githubUrl}
@@ -826,6 +991,16 @@ function RailwayDeployPanel() {
                   </a>
                 )}
               </div>
+              {result.nextStep && (
+                <div className="mt-1 rounded-md border border-white/[0.06] bg-white/[0.02] p-2 text-[11px] text-muted-foreground space-y-1">
+                  <p>{result.nextStep.message}</p>
+                  {result.nextStep.command && (
+                    <code className="block w-full overflow-x-auto rounded bg-black/40 px-2 py-1 font-mono text-[10.5px] text-foreground/90">
+                      {result.nextStep.command}
+                    </code>
+                  )}
+                </div>
+              )}
             </div>
 
             <button
@@ -847,16 +1022,16 @@ function RailwayDeployPanel() {
                 {errorHint && (
                   <p className="mt-0.5 text-xs text-muted-foreground">{errorHint}</p>
                 )}
-                {errorPartial?.projectId && (
+                {partialRecovery && (
                   <p className="mt-1.5 text-[11px] text-muted-foreground">
-                    Partial project created:{" "}
+                    Partial resource created:{" "}
                     <a
                       className="underline hover:text-foreground"
-                      href={`https://railway.app/project/${errorPartial.projectId}`}
+                      href={partialRecovery.href}
                       target="_blank"
                       rel="noreferrer"
                     >
-                      open in Railway
+                      {partialRecovery.label}
                     </a>
                     {" "}— review or delete before retrying to avoid duplicates.
                   </p>

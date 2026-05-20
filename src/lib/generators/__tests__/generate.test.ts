@@ -77,7 +77,7 @@ const FRAMEWORKS: Record<string, string[]> = {
   kotlin: ["ktor", "spring-kt"],
 };
 
-const API_MODES = ["rest", "grpc"] as const;
+const API_MODES = ["rest", "grpc", "graphql"] as const;
 
 type TestCombo = {
   language: string;

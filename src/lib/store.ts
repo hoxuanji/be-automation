@@ -6,6 +6,7 @@ import { type GitConfig, type WorkflowConfig, defaultGitConfig } from "./git-con
 
 export type StackConfig = {
   name: string;
+  owner?: string;
   language: string;
   framework: string;
   database: string;
@@ -39,6 +40,7 @@ export type Endpoint = {
   responseSchema?: string;
   pattern?: string;
   logic?: string;
+  logicCode?: string;
 };
 
 export type FieldType =
@@ -268,6 +270,7 @@ export const useStackStore = create<State>()(
   resetGitConfig: () => set({ gitConfig: defaultGitConfig() }),
   config: {
     name: "helios-api",
+    owner: "",
     language: "go",
     framework: "gin",
     database: "postgres",
@@ -375,10 +378,27 @@ export const useStackStore = create<State>()(
     set((s) => ({ relations: s.relations.filter((r) => r.id !== id) })),
 
   loadAuth: async () => {
+    const PROTECTED_PREFIXES = [
+      "/dashboard", "/builder", "/api-builder", "/preview",
+      "/deploy", "/settings", "/git-settings", "/editor",
+      "/templates", "/gallery", "/from-repo",
+    ];
     try {
       const res = await fetch("/api/auth/me");
       const data = await res.json();
-      set({ authUser: data.user ?? null });
+      const user = data.user ?? null;
+      set((s) => ({
+        authUser: user,
+        config: user && !s.config.owner
+          ? { ...s.config, owner: user.name }
+          : s.config,
+      }));
+      if (!user && typeof window !== "undefined") {
+        const path = window.location.pathname;
+        if (PROTECTED_PREFIXES.some((p) => path === p || path.startsWith(p + "/"))) {
+          window.location.href = "/login";
+        }
+      }
     } catch {
       set({ authUser: null });
     }

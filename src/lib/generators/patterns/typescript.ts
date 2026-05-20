@@ -415,6 +415,7 @@ function cacheRead(fw: TsFw, table: string): string {
 }
 
 function customHandler(fw: TsFw, e: Endpoint): string {
+  if (e.logicCode) return e.logicCode;
   const x = tsCtx(fw);
   return `  // ${e.logic || e.summary || "TODO: implement handler logic"}
   // Pattern: custom

@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { getCurrentUser, hashPassword } from "@/lib/auth";
+import { getCurrentUser } from "@/lib/auth";
 import { updateUserProfile, updateUserApiKey, encryptApiKey, findUserById } from "@/lib/db";
 import { updateSettingsSchema } from "@/lib/schema";
 
@@ -26,12 +26,14 @@ export async function PATCH(req: NextRequest) {
     );
   }
 
-  const { name, email, password, apiKey } = parsed.data;
+  // Helios is SSO-only — passwords are no longer accepted on this endpoint.
+  // Display name and email remain editable so users can fix typos that
+  // came in from GitHub/Bitbucket profile data.
+  const { name, email, apiKey } = parsed.data;
 
-  const profileUpdates: { name?: string; email?: string; passwordHash?: string } = {};
+  const profileUpdates: { name?: string; email?: string } = {};
   if (name) profileUpdates.name = name;
   if (email) profileUpdates.email = email.toLowerCase();
-  if (password) profileUpdates.passwordHash = await hashPassword(password);
 
   if (Object.keys(profileUpdates).length > 0) {
     updateUserProfile(claims.sub, profileUpdates);

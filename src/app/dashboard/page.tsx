@@ -27,6 +27,7 @@ import {
   X,
   ChevronRight,
   Check,
+  Share2,
 } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import { Card } from "@/components/ui/card";
@@ -36,6 +37,7 @@ import { toast } from "@/components/ui/toast";
 import { useStackStore, type SavedProject } from "@/lib/store";
 import type { StackConfig } from "@/lib/generators/types";
 import { cn } from "@/lib/utils";
+import { ShareProjectDialog } from "@/components/builder/ShareProjectDialog";
 
 const ONBOARDED_KEY = "helios_onboarded";
 
@@ -470,6 +472,8 @@ export default function DashboardPage() {
           </div>
         </section>
 
+        <SharedWithMeSection />
+
         <TeamProjectsSection />
 
         <RecentSaves />
@@ -592,6 +596,7 @@ function SavedProjectCard({
 }) {
   const { loadProject } = useStackStore();
   const router = useRouter();
+  const [shareOpen, setShareOpen] = React.useState(false);
 
   function open() {
     loadProject(project.id);
@@ -629,18 +634,32 @@ function SavedProjectCard({
           </div>
           <p className="mt-1.5 text-xs text-muted-foreground font-mono">{stackLine}</p>
         </button>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete();
-            toast({ title: `Deleted "${project.name}"`, kind: "info" });
-          }}
-          className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-300 transition-opacity"
-          aria-label="Delete project"
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </button>
+        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShareOpen(true);
+            }}
+            className="text-muted-foreground hover:text-indigo-300"
+            aria-label="Share project"
+            title="Share project"
+          >
+            <Share2 className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+              toast({ title: `Deleted "${project.name}"`, kind: "info" });
+            }}
+            className="text-muted-foreground hover:text-red-300"
+            aria-label="Delete project"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </div>
       <button type="button" onClick={open} className="mt-4 w-full flex items-center gap-3 text-[11px] text-muted-foreground">
         <span className="flex items-center gap-1.5">
@@ -653,6 +672,12 @@ function SavedProjectCard({
           Open <ArrowRight className="h-3 w-3" />
         </span>
       </button>
+      <ShareProjectDialog
+        projectId={project.id}
+        projectName={project.name}
+        open={shareOpen}
+        onOpenChange={setShareOpen}
+      />
     </div>
   );
 }
@@ -829,6 +854,77 @@ function TeamProjectsSection() {
                 </div>
               )}
             </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+type SharedProjectSummary = {
+  id: string;
+  name: string;
+  permission: "view" | "edit";
+  sharedVia: "user" | "team";
+  sharedTeamId: string | null;
+  ownerName: string;
+  savedAt: string;
+};
+
+function SharedWithMeSection() {
+  const { authUser } = useStackStore();
+  const router = useRouter();
+  const [projects, setProjects] = React.useState<SharedProjectSummary[]>([]);
+  const [loading, setLoading] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!authUser) return;
+    setLoading(true);
+    fetch("/api/shared-with-me")
+      .then((r) => r.json())
+      .then((d: { projects?: SharedProjectSummary[] }) => {
+        setProjects(d.projects ?? []);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [authUser]);
+
+  // Hide the section entirely when there's nothing to show — keeps the
+  // dashboard tidy for solo users.
+  if (!authUser || (projects.length === 0 && !loading)) return null;
+
+  return (
+    <section>
+      <SectionHeader
+        title="Shared with me"
+        subtitle="Projects others have given you access to"
+      />
+      {loading ? (
+        <div className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
+        </div>
+      ) : (
+        <div className="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+          {projects.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => router.push(`/builder?projectId=${p.id}`)}
+              className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 text-left hover-raise"
+            >
+              <div className="flex items-center gap-2">
+                <div className="h-7 w-7 rounded-md bg-gradient-to-br from-indigo-500/30 to-fuchsia-500/30 border border-white/10 grid place-items-center">
+                  <Share2 className="h-3.5 w-3.5 text-muted-foreground" />
+                </div>
+                <span className="text-sm font-medium truncate flex-1">{p.name}</span>
+                <Badge variant="outline" className="text-[10px] uppercase">
+                  {p.permission}
+                </Badge>
+              </div>
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                from {p.ownerName} · {p.sharedVia === "team" ? "via team" : "direct share"}
+              </p>
+            </button>
           ))}
         </div>
       )}

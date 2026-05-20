@@ -1,0 +1,172 @@
+[
+  {
+    "path": ".editorconfig",
+    "lines": 10,
+    "size": 147
+  },
+  {
+    "path": ".env.example",
+    "lines": 37,
+    "size": 1983
+  },
+  {
+    "path": ".github/workflows/ci.yml",
+    "lines": 65,
+    "size": 1720
+  },
+  {
+    "path": ".gitignore",
+    "lines": 29,
+    "size": 264
+  },
+  {
+    "path": "api/openapi.yaml",
+    "lines": 56,
+    "size": 1222
+  },
+  {
+    "path": "api/postman_collection.json",
+    "lines": 166,
+    "size": 4121
+  },
+  {
+    "path": "DEPLOY.md",
+    "lines": 79,
+    "size": 2387
+  },
+  {
+    "path": "deploy/helm/Chart.yaml",
+    "lines": 21,
+    "size": 519
+  },
+  {
+    "path": "deploy/helm/templates/deployment.yaml",
+    "lines": 22,
+    "size": 490
+  },
+  {
+    "path": "deploy/helm/templates/service.yaml",
+    "lines": 12,
+    "size": 220
+  },
+  {
+    "path": "deploy/helm/values.yaml",
+    "lines": 63,
+    "size": 1195
+  },
+  {
+    "path": "deploy/k8s/deployment.yaml",
+    "lines": 63,
+    "size": 2037
+  },
+  {
+    "path": "deploy/k8s/hpa.yaml",
+    "lines": 19,
+    "size": 350
+  },
+  {
+    "path": "deploy/k8s/Makefile",
+    "lines": 36,
+    "size": 1371
+  },
+  {
+    "path": "deploy/k8s/pdb.yaml",
+    "lines": 10,
+    "size": 150
+  },
+  {
+    "path": "deploy/k8s/secrets.example.env",
+    "lines": 20,
+    "size": 442
+  },
+  {
+    "path": "deploy/k8s/service.yaml",
+    "lines": 13,
+    "size": 174
+  },
+  {
+    "path": "deploy/prometheus.yml",
+    "lines": 9,
+    "size": 152
+  },
+  {
+    "path": "docker-compose.yml",
+    "lines": 53,
+    "size": 1195
+  },
+  {
+    "path": "Dockerfile",
+    "lines": 16,
+    "size": 447
+  },
+  {
+    "path": "pom.xml",
+    "lines": 66,
+    "size": 2010
+  },
+  {
+    "path": "QUICKSTART.md",
+    "lines": 105,
+    "size": 2507
+  },
+  {
+    "path": "README.md",
+    "lines": 58,
+    "size": 2019
+  },
+  {
+    "path": "sdk/test-app_client.py",
+    "lines": 65,
+    "size": 2338
+  },
+  {
+    "path": "sdk/test-app-client.ts",
+    "lines": 76,
+    "size": 2175
+  },
+  {
+    "path": "src/main/java/dev/helios/app/Post.java",
+    "lines": 24,
+    "size": 497
+  },
+  {
+    "path": "src/main/java/dev/helios/app/PostResource.java",
+    "lines": 56,
+    "size": 1524
+  },
+  {
+    "path": "src/main/java/dev/helios/app/User.java",
+    "lines": 28,
+    "size": 569
+  },
+  {
+    "path": "src/main/java/dev/helios/app/UserResource.java",
+    "lines": 56,
+    "size": 1524
+  },
+  {
+    "path": "src/main/resources/application.properties",
+    "lines": 6,
+    "size": 238
+  },
+  {
+    "path": "src/main/resources/db/migration/V1__init.sql",
+    "lines": 23,
+    "size": 791
+  },
+  {
+    "path": "src/test/java/com/example/testapp/ApiContractTest.java",
+    "lines": 99,
+    "size": 3449
+  },
+  {
+    "path": "src/test/java/dev/helios/app/PostResourceTest.java",
+    "lines": 25,
+    "size": 565
+  },
+  {
+    "path": "src/test/java/dev/helios/app/UserResourceTest.java",
+    "lines": 25,
+    "size": 565
+  }
+]

@@ -30,7 +30,7 @@ export function CtaSection() {
               </Link>
             </Button>
             <Button asChild variant="secondary" size="xl">
-              <Link href="/signup">Create free account</Link>
+              <Link href="/login">Sign in with GitHub or Bitbucket</Link>
             </Button>
           </div>
         </div>

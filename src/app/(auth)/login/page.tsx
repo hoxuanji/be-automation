@@ -1,12 +1,10 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { Github } from "lucide-react";
 import { Logo } from "@/components/shared/logo";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { BrandIcon } from "@/components/shared/brand-icon";
 import { toast } from "@/components/ui/toast";
 
 function OAuthResultHandler() {
@@ -16,6 +14,9 @@ function OAuthResultHandler() {
     if (searchParams.get("github") === "error") {
       toast({ title: "GitHub sign-in failed", description: "Please try again.", kind: "error" });
       window.history.replaceState({}, "", "/login");
+    } else if (searchParams.get("bitbucket") === "error") {
+      toast({ title: "Bitbucket sign-in failed", description: "Please try again.", kind: "error" });
+      window.history.replaceState({}, "", "/login");
     }
   }, [searchParams]);
 
@@ -23,43 +24,13 @@ function OAuthResultHandler() {
 }
 
 function LoginForm() {
-  const router = useRouter();
   const searchParams = useSearchParams();
-  const returnTo = searchParams.get("returnTo") ?? "/dashboard";
-  const [loading, setLoading] = React.useState(false);
-
-  async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setLoading(true);
-    const fd = new FormData(e.currentTarget);
-    try {
-      const res = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: fd.get("email"),
-          password: fd.get("password"),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        toast({
-          title:
-            data.error === "invalid_credentials"
-              ? "Invalid email or password"
-              : "Sign-in failed",
-          kind: "error",
-        });
-        return;
-      }
-      router.push(returnTo.startsWith("/") ? returnTo : "/dashboard");
-      router.refresh();
-    } catch {
-      toast({ title: "Network error", kind: "error" });
-    } finally {
-      setLoading(false);
-    }
-  }
+  // Keep returnTo on the SSO flow so the callback redirects back where the
+  // user started. We only honor in-app paths for safety.
+  const rt = searchParams.get("returnTo");
+  const returnTo = rt && rt.startsWith("/") ? rt : "/dashboard";
+  const githubHref = `/api/auth/github?mode=login&returnTo=${encodeURIComponent(returnTo)}`;
+  const bitbucketHref = `/api/auth/bitbucket?mode=login&returnTo=${encodeURIComponent(returnTo)}`;
 
   return (
     <div className="space-y-6">
@@ -67,69 +38,33 @@ function LoginForm() {
         <div className="flex justify-center mb-5">
           <Logo />
         </div>
-        <h1 className="text-xl font-semibold">Welcome back</h1>
+        <h1 className="text-xl font-semibold">Sign in to Helios</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Sign in to your Helios account
+          Continue with your GitHub or Bitbucket account
         </p>
       </div>
 
-      {/* GitHub OAuth */}
-      <a
-        href="/api/auth/github?mode=login"
-        className="flex items-center justify-center gap-2.5 w-full rounded-lg border border-white/[0.1] bg-white/[0.04] px-4 py-2.5 text-sm font-medium hover:bg-white/[0.07] transition-colors"
-      >
-        <Github className="h-4 w-4" />
-        Continue with GitHub
-      </a>
+      <div className="space-y-3">
+        <a
+          href={githubHref}
+          className="flex items-center justify-center gap-2.5 w-full rounded-lg border border-white/[0.1] bg-white/[0.04] px-4 py-2.5 text-sm font-medium hover:bg-white/[0.07] transition-colors"
+        >
+          <Github className="h-4 w-4" />
+          Continue with GitHub
+        </a>
 
-      <div className="flex items-center gap-3">
-        <div className="h-px flex-1 bg-white/[0.06]" />
-        <span className="text-[11px] text-muted-foreground">or</span>
-        <div className="h-px flex-1 bg-white/[0.06]" />
+        <a
+          href={bitbucketHref}
+          className="flex items-center justify-center gap-2.5 w-full rounded-lg border border-white/[0.1] bg-white/[0.04] px-4 py-2.5 text-sm font-medium hover:bg-white/[0.07] transition-colors"
+        >
+          <BrandIcon id="bitbucket" size={16} rounded="sm" />
+          Continue with Bitbucket
+        </a>
       </div>
 
-      <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-6">
-        <form onSubmit={onSubmit} className="space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">
-              Email
-            </label>
-            <Input
-              name="email"
-              type="email"
-              required
-              autoComplete="email"
-              placeholder="you@example.com"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">
-              Password
-            </label>
-            <Input
-              name="password"
-              type="password"
-              required
-              autoComplete="current-password"
-              placeholder="••••••••"
-            />
-          </div>
-          <div className="flex items-center justify-between">
-            <Button type="submit" variant="glow" disabled={loading}>
-              {loading ? "Signing in…" : "Sign in"}
-            </Button>
-            <Link href="/forgot-password" className="text-xs text-muted-foreground hover:text-foreground transition-colors">
-              Forgot password?
-            </Link>
-          </div>
-        </form>
-      </div>
-
-      <p className="text-center text-xs text-muted-foreground">
-        Don&apos;t have an account?{" "}
-        <Link href="/signup" className="text-brand-300 hover:underline">
-          Create one
-        </Link>
+      <p className="text-center text-[11px] text-muted-foreground/80 leading-relaxed">
+        Helios is SSO-only. Signing in with either provider creates your account
+        on first use — no password, no reset flow.
       </p>
     </div>
   );

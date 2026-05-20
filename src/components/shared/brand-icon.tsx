@@ -242,6 +242,12 @@ const BRANDS: Record<string, BrandMeta> = {
       // balloon-like mark
       "M6 10c0-3 2.7-5 6-5s6 2 6 5-2.7 6-6 6-6-3-6-6Zm6 6 2 5h-4l2-5Z",
   },
+  bitbucket: {
+    name: "Bitbucket",
+    accent: "#2684FF",
+    initials: "Bb",
+    onAccent: true,
+  },
   aws: {
     name: "AWS",
     accent: "#FF9900",

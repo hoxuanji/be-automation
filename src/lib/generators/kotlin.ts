@@ -556,6 +556,13 @@ function springKtFiles(
       path: `src/main/kotlin/${pkgPath(pkg)}/${pascal}Controller.kt`,
       content: springKtController(pkg, pascal, kebab, entity),
     });
+    // Per-entity smoke test mirrors what the Spring (Java) path emits —
+    // wires up MockMvc against the auto-loaded Spring context so a missing
+    // bean / wiring regression fails `gradle test` immediately.
+    files.push({
+      path: `src/test/kotlin/${pkgPath(pkg)}/${pascal}ControllerTest.kt`,
+      content: springKtControllerTest(pkg, pascal, kebab),
+    });
   }
 
   // suppress unused-variable warning for endpoints
@@ -861,6 +868,44 @@ class ${pascal}Controller(private val ${camelRepo}: ${pascal}Repository) {
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
+
+function springKtControllerTest(pkg: string, pascal: string, kebab: string): string {
+  return `package ${pkg}
+
+import org.junit.jupiter.api.Test
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
+import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.http.MediaType
+import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+
+@SpringBootTest
+@AutoConfigureMockMvc
+class ${pascal}ControllerTest {
+
+    @Autowired
+    lateinit var mvc: MockMvc
+
+    @Test
+    fun \`list returns ok\`() {
+        mvc.perform(get("/${kebab}s"))
+            .andExpect(status().isOk)
+    }
+
+    @Test
+    fun \`create is reachable\`() {
+        mvc.perform(
+            post("/${kebab}s")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}")
+        ).andExpect(status().is4xxClientError) // empty body fails @NotNull validation; route is wired
+    }
+}
+`;
+}
 
 function safeName(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9-_]+/g, "-").replace(/^-+|-+$/g, "") || "app";

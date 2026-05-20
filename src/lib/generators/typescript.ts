@@ -1,6 +1,8 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { safeName, toKebab, toCamel } from "./types";
 import { tsGrpcFiles } from "./grpc/typescript";
+import { tsGraphqlFiles } from "./graphql/typescript";
+import { isGraphqlSupported } from "./types";
 import { needsAuth } from "./auth/providers";
 import { tsPatternRoute, tsPatternImports } from "./patterns/typescript";
 
@@ -29,6 +31,12 @@ export function typescriptFiles(
 ): GeneratedFile[] {
   if (config.api === "trpc") {
     return tRPCFiles(config, endpoints, entities);
+  }
+
+  // GraphQL: emit a graphql-yoga server keyed off the framework. Same
+  // schema-first dispatch as gRPC — the SDL was already added in index.ts.
+  if (config.api === "graphql" && isGraphqlSupported(config.language)) {
+    return tsGraphqlFiles(config, entities);
   }
 
   // gRPC mode replaces the framework-specific HTTP bootstrap with a @grpc/grpc-js
