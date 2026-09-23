@@ -325,6 +325,19 @@ describe("Generator invariants", () => {
     }
   });
 
+  // gin/chi response helpers don't return, so a cache hit used to fall through to the DB
+  // lookup and write a second response.
+  it("Go cache_read stops after a cache hit on every framework", () => {
+    const endpoints = [{ id: "1", method: "GET" as const, path: "/items/:id", summary: "Get", auth: false, pattern: "cache_read" }];
+    for (const framework of ["gin", "fiber", "echo", "chi"]) {
+      const config = { ...BASE_CONFIG, language: "go" as const, framework, api: "rest" as const, cache: "redis" };
+      const go = generate(config, endpoints).filter((f) => f.path.endsWith(".go")).map((f) => f.content).join("\n");
+      const hit = go.match(/jsonErr == nil \{\n\s*(.+)\n\s*(.+)/);
+      assert.ok(hit, `${framework}: cache hit branch not found`);
+      assert.ok(hit[1].startsWith("return") || hit[2].trim() === "return", `${framework}: cache hit must return`);
+    }
+  });
+
   it("generates with empty endpoints", () => {
     const config = { ...BASE_CONFIG, language: "typescript" as const, framework: "express", api: "rest" as const };
     const files = generate(config, []);

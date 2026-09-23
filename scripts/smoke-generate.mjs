@@ -35,12 +35,34 @@ const config = {
   envVars: [],
 };
 
+const patternEndpoints = [
+  ["GET", "/users", "crud_list", false],
+  ["GET", "/users/:id", "crud_get", true],
+  ["POST", "/users", "crud_create", true],
+  ["PUT", "/users/:id", "crud_update", true],
+  ["DELETE", "/users/:id", "crud_delete", true],
+  ["GET", "/users/search", "paginated_search", false],
+  ["GET", "/users/stats", "aggregate_stats", true],
+  ["GET", "/cache/users/:id", "cache_read", false],
+  ["POST", "/auth/login", "auth_login", false],
+  ["POST", "/auth/register", "auth_register", false],
+  ["GET", "/auth/me", "auth_me", true],
+  ["POST", "/auth/logout", "auth_logout", true],
+  ["POST", "/auth/refresh", "auth_refresh", false],
+  ["POST", "/auth/password", "auth_change_password", true],
+  ["GET", "/healthz", "health_check", false],
+  ["POST", "/webhooks/stripe", "webhook_receive", false],
+  ["POST", "/uploads", "file_upload", true],
+  ["POST", "/notifications", "send_notification", true],
+].map(([method, path, pattern, auth], i) => ({ id: `p${i}`, method, path, summary: pattern, auth, pattern }));
+
 const endpoints = [
   { id: "1", method: "GET", path: "/health", summary: "Health", auth: false },
   ...(full
     ? [
         { id: "2", method: "GET", path: "/reports/:id", summary: "Get report", auth: true },
         { id: "3", method: "POST", path: "/reports", summary: "Create report", auth: true },
+        ...patternEndpoints,
       ]
     : []),
 ];

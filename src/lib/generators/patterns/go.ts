@@ -634,6 +634,8 @@ ${x.getBodyTyped("notifReq")}
 
 function cacheRead(fw: Fw, table: string): string {
   const x = fwCtx(fw);
+  // gin/chi retOK writes without returning; a cache hit must stop before the DB lookup.
+  const stopAfterHit = fw === "gin" || fw === "chi" ? "\n\t\t\treturn" : "";
   return `${redisNilCheck(fw)}
 \tid := ${x.pathParam("id")}
 \tcacheKey := fmt.Sprintf(${JSON.stringify(table + ":%s")}, id)
@@ -644,7 +646,7 @@ function cacheRead(fw: Fw, table: string): string {
 \t\t// Cache hit — return parsed JSON
 \t\tvar cached map[string]any
 \t\tif jsonErr := json.Unmarshal([]byte(val), &cached); jsonErr == nil {
-\t\t\t${x.retOK("cached")}
+\t\t\t${x.retOK("cached")}${stopAfterHit}
 \t\t}
 \t}
 
