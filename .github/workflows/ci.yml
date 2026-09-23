@@ -167,7 +167,8 @@ jobs:
             python -m py_compile $(find . -name "*.py" -not -path "./.venv/*") &&
             pip install -q pyflakes &&
             # Only undefined names fail the build: they are runtime NameErrors. Other pyflakes output is style.
-            ! python -m pyflakes . | grep "undefined name"
+            { python -m pyflakes . > /tmp/pyflakes.txt || true; } &&
+            ! grep "undefined name" /tmp/pyflakes.txt
           } 2>&1 | tee /tmp/py.log || {
             grep -iE "error|failed|because|not found|No such" /tmp/py.log | head -25 | while IFS= read -r l; do echo "::error::$l"; done
             exit 1
