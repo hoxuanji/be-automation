@@ -613,6 +613,61 @@ describe("Stack-option wiring", () => {
     assert.ok(!rust.files.some((f) => /price: (Option<)?i64/.test(f.content)), "i64 cannot decode DOUBLE PRECISION");
   });
 
+  it("Python auth patterns match the token verifier auth_required uses, and every name they use is defined", () => {
+    const eps = ["auth_login", "auth_register", "auth_me", "auth_logout", "auth_refresh", "auth_change_password"].map((pattern, i) => ({
+      id: String(i), method: (pattern === "auth_me" ? "GET" : "POST") as "GET" | "POST", path: `/auth/${pattern.slice(5)}`, summary: pattern, auth: false, pattern,
+    }));
+    const users = [{ id: "u", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+      { id: "f3", name: "password_hash", type: "string" as const, required: false, unique: false },
+    ] }];
+    const py = (auth: string) => gen({ auth, language: "python", framework: "fastapi" }, eps, users);
+    // Self-managed: handlers mint HS256 tokens with JWT_SECRET, so auth_required must verify HS256 with the same secret.
+    const self = py("none");
+    assert.match(self.get("app/auth.py")!, /algorithms=\["HS256"\]/);
+    assert.match(self.get("app/auth.py")!, /JWT_SECRET/);
+    const main = self.get("app/main.py")!;
+    assert.ok(main.includes("create_access_token(") && !/passlib|from jose/.test(main));
+    // A name used in a handler signature/body but never imported or defined is a NameError at import time.
+    for (const name of ["Credentials", "RefreshRequest", "ChangePasswordRequest", "bcrypt", "verify_token", "auth_required", "get_db", "Session", "User", "_DUMMY_HASH"]) {
+      assert.match(main, new RegExp(`^(from \\S+ import .*\\b${name}\\b|import ${name}\\b|class ${name}\\b|${name} = )`, "m"), `${name} used but not defined`);
+    }
+    assert.match(self.get("pyproject.toml")!, /^bcrypt = /m);
+    // External provider: tokens come from the provider (JWKS); the service must not mint its own.
+    const clerk = py("clerk");
+    assert.match(clerk.get("app/auth.py")!, /PyJWKClient/);
+    const cmain = clerk.get("app/main.py")!;
+    assert.ok(cmain.includes('detail="handled_by_clerk"') && !cmain.includes("create_access_token"));
+    assert.match(cmain, /claims: dict = Depends\(auth_required\)/);
+  });
+
+  it("Python CRUD pattern handlers take the path parameter the route declares", () => {
+    // FastAPI binds {id} only to a parameter named id — anything else becomes a required query param (422).
+    const eps = (["GET", "PATCH", "DELETE"] as const).map((method, i) => ({
+      id: String(i), method, path: "/users/:id", summary: "x", auth: false, pattern: ({ GET: "crud_get", PATCH: "crud_update", DELETE: "crud_delete" } as const)[method],
+    }));
+    const main = gen({ language: "python", framework: "fastapi" }, eps, [SAMPLE_ENTITIES.find((e) => e.name === "User")!]).get("app/main.py")!;
+    for (const method of ["get", "patch", "delete"]) {
+      assert.match(main, new RegExp(`@app\\.${method}\\("/users/\\{id\\}"[^\\n]*\\)\\nasync def \\w+\\(id: str`), `${method} handler param`);
+    }
+    assert.ok(!main.includes("item_id"));
+  });
+
+  it("NestJS renders endpoint patterns with the same handler bodies as Express", () => {
+    const eps = [{ id: "1", method: "GET" as const, path: "/users/:id", summary: "Get", auth: true, pattern: "crud_get" }];
+    const users = [SAMPLE_ENTITIES.find((e) => e.name === "User")!];
+    const ctrl = gen({ language: "typescript", framework: "nestjs" }, eps, users).get("src/app.controller.ts")!;
+    const express = gen({ language: "typescript", framework: "express" }, eps, users).get("src/main.ts")!;
+    // A pattern must not degrade to the { ok: true } stub on Nest.
+    assert.ok(!ctrl.includes('op: "GET /users/:id"'));
+    assert.match(ctrl, /async getUsersById\(@Req\(\) req: Request, @Res\(\) res: Response\)/);
+    assert.ok(ctrl.includes("prisma.user.findUnique") && express.includes("prisma.user.findUnique"));
+    assert.ok(ctrl.includes('import { prisma } from "./db";'));
+    // Protected pattern routes are guarded just like Express mounts authRequired.
+    assert.match(ctrl, /@UseGuards\(JwtAuthGuard\)\n\s+async getUsersById/);
+  });
+
   it("Go migrate command matches the database driver and handles config errors", () => {
     const main = (database: string) => gen({ database }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("cmd/migrate/main.go")!;
     assert.match(main("postgres"), /migrate\/v4\/database\/postgres"/);

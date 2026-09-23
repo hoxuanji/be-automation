@@ -1,11 +1,17 @@
 import type { Endpoint, Entity, StackConfig } from "../types";
 import type { PatternId } from "./index";
+import { authProviderSpec } from "../auth/providers";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+const SKIP_SEGMENTS = new Set(["api", "v1", "v2", "v3", "v4"]);
+
+function resourceSegments(path: string): string[] {
+  return path.split("/").filter((p) => p && !p.startsWith(":") && !SKIP_SEGMENTS.has(p));
+}
+
 function inferTableName(path: string): string {
-  const skip = new Set(["api", "v1", "v2", "v3", "v4"]);
-  const parts = path.split("/").filter((p) => p && !p.startsWith(":") && !skip.has(p));
+  const parts = resourceSegments(path);
   return parts[parts.length - 1] || "items";
 }
 
@@ -17,64 +23,125 @@ function pathParams(p: string): string[] {
   return (p.match(/:([a-zA-Z0-9_]+)/g) ?? []).map((m) => m.slice(1));
 }
 
+// Unique per route, so two handlers on the same resource don't shadow each other.
+function fnName(e: Endpoint): string {
+  const parts = e.path
+    .split("/")
+    .filter(Boolean)
+    .map((p) => (p.startsWith(":") ? "by_" + p.slice(1) : p.replace(/[^a-zA-Z0-9]/g, "_")));
+  return (e.method.toLowerCase() + "_" + parts.join("_")).replace(/_+$/g, "");
+}
+
 type PyFw = "fastapi" | "django" | "litestar";
 
-// ── pattern bodies (FastAPI primary) ─────────────────────────────────────────
+// How auth_required verifies bearer tokens — mirrors goAuthMode:
+//   jwks  — external provider configured: verify provider tokens via JWKS.
+//   hs256 — auth "none" but auth_* patterns are used: the service issues its
+//           own HS256 tokens (JWT_SECRET) and verifies exactly those.
+//   off   — nothing to verify; no app/auth.py is emitted.
+// Only the FastAPI entrypoint renders pattern handlers, so patterns only
+// switch the mode there.
+export type PyAuthMode = "jwks" | "hs256" | "off";
+export function pyAuthMode(config: StackConfig, endpoints: Endpoint[]): PyAuthMode {
+  const authPatterns = config.framework === "fastapi" && endpoints.some((e) => e.pattern?.startsWith("auth_"));
+  if (authProviderSpec(config)) return endpoints.some((e) => e.auth) || authPatterns ? "jwks" : "off";
+  return authPatterns ? "hs256" : "off";
+}
 
-function crudList(table: string): string {
-  const model = table.replace(/s$/, "").charAt(0).toUpperCase() + table.replace(/s$/, "").slice(1);
+// Entity declared for this route's resource ("/users/search" → User), if any.
+// Scans segments right-to-left so action suffixes like "search" still resolve.
+function resolveEntity(path: string, entities: Entity[]): Entity | undefined {
+  for (const seg of resourceSegments(path).reverse()) {
+    const singular = seg.replace(/s$/, "").replace(/[-_]/g, "").toLowerCase();
+    const hit = entities.find((e) => e.name.toLowerCase() === singular);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+type PyModel = { name: string; pk: string; created: string; search: string[] };
+
+function pyModel(entity: Entity): PyModel {
+  const has = (n: string) => entity.fields.some((f) => f.name === n);
+  return {
+    name: entity.name,
+    pk: entity.fields.find((f) => f.primaryKey)?.name ?? "id",
+    // sqlalchemyModels adds created_at unless the entity declares createdAt.
+    created: has("createdAt") ? "createdAt" : "created_at",
+    search: entity.fields.filter((f) => !f.primaryKey && (f.type === "string" || f.type === "text")).map((f) => f.name),
+  };
+}
+
+// The self-issued auth flow needs a User entity with email + password hash columns.
+type PyUser = { name: string; pk: string; email: string; hash: string };
+function userEntity(entities: Entity[]): PyUser | undefined {
+  const u = entities.find((e) => e.name.toLowerCase() === "user");
+  const email = u?.fields.find((f) => f.name === "email");
+  const hash = u?.fields.find((f) => /^password_?hash$/i.test(f.name));
+  if (!u || !email || !hash) return undefined;
+  return { name: u.name, pk: u.fields.find((f) => f.primaryKey)?.name ?? "id", email: email.name, hash: hash.name };
+}
+
+const stub = (why: string) => `async def handler():
+    # ${why}
+    raise HTTPException(status_code=501, detail="not_implemented")`;
+const NO_ENTITY = stub("No entity matches this route — declare one (or wire this handler to your data layer).");
+const NO_USER = stub("Declare a User entity with `email` and `password_hash` fields to enable self-managed auth.");
+
+const searchFilter = (m: PyModel) =>
+  m.search.length ? `or_(${m.search.map((f) => `${m.name}.${f}.ilike(f"%{q}%")`).join(", ")})` : "";
+
+// ── pattern bodies (FastAPI) ─────────────────────────────────────────────────
+
+function crudList(m: PyModel): string {
+  const filter = searchFilter(m);
   return `async def handler(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     q: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
-    query = db.query(${model})
-    if q:
-        query = query.filter(${model}.name.ilike(f"%{q}%"))
-    total = query.count()
-    items = query.order_by(${model}.created_at.desc()).offset((page - 1) * limit).limit(limit).all()
+    query = db.query(${m.name})
+${filter ? `    if q:\n        query = query.filter(${filter})\n` : ""}    total = query.count()
+    items = query.order_by(${m.name}.${m.created}.desc()).offset((page - 1) * limit).limit(limit).all()
     pages = max(1, math.ceil(total / limit))
-    return {"data": items, "meta": {"page": page, "limit": limit, "total": total, "pages": pages}}`;
+    return {"data": [_row(i) for i in items], "meta": {"page": page, "limit": limit, "total": total, "pages": pages}}`;
 }
 
-function crudGet(table: string): string {
-  const model = table.replace(/s$/, "").charAt(0).toUpperCase() + table.replace(/s$/, "").slice(1);
-  return `async def handler(item_id: str, db: Session = Depends(get_db)):
-    item = db.query(${model}).filter(${model}.id == item_id).first()
+function crudGet(m: PyModel, param: string): string {
+  return `async def handler(${param}: str, db: Session = Depends(get_db)):
+    item = db.query(${m.name}).filter(${m.name}.${m.pk} == ${param}).first()
     if not item:
         raise HTTPException(status_code=404, detail="not found")
-    return item`;
+    return _row(item)`;
 }
 
-function crudCreate(table: string): string {
-  const model = table.replace(/s$/, "").charAt(0).toUpperCase() + table.replace(/s$/, "").slice(1);
+function crudCreate(m: PyModel): string {
   return `async def handler(payload: dict, db: Session = Depends(get_db)):
-    item = ${model}(**payload)
+    # Whitelist real columns so clients cannot set the PK or unknown attributes.
+    item = ${m.name}(**{k: v for k, v in payload.items() if k in ${m.name}.__table__.columns and k != "${m.pk}"})
     db.add(item)
     db.commit()
     db.refresh(item)
-    return item`;
+    return _row(item)`;
 }
 
-function crudUpdate(table: string): string {
-  const model = table.replace(/s$/, "").charAt(0).toUpperCase() + table.replace(/s$/, "").slice(1);
-  return `async def handler(item_id: str, payload: dict, db: Session = Depends(get_db)):
-    item = db.query(${model}).filter(${model}.id == item_id).first()
+function crudUpdate(m: PyModel, param: string): string {
+  return `async def handler(${param}: str, payload: dict, db: Session = Depends(get_db)):
+    item = db.query(${m.name}).filter(${m.name}.${m.pk} == ${param}).first()
     if not item:
         raise HTTPException(status_code=404, detail="not found")
     for key, value in payload.items():
-        if key != "id" and hasattr(item, key):
+        if key != "${m.pk}" and key in ${m.name}.__table__.columns:
             setattr(item, key, value)
     db.commit()
     db.refresh(item)
-    return item`;
+    return _row(item)`;
 }
 
-function crudDelete(table: string): string {
-  const model = table.replace(/s$/, "").charAt(0).toUpperCase() + table.replace(/s$/, "").slice(1);
-  return `async def handler(item_id: str, db: Session = Depends(get_db)):
-    item = db.query(${model}).filter(${model}.id == item_id).first()
+function crudDelete(m: PyModel, param: string): string {
+  return `async def handler(${param}: str, db: Session = Depends(get_db)):
+    item = db.query(${m.name}).filter(${m.name}.${m.pk} == ${param}).first()
     if not item:
         raise HTTPException(status_code=404, detail="not found")
     db.delete(item)
@@ -82,90 +149,74 @@ function crudDelete(table: string): string {
     return Response(status_code=204)`;
 }
 
-function authLogin(): string {
-  return `async def handler(credentials: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == credentials.email).first()
-    if not user:
-        # Constant-time compare to prevent timing-based user enumeration
-        pwd_context.verify(credentials.password, "$2b$12$invalidhash")
+function authLogin(u: PyUser): string {
+  return `async def handler(credentials: Credentials, db: Session = Depends(get_db)):
+    user = db.query(${u.name}).filter(${u.name}.${u.email} == credentials.email).first()
+    if not user or not user.${u.hash}:
+        # Burn a bcrypt check anyway so response timing doesn't reveal which emails exist.
+        bcrypt.checkpw(credentials.password.encode(), _DUMMY_HASH)
         raise HTTPException(status_code=401, detail="invalid_credentials")
-    if not pwd_context.verify(credentials.password, user.password_hash):
+    if not bcrypt.checkpw(credentials.password.encode(), user.${u.hash}.encode()):
         raise HTTPException(status_code=401, detail="invalid_credentials")
-    token = create_access_token({"sub": str(user.id)})
-    return {"token": token, "token_type": "Bearer"}`;
+    return {"token": create_access_token(str(user.${u.pk})), "token_type": "Bearer"}`;
 }
 
-function authRegister(): string {
-  return `async def handler(payload: RegisterRequest, db: Session = Depends(get_db)):
+function authRegister(u: PyUser): string {
+  return `async def handler(payload: Credentials, db: Session = Depends(get_db)):
     if len(payload.password) < 8:
         raise HTTPException(status_code=400, detail="password must be at least 8 characters")
-    existing = db.query(User).filter(User.email == payload.email).first()
-    if existing:
+    if db.query(${u.name}).filter(${u.name}.${u.email} == payload.email).first():
         raise HTTPException(status_code=409, detail="email_already_registered")
-    user = User(
-        id=str(uuid4()),
-        email=payload.email,
-        name=getattr(payload, "name", None),
-        password_hash=pwd_context.hash(payload.password),
-    )
+    user = ${u.name}(${u.email}=payload.email, ${u.hash}=bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode())
     db.add(user)
     db.commit()
     db.refresh(user)
-    token = create_access_token({"sub": str(user.id)})
-    return JSONResponse(status_code=201, content={"token": token, "token_type": "Bearer", "user": {"id": user.id, "email": user.email}})`;
+    token = create_access_token(str(user.${u.pk}))
+    return JSONResponse(status_code=201, content={"token": token, "token_type": "Bearer", "user": {"id": str(user.${u.pk}), "email": user.${u.email}}})`;
 }
 
+// auth_required returns the verified claims — provider-issued (jwks) or self-issued (hs256).
 function authMe(): string {
-  return `async def handler(sub: str = Depends(get_current_user)):
-    # Optionally fetch full user: user = db.query(User).filter(User.id == sub).first()
-    return {"sub": sub}`;
+  return `async def handler(claims: dict = Depends(auth_required)):
+    return {"sub": claims.get("sub"), "email": claims.get("email")}`;
 }
 
 function authLogout(): string {
-  return `async def handler(sub: str = Depends(get_current_user)):
+  return `async def handler(claims: dict = Depends(auth_required)):
     # Stateless JWT — client discards the token.
     # For server-side revocation: add token to a Redis blocklist.
     return Response(status_code=204)`;
 }
 
 function authRefresh(): string {
+  // ponytail: refresh reuses the access-token key and TTL; split secrets/TTLs if refresh tokens must outlive access tokens.
   return `async def handler(payload: RefreshRequest):
     try:
-        data = jwt.decode(payload.refresh_token, settings.jwt_secret, algorithms=["HS256"])
-        sub = data.get("sub")
-        if not sub:
-            raise HTTPException(status_code=401, detail="invalid_refresh_token")
-        token = create_access_token({"sub": sub})
-        return {"token": token, "token_type": "Bearer"}
-    except JWTError:
-        raise HTTPException(status_code=401, detail="invalid_refresh_token")`;
+        sub = verify_token(payload.refresh_token)["sub"]
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="invalid_refresh_token")
+    return {"token": create_access_token(sub), "token_type": "Bearer"}`;
 }
 
-function authChangePassword(): string {
+function authChangePassword(u: PyUser): string {
   return `async def handler(
     payload: ChangePasswordRequest,
-    sub: str = Depends(get_current_user),
+    claims: dict = Depends(auth_required),
     db: Session = Depends(get_db),
 ):
     if len(payload.new_password) < 8:
         raise HTTPException(status_code=400, detail="new password must be at least 8 characters")
-    user = db.query(User).filter(User.id == sub).first()
+    user = db.query(${u.name}).filter(${u.name}.${u.pk} == claims["sub"]).first()
     if not user:
         raise HTTPException(status_code=404, detail="user not found")
-    if not pwd_context.verify(payload.current_password, user.password_hash):
+    if not user.${u.hash} or not bcrypt.checkpw(payload.current_password.encode(), user.${u.hash}.encode()):
         raise HTTPException(status_code=401, detail="invalid_current_password")
-    user.password_hash = pwd_context.hash(payload.new_password)
+    user.${u.hash} = bcrypt.hashpw(payload.new_password.encode(), bcrypt.gensalt()).decode()
     db.commit()
     return Response(status_code=204)`;
 }
 
 export const pyHasRedis = (c: StackConfig) => /redis|upstash|dragonfly/.test(c.cache);
-
-// Entity declared for this route's resource segment ("users" → User), if any.
-function resolveEntity(table: string, entities: Entity[]): Entity | undefined {
-  const singular = table.replace(/s$/, "").replace(/[-_]/g, "").toLowerCase();
-  return entities.find((e) => e.name.toLowerCase() === singular);
-}
 
 function healthCheck(config: StackConfig, hasDb: boolean): string {
   const hasCache = pyHasRedis(config);
@@ -218,29 +269,25 @@ function fileUpload(): string {
     return JSONResponse(status_code=201, content={"id": file_id, "url": url, "mime": file.content_type})`;
 }
 
-function paginatedSearch(table: string): string {
-  const model = table.replace(/s$/, "").charAt(0).toUpperCase() + table.replace(/s$/, "").slice(1);
+function paginatedSearch(m: PyModel): string {
+  const filter = searchFilter(m);
   return `async def handler(
     q: Optional[str] = Query(None),
     cursor: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
-    query = db.query(${model})
-    if q:
-        query = query.filter(
-            or_(${model}.name.ilike(f"%{q}%"), ${model}.description.ilike(f"%{q}%"))
-        )
-    if cursor:
-        ref = db.query(${model}).filter(${model}.id == cursor).first()
+    query = db.query(${m.name})
+${filter ? `    if q:\n        query = query.filter(${filter})\n` : ""}    if cursor:
+        ref = db.query(${m.name}).filter(${m.name}.${m.pk} == cursor).first()
         if ref:
-            query = query.filter(${model}.created_at < ref.created_at)
-    items = query.order_by(${model}.created_at.desc()).limit(limit + 1).all()
+            query = query.filter(${m.name}.${m.created} < ref.${m.created})
+    items = query.order_by(${m.name}.${m.created}.desc()).limit(limit + 1).all()
     has_more = len(items) > limit
     if has_more:
         items = items[:limit]
-    next_cursor = str(items[-1].id) if has_more and items else None
-    return {"data": items, "next_cursor": next_cursor, "has_more": has_more}`;
+    next_cursor = str(items[-1].${m.pk}) if has_more and items else None
+    return {"data": [_row(i) for i in items], "next_cursor": next_cursor, "has_more": has_more}`;
 }
 
 function aggregateStats(table: string): string {
@@ -278,7 +325,7 @@ function sendNotification(config: StackConfig): string {
     if not payload.recipient or not payload.channel:
         raise HTTPException(status_code=400, detail="recipient and channel required")
     # TODO: publish via ${queueNote}
-    # await broker.publish("notifications", payload.dict())
+    # await broker.publish("notifications", payload.model_dump())
     logger.info("notification queued", extra={"channel": payload.channel, "recipient": payload.recipient})
     return {"queued": True, "channel": payload.channel}`;
 }
@@ -290,7 +337,7 @@ function cacheRead(table: string, param: string, entity: Entity | undefined, has
     ? `    item = db.query(${entity.name}).filter(${entity.name}.${pk} == ${param}).first()
     if not item:
         raise HTTPException(status_code=404, detail="not found")
-    payload = jsonable_encoder({c.name: getattr(item, c.name) for c in item.__table__.columns})`
+    payload = _row(item)`
     : `    # No entity matches this route — wire the lookup to your data layer.
     raise HTTPException(status_code=404, detail="not found")`;
   if (!hasCache) {
@@ -324,49 +371,73 @@ function customHandler(e: Endpoint): string {
     return {"ok": True, "op": "${e.method} ${e.path}"}`;
 }
 
+const DB_PATTERNS = new Set(["crud_list", "crud_get", "crud_create", "crud_update", "crud_delete", "paginated_search", "aggregate_stats"]);
+const CREDENTIAL_PATTERNS = new Set(["auth_login", "auth_register", "auth_refresh", "auth_change_password"]);
+
+function patternBody(e: Endpoint, config: StackConfig, entities: Entity[], mode: PyAuthMode): string {
+  const pattern = e.pattern as PatternId | undefined;
+  const table = inferTableName(e.path);
+  const params = pathParams(e.path);
+  const param = params[params.length - 1] ?? "id";
+  const entity = resolveEntity(e.path, entities);
+  const m = entity && pyModel(entity);
+  const hasDb = entities.length > 0;
+
+  // Token design (mirrors Go): with an external provider auth_required verifies
+  // provider-issued tokens via JWKS, so this service must not mint its own —
+  // credential endpoints answer 501 and auth_me reads the provider's claims.
+  if (mode === "jwks" && CREDENTIAL_PATTERNS.has(pattern ?? "")) {
+    return `async def handler():
+    # Credentials are managed by ${config.auth}; tokens minted here would fail JWKS verification.
+    raise HTTPException(status_code=501, detail="handled_by_${config.auth}")`;
+  }
+  if (pattern === "aggregate_stats" && !hasDb) return NO_ENTITY;
+  if (DB_PATTERNS.has(pattern ?? "") && pattern !== "aggregate_stats" && !m) return NO_ENTITY;
+  const user = userEntity(entities);
+  if ((pattern === "auth_login" || pattern === "auth_register" || pattern === "auth_change_password") && !user) return NO_USER;
+
+  switch (pattern) {
+    case "crud_list":    return crudList(m!);
+    case "crud_get":     return crudGet(m!, param);
+    case "crud_create":  return crudCreate(m!);
+    case "crud_update":  return crudUpdate(m!, param);
+    case "crud_delete":  return crudDelete(m!, param);
+    case "auth_login":   return authLogin(user!);
+    case "auth_register":return authRegister(user!);
+    case "auth_me":      return authMe();
+    case "auth_logout":  return authLogout();
+    case "auth_refresh": return authRefresh();
+    case "auth_change_password": return authChangePassword(user!);
+    case "health_check": return healthCheck(config, hasDb);
+    case "webhook_receive": return webhookReceive();
+    case "file_upload":  return fileUpload();
+    case "paginated_search": return paginatedSearch(m!);
+    case "aggregate_stats":  return aggregateStats(table);
+    case "send_notification": return sendNotification(config);
+    case "cache_read":   return cacheRead(table, param, entity, pyHasRedis(config));
+    default:             return customHandler(e);
+  }
+}
+
 // ── route builder ─────────────────────────────────────────────────────────────
 
 export function pyPatternRoute(
   e: Endpoint,
   fw: PyFw,
   config: StackConfig,
-  entities: Entity[]
+  entities: Entity[],
+  mode: PyAuthMode = "off"
 ): string {
   const table = inferTableName(e.path);
-  const pattern = e.pattern as PatternId | undefined;
   const pyPathStr = pyPath(e.path);
   const params = pathParams(e.path);
   const method = e.method.toLowerCase();
-  const auth = e.auth ? ", dependencies=[Depends(auth_required)]" : "";
-
-  let handlerBody: string;
-  switch (pattern) {
-    case "crud_list":    handlerBody = crudList(table); break;
-    case "crud_get":     handlerBody = crudGet(table); break;
-    case "crud_create":  handlerBody = crudCreate(table); break;
-    case "crud_update":  handlerBody = crudUpdate(table); break;
-    case "crud_delete":  handlerBody = crudDelete(table); break;
-    case "auth_login":   handlerBody = authLogin(); break;
-    case "auth_register":handlerBody = authRegister(); break;
-    case "auth_me":      handlerBody = authMe(); break;
-    case "auth_logout":  handlerBody = authLogout(); break;
-    case "auth_refresh": handlerBody = authRefresh(); break;
-    case "auth_change_password": handlerBody = authChangePassword(); break;
-    case "health_check": handlerBody = healthCheck(config, entities.length > 0); break;
-    case "webhook_receive": handlerBody = webhookReceive(); break;
-    case "file_upload":  handlerBody = fileUpload(); break;
-    case "paginated_search": handlerBody = paginatedSearch(table); break;
-    case "aggregate_stats":  handlerBody = aggregateStats(table); break;
-    case "send_notification": handlerBody = sendNotification(config); break;
-    case "cache_read":   handlerBody = cacheRead(table, params[params.length - 1] ?? "id", entities.length > 0 ? resolveEntity(table, entities) : undefined, pyHasRedis(config)); break;
-    default:             handlerBody = customHandler(e); break;
-  }
 
   if (fw === "fastapi") {
-    // Replace generic `handler` function name with a unique name based on path
-    const fnName = `${method}_${table.replace(/-/g, "_")}`;
+    const handlerBody = patternBody(e, config, entities, mode);
+    const auth = e.auth && mode !== "off" ? ", dependencies=[Depends(auth_required)]" : "";
     const statusCode = method === "post" ? ", status_code=201" : method === "delete" ? ", status_code=204" : "";
-    const body = handlerBody.replace(/^async def handler/, `async def ${fnName}`);
+    const body = handlerBody.replace(/^async def handler/, `async def ${fnName(e)}`);
     return `@app.${method}(${JSON.stringify(pyPathStr)}${statusCode}${auth})\n${body}`;
   }
 
@@ -380,61 +451,69 @@ export function pyPatternRoute(
   return `@api_view([${JSON.stringify(e.method)}])\ndef ${method}_${table.replace(/-/g, "_")}(request${params.length ? ", " + params.join(", ") : ""}):\n    # ${e.logic || e.summary || "TODO: implement"}\n    return Response({"ok": True})`;
 }
 
-/** Extra imports needed in app/main.py when patterns require them */
-export function pyPatternImports(endpoints: Endpoint[], config?: StackConfig, entities: Entity[] = []): string[] {
-  const patterns = endpoints.map((e) => e.pattern ?? "");
-  const imports: string[] = [];
-  const hasDb = entities.length > 0;
-  const cache = !!config && pyHasRedis(config);
-  // Names the handler signatures use as defaults / annotations — evaluated at
-  // import time, so they must exist in both FastAPI entrypoints.
-  if (patterns.some(Boolean)) {
-    imports.push(
-      "from typing import Optional",
-      "from fastapi import Query, Request, Response",
-      "from fastapi.responses import JSONResponse",
-    );
-    if (hasDb) imports.push("from sqlalchemy.orm import Session", "from .db import get_db");
-  }
-  for (const e of endpoints) {
-    if (!e.pattern || !hasDb) continue;
-    const entity = resolveEntity(inferTableName(e.path), entities);
-    if (entity) imports.push(`from .models import ${entity.name}`);
-  }
-  if (patterns.some((p) => p === "health_check" || p === "cache_read")) {
-    if (cache) imports.push("from .cache import redis_client");
-  }
-  if (patterns.some((p) => p === "cache_read")) {
-    imports.push("from fastapi.encoders import jsonable_encoder");
-    if (cache) imports.push("import json");
-  }
-  if (patterns.some((p) => p.startsWith("auth_"))) {
-    imports.push(
-      "from passlib.context import CryptContext",
-      "from jose import jwt, JWTError",
-      "from uuid import uuid4",
-    );
-  }
-  if (patterns.some((p) => p === "health_check")) {
-    imports.push("from sqlalchemy import text");
-  }
-  if (patterns.some((p) => p === "webhook_receive")) {
-    imports.push("import hmac as hmac_lib", "import hashlib", "import os");
-  }
-  if (patterns.some((p) => p === "file_upload")) {
-    imports.push("from fastapi import UploadFile", "from uuid import uuid4");
-  }
-  if (patterns.some((p) => p === "paginated_search")) {
-    imports.push("from sqlalchemy import or_");
-  }
-  if (patterns.some((p) => p === "aggregate_stats")) {
-    imports.push("from sqlalchemy import text");
-  }
-  if (patterns.some((p) => p === "send_notification")) {
-    imports.push("import logging", "logger = logging.getLogger(__name__)");
-  }
-  if (patterns.some((p) => p?.startsWith("crud_"))) {
-    imports.push("import math");
-  }
-  return [...new Set(imports)];
+/**
+ * Module-level lines app/main.py needs for the pattern handlers: imports plus
+ * the request models / helpers their signatures reference. Derived from the
+ * emitted handler code so every referenced name is defined exactly when used.
+ */
+export function pyPatternImports(endpoints: Endpoint[], config: StackConfig, entities: Entity[] = [], mode: PyAuthMode = "off"): string[] {
+  const patterned = endpoints.filter((e) => e.pattern);
+  if (!patterned.length) return [];
+  const code = patterned.map((e) => patternBody(e, config, entities, mode)).join("\n");
+  const uses = (re: RegExp) => re.test(code);
+  const lines: string[] = [
+    // Names the handler signatures use as defaults / annotations — evaluated
+    // at import time, so they must exist in both FastAPI entrypoints.
+    "from typing import Optional",
+    "from fastapi import Query, Request, Response",
+    "from fastapi.responses import JSONResponse",
+  ];
+  if (uses(/\bget_db\b/)) lines.push("from sqlalchemy.orm import Session", "from .db import get_db");
+  const models = entities.filter((en) => new RegExp(`\\b${en.name}\\b`).test(code)).map((en) => en.name);
+  if (models.length) lines.push(`from .models import ${[...new Set(models)].join(", ")}`);
+  if (uses(/\b_row\(/)) lines.push("from fastapi.encoders import jsonable_encoder");
+  if (uses(/\bredis_client\b/)) lines.push("from .cache import redis_client");
+  if (uses(/\bjson\.loads\b/)) lines.push("import json");
+  if (uses(/\bmath\./)) lines.push("import math");
+  if (uses(/\btext\(/)) lines.push("from sqlalchemy import text");
+  if (uses(/\bor_\(/)) lines.push("from sqlalchemy import or_");
+  if (uses(/\bhmac_lib\b/)) lines.push("import hmac as hmac_lib", "import hashlib", "import os");
+  if (uses(/\bUploadFile\b/)) lines.push("from fastapi import UploadFile");
+  if (uses(/\buuid4\(/)) lines.push("from uuid import uuid4");
+  if (uses(/\bbcrypt\./)) lines.push("import bcrypt");
+  if (uses(/\bjwt\./)) lines.push("import jwt");
+  const authNames = ["create_access_token", "verify_token"].filter((n) => code.includes(n + "("));
+  if (authNames.length) lines.push(`from .auth import ${authNames.join(", ")}`);
+  if (uses(/\bBaseModel\b|: (Credentials|RefreshRequest|ChangePasswordRequest|NotificationRequest)\b/)) lines.push("from pydantic import BaseModel");
+  if (uses(/\blogger\./)) lines.push("import logging", "", "logger = logging.getLogger(__name__)");
+
+  // Request bodies + helpers, defined only when a handler references them.
+  if (uses(/\b_row\(/)) lines.push(`
+
+def _row(item) -> dict:
+    """ORM row → JSON-safe dict of its columns (password hashes never leave the service)."""
+    return jsonable_encoder({c.name: getattr(item, c.name) for c in item.__table__.columns if not c.name.startswith("password")})`);
+  if (uses(/\b_DUMMY_HASH\b/)) lines.push(`
+_DUMMY_HASH = bcrypt.hashpw(b"timing-equaliser", bcrypt.gensalt())`);
+  if (uses(/: Credentials\b/)) lines.push(`
+
+class Credentials(BaseModel):
+    email: str
+    password: str`);
+  if (uses(/: RefreshRequest\b/)) lines.push(`
+
+class RefreshRequest(BaseModel):
+    refresh_token: str`);
+  if (uses(/: ChangePasswordRequest\b/)) lines.push(`
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str`);
+  if (uses(/: NotificationRequest\b/)) lines.push(`
+
+class NotificationRequest(BaseModel):
+    recipient: str
+    channel: str
+    message: Optional[str] = None`);
+  return [...new Set(lines)];
 }

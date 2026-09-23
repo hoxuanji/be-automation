@@ -102,6 +102,10 @@ jobs:
           - { label: "java-quarkus-full", language: "java", framework: "quarkus", profile: "full", javaVersion: "21" }
           - { label: "kotlin-ktor-full", language: "kotlin", framework: "ktor", profile: "full", javaVersion: "21" }
           - { label: "kotlin-spring-kt-full", language: "kotlin", framework: "spring-kt", profile: "full", javaVersion: "21" }
+          # Self-issued auth (auth: none + auth_* patterns → HS256 JWT_SECRET) is a separate code path.
+          - { label: "go-gin-full-selfauth", language: "go", framework: "gin", profile: "full", auth: "none" }
+          - { label: "ts-nestjs-full-selfauth", language: "typescript", framework: "nestjs", profile: "full", auth: "none" }
+          - { label: "python-fastapi-full-selfauth", language: "python", framework: "fastapi", profile: "full", auth: "none" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -116,6 +120,7 @@ jobs:
           FRAMEWORK: ${{ matrix.combo.framework }}
           PROFILE: ${{ matrix.combo.profile || 'minimal' }}
           DATABASE: ${{ matrix.combo.database || 'postgres' }}
+          AUTH: ${{ matrix.combo.auth || '' }}
         run: |
           node --experimental-strip-types --no-warnings \
             --import ./src/lib/generators/__tests__/loader.mjs \
