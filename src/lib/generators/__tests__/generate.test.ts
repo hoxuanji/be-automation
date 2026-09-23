@@ -554,3 +554,116 @@ describe("Stack-option wiring", () => {
     assert.ok(gen({ database: "sqlite" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("internal/db/gorm.go")!.includes("github.com/glebarez/sqlite"));
   });
 });
+
+// ─── gRPC / GraphQL / tRPC honor the cross-cutting flags ────────────────────
+// These trees used to ignore rateLimit / audit / tracing / monitoring while
+// REST honored them, so the same builder toggles silently meant nothing.
+
+describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
+  const OFF = { rateLimit: false, audit: false, tracing: false, monitoring: "none" };
+
+  it("Go go.mod requires every external module the grpc/graphql code imports (else `go build` fails)", () => {
+    for (const api of ["grpc", "graphql"]) {
+      for (const framework of ["gin", "fiber", "echo", "chi"]) {
+        for (const monitoring of ["grafana", "sentry", "datadog"]) {
+          const { files, get } = gen({ api, framework, monitoring }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+          const required = [...get("go.mod")!.matchAll(/^\t(\S+) v/gm)].map((m) => m[1]);
+          for (const f of files.filter((x) => x.path.endsWith(".go"))) {
+            for (const [, path] of f.content.matchAll(/^\s*(?:[\w.]+\s+)?"([a-z0-9.-]+\.[a-z]{2,}\/[^"]+)"$/gm)) {
+              if (path.startsWith("github.com/your-username/")) continue;
+              assert.ok(required.some((m) => path === m || path.startsWith(m + "/")),
+                `${api}/${framework}/${monitoring}: ${f.path} imports ${path} but go.mod does not require it`);
+            }
+          }
+          assert.ok(required.includes("github.com/caarlos0/env/v11"), "internal/config imports caarlos0/env");
+          assert.ok(required.includes("github.com/golang-migrate/migrate/v4"), "cmd/migrate imports golang-migrate");
+        }
+      }
+    }
+  });
+
+  it("Go gRPC chains rate-limit + audit interceptors and otelgrpc only when the flags are on", () => {
+    const on = gen({ api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const main = on.get("cmd/api/main.go")!;
+    assert.match(main, /grpc\.ChainUnaryInterceptor\([\s\S]*grpcserver\.Metrics\(\)[\s\S]*grpcserver\.RateLimit\(\)[\s\S]*grpcserver\.Audit\(log\)/);
+    assert.match(main, /grpc\.StatsHandler\(otelgrpc\.NewServerHandler\(\)\)/);
+    assert.match(main, /tracing\.Init\(/);
+    assert.match(main, /promhttp\.Handler\(\)/, "Prometheus needs an HTTP listener; the gRPC port can't serve /metrics");
+    assert.match(on.get("internal/grpcserver/interceptors.go")!, /codes\.ResourceExhausted/);
+    assert.ok(on.get("internal/grpcserver/ratelimit_test.go"), "the limiter keeps its unit test");
+
+    const off = gen({ api: "grpc", ...OFF }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.ok(!off.get("internal/grpcserver/interceptors.go"));
+    assert.ok(!off.get("internal/tracing/tracing.go"));
+    assert.match(off.get("cmd/api/main.go")!, /grpcSrv := grpc\.NewServer\(\)/);
+  });
+
+  it("Go GraphQL is mounted on the REST router after its middleware chain", () => {
+    for (const framework of ["gin", "fiber", "echo", "chi"]) {
+      const server = gen({ api: "graphql", framework }).get("internal/server/server.go")!;
+      const use = server.indexOf("\tr.Use(");
+      assert.ok(use >= 0 && server.indexOf("mountGraphQL(r)") > use, `${framework}: GraphQL must be mounted after r.Use`);
+      assert.match(server.slice(use), /^\tr\.Use\([^\n]*tracing\.Middleware[^\n]*rateLimit\(\)[^\n]*auditLog\(log\)/);
+      assert.match(server, /monitoring\.MountMetrics\(r\)/);
+    }
+  });
+
+  it("TypeScript GraphQL and tRPC mount after the REST middleware, with tracing imported first", () => {
+    const cases: [string, string, string][] = [
+      ["graphql", "express", "app.use(yoga.graphqlEndpoint, yoga)"],
+      ["graphql", "nestjs", "app.use(yoga.graphqlEndpoint, yoga)"],
+      ["graphql", "fastify", "url: yoga.graphqlEndpoint"],
+      ["graphql", "hono", "yoga.fetch(c.req.raw)"],
+      ["trpc", "express", `app.use("/trpc"`],
+    ];
+    for (const [api, framework, mount] of cases) {
+      const g = gen({ language: "typescript", framework, api });
+      const main = g.get("src/main.ts")!;
+      const at = main.indexOf(mount);
+      assert.ok(main.startsWith(`import "./tracing";`), `${api}/${framework}: tracing must load before the framework`);
+      assert.ok(g.get("src/tracing.ts"));
+      assert.ok(at > 0, `${api}/${framework}: missing mount`);
+      const limiter = ["app.use(rateLimit)", "app.register(rateLimit", "rate_limited"].map((s) => main.indexOf(s)).find((i) => i >= 0);
+      assert.ok(limiter !== undefined && limiter < at, `${api}/${framework}: rate limit must run before the mount`);
+      assert.match(main.slice(0, at), /audit/, `${api}/${framework}: audit must run before the mount`);
+      assert.match(main, /\/metrics/);
+      assert.ok(JSON.parse(g.get("package.json")!).dependencies["@opentelemetry/sdk-node"]);
+    }
+  });
+
+  it("TypeScript gRPC installs interceptors and the REST instrumentation preamble", () => {
+    const g = gen({ language: "typescript", framework: "express", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const main = g.get("src/main.ts")!;
+    assert.ok(main.startsWith(`import "./tracing.js";`), "ESM needs the .js suffix and tracing must load first");
+    assert.match(main, /new grpc\.Server\(\{ interceptors \}\)/);
+    assert.match(main, /METRICS_PORT/);
+    assert.match(g.get("src/interceptors.ts")!, /\[metrics, rateLimit, audit\]/);
+    const deps = JSON.parse(g.get("package.json")!).dependencies;
+    assert.ok(deps["prom-client"] && deps["@opentelemetry/sdk-node"]);
+
+    const off = gen({ language: "typescript", framework: "express", api: "grpc", ...OFF }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.ok(!off.get("src/interceptors.ts") && !off.get("src/tracing.ts"));
+    assert.match(off.get("src/main.ts")!, /new grpc\.Server\(\)/);
+  });
+
+  it("Python GraphQL mounts Strawberry after the FastAPI middleware; Python gRPC wires interceptors", () => {
+    const main = gen({ language: "python", framework: "fastapi", api: "graphql" }).get("app/main.py")!;
+    const at = main.indexOf(`app.include_router(GraphQLRouter(schema)`);
+    for (const mw of ["SlowAPIMiddleware", "AuditMiddleware", "FastAPIInstrumentor.instrument_app", "Instrumentator().instrument(app)"]) {
+      const i = main.indexOf(mw);
+      assert.ok(i >= 0 && i < at, `${mw} must be wired before the GraphQL router`);
+    }
+
+    const g = gen({ language: "python", framework: "fastapi", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const grpcMain = g.get("app/main.py")!;
+    assert.match(grpcMain, /interceptors=\[server_interceptor\(\), MetricsInterceptor\(\), RateLimitInterceptor\(\), AuditInterceptor\(\)\]/);
+    assert.match(grpcMain, /start_http_server\(/);
+    assert.match(grpcMain, /from test_app\.v1 import service_pb2_grpc/, "stubs are importable from gen/python on PYTHONPATH");
+    assert.match(grpcMain, /service_pb2_grpc\.add_UserServiceServicer_to_server/);
+    assert.ok(g.get("app/tracing.py") && g.get("app/interceptors.py")!.includes("RESOURCE_EXHAUSTED"));
+    assert.match(g.get("pyproject.toml")!, /opentelemetry-instrumentation-grpc/);
+
+    const off = gen({ language: "python", framework: "fastapi", api: "grpc", ...OFF }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.ok(!off.get("app/interceptors.py") && !off.get("app/tracing.py"));
+  });
+});

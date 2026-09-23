@@ -31,8 +31,8 @@
   },
   {
     "path": "cmd/api/main.go",
-    "lines": 56,
-    "size": 1374
+    "lines": 43,
+    "size": 810
   },
   {
     "path": "cmd/migrate/main.go",
@@ -111,8 +111,8 @@
   },
   {
     "path": "go.mod",
-    "lines": 10,
-    "size": 172
+    "lines": 21,
+    "size": 664
   },
   {
     "path": "gqlgen.yml",
@@ -145,9 +145,59 @@
     "size": 1576
   },
   {
+    "path": "internal/cache/redis.go",
+    "lines": 28,
+    "size": 683
+  },
+  {
     "path": "internal/config/config.go",
     "lines": 22,
     "size": 476
+  },
+  {
+    "path": "internal/db/sql.go",
+    "lines": 58,
+    "size": 1600
+  },
+  {
+    "path": "internal/monitoring/metrics.go",
+    "lines": 13,
+    "size": 362
+  },
+  {
+    "path": "internal/server/graphql.go",
+    "lines": 23,
+    "size": 748
+  },
+  {
+    "path": "internal/server/health.go",
+    "lines": 35,
+    "size": 939
+  },
+  {
+    "path": "internal/server/middleware.go",
+    "lines": 45,
+    "size": 1092
+  },
+  {
+    "path": "internal/server/ratelimit_test.go",
+    "lines": 21,
+    "size": 512
+  },
+  {
+    "path": "internal/server/ratelimit.go",
+    "lines": 55,
+    "size": 1434
+  },
+  {
+    "path": "internal/server/server.go",
+    "lines": 87,
+    "size": 2448
+  },
+  {
+    "path": "internal/tracing/tracing.go",
+    "lines": 51,
+    "size": 1911
   },
   {
     "path": "Makefile",

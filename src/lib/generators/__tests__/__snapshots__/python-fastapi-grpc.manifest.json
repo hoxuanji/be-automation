@@ -40,9 +40,14 @@
     "size": 0
   },
   {
+    "path": "app/interceptors.py",
+    "lines": 112,
+    "size": 3857
+  },
+  {
     "path": "app/main.py",
-    "lines": 60,
-    "size": 1969
+    "lines": 71,
+    "size": 2438
   },
   {
     "path": "app/services/__init__.py",
@@ -52,12 +57,17 @@
   {
     "path": "app/services/post.py",
     "lines": 37,
-    "size": 1373
+    "size": 1359
   },
   {
     "path": "app/services/user.py",
     "lines": 37,
-    "size": 1373
+    "size": 1359
+  },
+  {
+    "path": "app/tracing.py",
+    "lines": 20,
+    "size": 719
   },
   {
     "path": "buf.gen.yaml",
@@ -166,8 +176,8 @@
   },
   {
     "path": "pyproject.toml",
-    "lines": 24,
-    "size": 482
+    "lines": 28,
+    "size": 634
   },
   {
     "path": "QUICKSTART.md",

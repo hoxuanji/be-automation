@@ -13,14 +13,13 @@ export function pythonFiles(
 ): GeneratedFile[] {
   // gRPC mode replaces the FastAPI / Django / Litestar bootstrap entirely.
   if (config.api === "grpc") {
-    return pyGrpcFiles(config, entities);
+    return pyGrpcFiles(config, entities, config.tracing ? pyTracingModule(config.name) : "");
   }
 
-  // GraphQL mode replaces FastAPI with a Strawberry-mounted FastAPI app —
-  // structurally similar but the resolver layout is the source of truth, not
-  // the route table. Same dispatch shape as gRPC.
+  // GraphQL: Strawberry mounted on the REST FastAPI app (built with no routes),
+  // so its middleware — slowapi, audit, OTel, Prometheus/Sentry — applies.
   if (config.api === "graphql" && isGraphqlSupported(config.language)) {
-    return pythonGraphqlFiles(config, entities);
+    return pythonGraphqlFiles(entities, pythonFiles({ ...config, api: "rest", framework: "fastapi" }, [], []));
   }
 
   const files: GeneratedFile[] = [];
@@ -548,7 +547,7 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
 `;
 }
 
-function pyTracingModule(name: string): string {
+export function pyTracingModule(name: string): string {
   return `"""OpenTelemetry tracing — spans are exported over OTLP/HTTP.
 
 The exporter reads OTEL_EXPORTER_OTLP_ENDPOINT (default http://localhost:4318).

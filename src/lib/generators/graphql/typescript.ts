@@ -1,12 +1,14 @@
 import type { Entity, GeneratedFile, StackConfig } from "../types";
-import { safeName, toCamel, toKebab } from "../types";
+import { toCamel, toKebab } from "../types";
 import { primaryKey, pluralize } from "./schema";
 
 /**
  * Emits a TypeScript GraphQL server using graphql-yoga. Yoga ships with
  * GraphiQL (easier first-run debugging than Apollo) and works as a plain
- * HTTP handler so we can mount it inside any of the four supported TS
- * frameworks without bringing in framework-specific GraphQL middleware.
+ * HTTP handler, so it is mounted as one more route on the REST server the
+ * caller built with no routes of its own (`rest`). That keeps the REST
+ * middleware — rate limit, audit, tracing, Sentry/Datadog, /metrics — in
+ * front of /graphql without re-implementing any of it here.
  *
  * The generated server reads SDL at startup from `graphql/schema.graphql`
  * (emitted by `generateGraphqlSchema`) and binds in-memory resolvers per
@@ -16,15 +18,20 @@ import { primaryKey, pluralize } from "./schema";
  */
 export function tsGraphqlFiles(
   config: StackConfig,
-  entities: Entity[]
+  entities: Entity[],
+  rest: GeneratedFile[]
 ): GeneratedFile[] {
-  const name = safeName(config.name);
-  const files: GeneratedFile[] = [];
+  const files = mountOnTsRest(rest, {
+    imports: `import { createSchema, createYoga } from "graphql-yoga";\nimport { typeDefs } from "./schema";\nimport { resolvers } from "./resolvers";`,
+    mount: tsGraphqlMount(config.framework),
+    deps: { "graphql-yoga": "^5.10.4", graphql: "^16.10.0" },
+  }).map((f) =>
+    // The SDL is read at runtime, so the image needs graphql/ next to dist/.
+    f.path === "Dockerfile"
+      ? { ...f, content: f.content.replace("COPY --from=build /app/dist ./dist\n", "COPY --from=build /app/dist ./dist\nCOPY --from=build /app/graphql ./graphql\n") }
+      : f
+  );
 
-  files.push({ path: "package.json", content: tsGraphqlPkgJson(name, config.framework) });
-  files.push({ path: "tsconfig.json", content: tsGraphqlTsconfig() });
-  files.push({ path: "Dockerfile", content: tsGraphqlDockerfile() });
-  files.push({ path: "src/main.ts", content: tsGraphqlMain(config.framework) });
   files.push({ path: "src/schema.ts", content: tsGraphqlSchema() });
   files.push({ path: "src/resolvers.ts", content: tsGraphqlResolvers(entities) });
   files.push({ path: "src/scalars.ts", content: tsGraphqlScalars() });
@@ -39,111 +46,45 @@ export function tsGraphqlFiles(
   return files;
 }
 
-function tsGraphqlPkgJson(name: string, framework: string): string {
-  const deps: Record<string, string> = {
-    "graphql-yoga": "^5.10.4",
-    graphql: "^16.10.0",
-    "graphql-scalars": "^1.24.0",
-  };
-  // Express stays the default mount target. Other frameworks get a yoga
-  // adapter at the route level (see tsGraphqlMain).
-  if (framework === "express" || framework === "nestjs") {
-    deps.express = "^4.21.2";
-  } else if (framework === "fastify") {
-    deps.fastify = "^5.2.0";
-  } else if (framework === "hono") {
-    deps.hono = "^4.6.14";
-    deps["@hono/node-server"] = "^1.13.7";
-  }
-
-  const devDeps: Record<string, string> = {
-    "@types/node": "^22.10.0",
-    tsx: "^4.19.0",
-    typescript: "^5.7.2",
-  };
-  if (framework === "express" || framework === "nestjs") {
-    devDeps["@types/express"] = "^5.0.0";
-  }
-
-  return JSON.stringify(
-    {
-      name,
-      version: "0.1.0",
-      private: true,
-      type: "module",
-      scripts: {
-        dev: "tsx watch src/main.ts",
-        build: "tsc -p tsconfig.json",
-        start: "node dist/main.js",
-        typecheck: "tsc --noEmit",
-      },
-      dependencies: deps,
-      devDependencies: devDeps,
-    },
-    null,
-    2
-  );
-}
-
-function tsGraphqlTsconfig(): string {
-  return JSON.stringify(
-    {
-      compilerOptions: {
-        target: "ES2022",
-        module: "ESNext",
-        moduleResolution: "Bundler",
-        outDir: "dist",
-        strict: true,
-        esModuleInterop: true,
-        skipLibCheck: true,
-        resolveJsonModule: true,
-        forceConsistentCasingInFileNames: true,
-      },
-      include: ["src/**/*"],
-    },
-    null,
-    2
-  );
-}
-
-function tsGraphqlDockerfile(): string {
-  return `# syntax=docker/dockerfile:1.7
-
-FROM node:22-alpine AS deps
-WORKDIR /app
-COPY package.json ./
-RUN npm install --omit=optional
-
-FROM node:22-alpine AS build
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
-RUN npm run build
-
-FROM node:22-alpine AS runtime
-WORKDIR /app
-ENV NODE_ENV=production
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/graphql ./graphql
-RUN addgroup -S app && adduser -S app -G app && chown -R app:app /app
-USER app
-EXPOSE 4000
-CMD ["node", "dist/main.js"]
-`;
+/**
+ * Adds a route to the REST tree's src/main.ts (right before /health, i.e.
+ * after every app-wide middleware) and merges runtime deps into package.json.
+ * Shared by the GraphQL and tRPC generators.
+ */
+export function mountOnTsRest(
+  rest: GeneratedFile[],
+  o: { imports: string; mount: string; deps: Record<string, string> }
+): GeneratedFile[] {
+  return rest.map((f) => {
+    if (f.path === "src/main.ts") {
+      const health = /^( *)app\.get\("\/health"/m;
+      const fwImport = /^import .* from "(express|fastify|hono|@nestjs\/core)";$/m;
+      if (!health.test(f.content) || !fwImport.test(f.content)) {
+        throw new Error("mountOnTsRest: REST main.ts has no /health route or framework import to anchor on");
+      }
+      const content = f.content
+        .replace(fwImport, (m) => `${m}\n${o.imports}`)
+        .replace(health, (m, indent: string) => `${o.mount.split("\n").map((l) => (l ? indent + l : l)).join("\n")}\n${m}`);
+      return { ...f, content };
+    }
+    if (f.path === "package.json") {
+      const pkg = JSON.parse(f.content);
+      pkg.dependencies = { ...pkg.dependencies, ...o.deps };
+      return { ...f, content: JSON.stringify(pkg, null, 2) + "\n" };
+    }
+    return f;
+  });
 }
 
 function tsGraphqlSchema(): string {
   return `import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 
 // SDL is committed to the repo so the same schema drives the server, IDE
 // tooling, and any client codegen. Loaded synchronously at startup — Yoga
-// will throw with a clear error if the file is missing.
-const here = dirname(fileURLToPath(import.meta.url));
-const schemaPath = resolve(here, "..", "graphql", "schema.graphql");
+// will throw with a clear error if the file is missing. Resolved from the
+// compiled file (dist/ or src/), so graphql/ must sit next to it.
+const schemaPath = resolve(__dirname, "..", "graphql", "schema.graphql");
 
 export const typeDefs = readFileSync(schemaPath, "utf-8");
 `;
@@ -205,7 +146,7 @@ function parseLiteralValue(ast: any): unknown {
 
 function tsGraphqlResolvers(entities: Entity[]): string {
   const imports = entities
-    .map((e) => `import { ${toCamel(e.name)}Resolvers } from "./resolvers/${toKebab(e.name)}.js";`)
+    .map((e) => `import { ${toCamel(e.name)}Resolvers } from "./resolvers/${toKebab(e.name)}";`)
     .join("\n");
 
   const queryEntries = entities
@@ -227,7 +168,7 @@ function tsGraphqlResolvers(entities: Entity[]): string {
       : "";
 
   return `${imports}
-import { DateTime, JSONScalar } from "./scalars.js";
+import { DateTime, JSONScalar } from "./scalars";
 
 // Top-level resolver map. Per-entity resolvers live in src/resolvers/<entity>.ts
 // to keep this file as a thin index — easier to grep when an operation breaks.
@@ -318,106 +259,31 @@ function tsFieldType(t: string): string {
   }
 }
 
-function tsGraphqlMain(framework: string): string {
-  // graphql-yoga's createYoga returns a plain fetch handler. We mount it on
-  // whichever framework the user picked — the framework's existing graceful
-  // shutdown / logging stays the source of truth, GraphQL is just a route.
-  const port = "Number(process.env.PORT ?? 4000)";
 
+function tsGraphqlMount(framework: string): string {
+  const yoga = `const yoga = createYoga({ schema: createSchema({ typeDefs, resolvers }) });`;
   if (framework === "fastify") {
-    return `import Fastify from "fastify";
-import { createYoga } from "graphql-yoga";
-import { typeDefs } from "./schema.js";
-import { resolvers } from "./resolvers.js";
-
-const yoga = createYoga({ schema: { typeDefs, resolvers } });
-const app = Fastify({ logger: true });
-
+    return `${yoga}
 app.route({
+  url: yoga.graphqlEndpoint,
   method: ["GET", "POST", "OPTIONS"],
-  url: "/graphql",
   handler: async (req, reply) => {
-    const response = await yoga.handle(
-      new Request(\`http://localhost\${req.url}\`, {
-        method: req.method,
-        headers: req.headers as HeadersInit,
-        body: req.method === "GET" ? undefined : JSON.stringify(req.body),
-      })
-    );
+    const response = await yoga.handleNodeRequestAndResponse(req, reply);
+    response.headers.forEach((value, key) => {
+      reply.header(key, value);
+    });
     reply.status(response.status);
-    response.headers.forEach((v, k) => reply.header(k, v));
-    reply.send(await response.text());
+    reply.send(response.body);
+    return reply;
   },
-});
-
-app.get("/health", () => ({ status: "ok" }));
-
-const port = ${port};
-app.listen({ port, host: "0.0.0.0" }).then(() => {
-  console.log(\`GraphQL ready at http://localhost:\${port}/graphql\`);
-});
-
-const shutdown = async () => {
-  await app.close();
-  process.exit(0);
-};
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
-`;
+});`;
   }
-
   if (framework === "hono") {
-    return `import { Hono } from "hono";
-import { serve } from "@hono/node-server";
-import { createYoga } from "graphql-yoga";
-import { typeDefs } from "./schema.js";
-import { resolvers } from "./resolvers.js";
-
-const yoga = createYoga({ schema: { typeDefs, resolvers } });
-const app = new Hono();
-
-app.all("/graphql", async (c) => {
-  const res = await yoga.handle(c.req.raw);
-  return res;
-});
-
-app.get("/health", (c) => c.json({ status: "ok" }));
-
-const port = ${port};
-const server = serve({ fetch: app.fetch, port, hostname: "0.0.0.0" });
-console.log(\`GraphQL ready at http://localhost:\${port}/graphql\`);
-
-const shutdown = () => {
-  server.close(() => process.exit(0));
-};
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
-`;
+    return `${yoga}
+app.on(["GET", "POST", "OPTIONS"], yoga.graphqlEndpoint, (c) => yoga.fetch(c.req.raw));`;
   }
-
-  // Default: Express. NestJS users get the same standalone Express bootstrap —
-  // mounting Yoga inside a NestJS module requires @nestjs/graphql which has a
-  // very different surface; the plain Express handler is more honest.
-  return `import express from "express";
-import { createYoga } from "graphql-yoga";
-import { typeDefs } from "./schema.js";
-import { resolvers } from "./resolvers.js";
-
-const app = express();
-const yoga = createYoga({ schema: { typeDefs, resolvers } });
-
-app.use("/graphql", yoga);
-app.get("/health", (_req, res) => res.json({ status: "ok" }));
-
-const port = ${port};
-const server = app.listen(port, () => {
-  console.log(\`GraphQL ready at http://localhost:\${port}/graphql\`);
-});
-
-const shutdown = () => {
-  server.close(() => process.exit(0));
-};
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
-`;
+  // Express (NestJS is routed to the Express base by the caller: Nest's
+  // ThrottlerGuard only guards controllers, not a raw app.use mount).
+  return `${yoga}
+app.use(yoga.graphqlEndpoint, yoga);`;
 }

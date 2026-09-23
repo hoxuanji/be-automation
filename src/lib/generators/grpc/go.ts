@@ -1,5 +1,6 @@
 import type { Entity, GeneratedFile, StackConfig } from "../types";
 import { safeName, toSnake } from "../types";
+import { GO_IP_LIMITER, goDatadogInit, goImports, goRateLimitTest, goSentryInit, goTracing } from "../go";
 
 /**
  * Emits a Go gRPC server skeleton. Assumes the user runs `make proto` once
@@ -16,12 +17,13 @@ export function goGrpcFiles(
   const module = `github.com/your-username/${name}`;
   const pkg = name.replace(/-/g, "_") + "v1";
   const pkgPath = `${module}/gen/go/${name.replace(/-/g, "_")}/v1`;
+  const o = goGrpcObservability(config);
 
   const files: GeneratedFile[] = [];
 
   files.push({
     path: "cmd/api/main.go",
-    content: goGrpcMain(module, pkg, pkgPath, entities),
+    content: goGrpcMain(module, pkgPath, config, entities, o),
   });
 
   files.push({
@@ -41,71 +43,181 @@ export function goGrpcFiles(
     content: goGrpcHealth(),
   });
 
-  files.push({
-    path: "go.mod",
-    content: goGrpcMod(module, entities.length > 0),
-  });
+  const interceptors = goGrpcInterceptors(config, o);
+  if (interceptors) files.push({ path: "internal/grpcserver/interceptors.go", content: interceptors });
+  if (config.rateLimit) files.push({ path: "internal/grpcserver/ratelimit_test.go", content: goRateLimitTest("grpcserver") });
+  // Same provider setup as the REST tree; the per-RPC spans come from otelgrpc.
+  if (o.tracing) files.push({ path: "internal/tracing/tracing.go", content: goTracing("chi") });
+  if (o.monitoring === "sentry") files.push({ path: "internal/monitoring/sentry.go", content: goSentryInit("chi") });
+  if (o.monitoring === "datadog") files.push({ path: "internal/monitoring/datadog.go", content: goDatadogInit("chi") });
 
   return files;
 }
 
-function goGrpcMod(module: string, hasEntities: boolean): string {
-  const db = hasEntities
-    ? `\tgorm.io/driver/postgres v1.5.11\n\tgorm.io/gorm v1.25.12\n`
-    : "";
-  return `module ${module}
+type GoGrpcObs = { tracing: boolean; monitoring: "prometheus" | "sentry" | "datadog" | "none" };
 
-go 1.23
-
-require (
-\tgoogle.golang.org/grpc v1.68.1
-\tgoogle.golang.org/grpc/cmd/protoc-gen-go-grpc v1.5.1
-\tgoogle.golang.org/protobuf v1.36.1
-${db}\tgithub.com/prometheus/client_golang v1.20.5
-)
-`;
+// Mirrors go.ts goFiles: OTel monitoring implies tracing.
+function goGrpcObservability(config: StackConfig): GoGrpcObs {
+  return {
+    tracing: config.tracing || config.monitoring === "otel",
+    monitoring: /prometheus|grafana/.test(config.monitoring) ? "prometheus"
+      : /sentry/.test(config.monitoring) ? "sentry"
+      : /datadog/.test(config.monitoring) ? "datadog"
+      : "none",
+  };
 }
 
-function goGrpcMain(module: string, pkg: string, pkgPath: string, entities: Entity[]): string {
-  const imports = [
-    `"context"`,
-    `"log"`,
-    `"net"`,
-    `"os"`,
-    `"os/signal"`,
-    `"syscall"`,
-    ``,
-    `"google.golang.org/grpc"`,
-    `"google.golang.org/grpc/health"`,
-    `healthpb "google.golang.org/grpc/health/grpc_health_v1"`,
-    `"google.golang.org/grpc/reflection"`,
-    ``,
-    `pb "${pkgPath}"`,
-    `"${module}/internal/grpcserver"`,
-  ].join("\n\t");
+// Unary interceptors for the cross-cutting flags. Streaming RPCs are not
+// intercepted — the generated services are all unary.
+function goGrpcInterceptors(config: StackConfig, o: GoGrpcObs): string {
+  const parts: string[] = [];
+  if (config.rateLimit || config.audit) {
+    parts.push(`// peerIP is the client address without the port.
+func peerIP(ctx context.Context) string {
+\tp, ok := peer.FromContext(ctx)
+\tif !ok {
+\t\treturn "unknown"
+\t}
+\thost, _, err := net.SplitHostPort(p.Addr.String())
+\tif err != nil {
+\t\treturn p.Addr.String()
+\t}
+\treturn host
+}`);
+  }
+  if (config.rateLimit) {
+    parts.push(`${GO_IP_LIMITER}
 
+// RateLimit rejects RPCs with ResourceExhausted once a client IP exceeds its bucket.
+func RateLimit() grpc.UnaryServerInterceptor {
+\tl := newIPLimiter()
+\treturn func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+\t\tif !l.allow(peerIP(ctx)) {
+\t\t\treturn nil, status.Error(codes.ResourceExhausted, "rate_limited")
+\t\t}
+\t\treturn handler(ctx, req)
+\t}
+}`);
+  }
+  if (config.audit) {
+    parts.push(`// Audit logs one structured line per RPC.
+func Audit(log *slog.Logger) grpc.UnaryServerInterceptor {
+\treturn func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+\t\tresp, err := handler(ctx, req)
+\t\tlog.Info("audit", "method", info.FullMethod, "code", status.Code(err).String(), "ip", peerIP(ctx))
+\t\treturn resp, err
+\t}
+}`);
+  }
+  if (o.monitoring === "prometheus") {
+    parts.push(`var (
+\trpcsHandled = promauto.NewCounterVec(prometheus.CounterOpts{
+\t\tName: "grpc_server_handled_total",
+\t\tHelp: "RPCs completed on the server, by method and status code.",
+\t}, []string{"grpc_method", "grpc_code"})
+\trpcSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+\t\tName:    "grpc_server_handling_seconds",
+\t\tHelp:    "RPC latency on the server, by method.",
+\t\tBuckets: prometheus.DefBuckets,
+\t}, []string{"grpc_method"})
+)
+
+// Metrics records per-RPC count and latency; cmd/api serves them on METRICS_PORT.
+func Metrics() grpc.UnaryServerInterceptor {
+\treturn func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+\t\tstart := time.Now()
+\t\tresp, err := handler(ctx, req)
+\t\trpcsHandled.WithLabelValues(info.FullMethod, status.Code(err).String()).Inc()
+\t\trpcSeconds.WithLabelValues(info.FullMethod).Observe(time.Since(start).Seconds())
+\t\treturn resp, err
+\t}
+}`);
+  }
+  if (o.monitoring === "sentry") {
+    parts.push(`// SentryRecover reports a panicking RPC to Sentry and answers Internal
+// instead of crashing the process.
+func SentryRecover() grpc.UnaryServerInterceptor {
+\treturn func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+\t\tdefer func() {
+\t\t\tif r := recover(); r != nil {
+\t\t\t\tsentry.CurrentHub().Recover(r)
+\t\t\t\terr = status.Error(codes.Internal, "internal error")
+\t\t\t}
+\t\t}()
+\t\treturn handler(ctx, req)
+\t}
+}`);
+  }
+  if (parts.length === 0) return "";
+  const code = parts.join("\n\n") + "\n";
+  return `package grpcserver
+
+${goImports(code, [["context", "context"], ["slog", "log/slog"], ["net", "net"], ["sync", "sync"], ["time", "time"]], [
+    ["sentry", "github.com/getsentry/sentry-go"],
+    ["prometheus", "github.com/prometheus/client_golang/prometheus"],
+    ["promauto", "github.com/prometheus/client_golang/prometheus/promauto"],
+    ["rate", "golang.org/x/time/rate"],
+    ["grpc", "google.golang.org/grpc"],
+    ["codes", "google.golang.org/grpc/codes"],
+    ["peer", "google.golang.org/grpc/peer"],
+    ["status", "google.golang.org/grpc/status"],
+  ])}
+
+${code}`;
+}
+
+function goGrpcMain(module: string, pkgPath: string, config: StackConfig, entities: Entity[], o: GoGrpcObs): string {
   const registrations = entities
     .map((e) => `\tpb.Register${e.name}ServiceServer(grpcSrv, grpcserver.New${e.name}Service())`)
     .join("\n");
 
-  return `package main
+  // Outermost first — same order as the REST middleware chain in go.ts goServer.
+  const unary = [
+    o.monitoring === "sentry" ? "grpcserver.SentryRecover()" : "",
+    o.monitoring === "datadog" ? "grpctrace.UnaryServerInterceptor(grpctrace.WithServiceName(cfg.AppName))" : "",
+    o.monitoring === "prometheus" ? "grpcserver.Metrics()" : "",
+    config.rateLimit ? "grpcserver.RateLimit()" : "",
+    config.audit ? "grpcserver.Audit(log)" : "",
+  ].filter(Boolean);
+  const opts = [
+    o.tracing ? "\t\tgrpc.StatsHandler(otelgrpc.NewServerHandler()), // one span per RPC" : "",
+    unary.length ? `\t\tgrpc.ChainUnaryInterceptor(\n${unary.map((u) => `\t\t\t${u},`).join("\n")}\n\t\t),` : "",
+  ].filter(Boolean);
+  const newServer = opts.length ? `grpc.NewServer(\n${opts.join("\n")}\n\t)` : "grpc.NewServer()";
 
-import (
-\t${imports}
-)
+  const deps = [
+    o.tracing ? `\tif shutdown, err := tracing.Init(context.Background(), cfg.AppName); err != nil {
+\t\tlog.Warn("tracing disabled", "err", err)
+\t} else {
+\t\tclosers = append(closers, shutdown)
+\t}` : "",
+    o.monitoring === "sentry" ? "\tclosers = append(closers, monitoring.InitSentry(log))" : "",
+    o.monitoring === "datadog" ? "\tclosers = append(closers, monitoring.InitDatadog(cfg.AppName, log))" : "",
+  ].filter(Boolean).join("\n");
 
-func main() {
-\taddr := ":" + getenv("PORT", "8080")
-\tlis, err := net.Listen("tcp", addr)
+  const prom = o.monitoring === "prometheus";
+  const code = `func main() {
+\tlog := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+\tslog.SetDefault(log)
+
+\tcfg, err := config.Load()
 \tif err != nil {
-\t\tlog.Fatalf("listen: %v", err)
+\t\tlog.Error("config", "err", err)
+\t\tos.Exit(1)
 \t}
 
-\tgrpcSrv := grpc.NewServer()
+\t// closers run in reverse on shutdown (tracing flush, APM stop).
+\tvar closers []func(context.Context) error
+${deps ? deps + "\n" : ""}
+\tlis, err := net.Listen("tcp", ":"+cfg.Port)
+\tif err != nil {
+\t\tlog.Error("listen", "err", err)
+\t\tos.Exit(1)
+\t}
 
-${registrations}
+\tgrpcSrv := ${newServer}
 
-\t// Standard gRPC health service — probes use grpc-health-probe or
+${registrations ? registrations + "\n\n" : ""}\t// Standard gRPC health service — probes use grpc-health-probe or
 \t// the grpc.health.v1.Health endpoint.
 \thealthSrv := health.NewServer()
 \thealthpb.RegisterHealthServer(grpcSrv, healthSrv)
@@ -113,12 +225,24 @@ ${registrations}
 
 \t// Server reflection makes tools like grpcurl / bloomrpc work without a proto file.
 \treflection.Register(grpcSrv)
-
-\tlog.Printf("gRPC server listening on %s", addr)
-
+${prom ? `
+\t// Prometheus scrapes this plain-HTTP listener; the gRPC port only speaks HTTP/2.
+\tmetricsAddr := ":" + os.Getenv("METRICS_PORT")
+\tif metricsAddr == ":" {
+\t\tmetricsAddr = ":9464"
+\t}
+\tmetricsSrv := &http.Server{Addr: metricsAddr, Handler: promhttp.Handler(), ReadHeaderTimeout: 10 * time.Second}
 \tgo func() {
+\t\tif err := metricsSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+\t\t\tlog.Error("metrics", "err", err)
+\t\t}
+\t}()
+` : ""}
+\tgo func() {
+\t\tlog.Info("gRPC server listening", "addr", lis.Addr().String())
 \t\tif err := grpcSrv.Serve(lis); err != nil {
-\t\t\tlog.Fatalf("serve: %v", err)
+\t\t\tlog.Error("serve", "err", err)
+\t\t\tos.Exit(1)
 \t\t}
 \t}()
 
@@ -126,18 +250,37 @@ ${registrations}
 \tdefer stop()
 \t<-ctx.Done()
 
-\tlog.Println("shutdown requested; draining connections")
+\tlog.Info("shutdown requested; draining connections")
 \thealthSrv.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 \tgrpcSrv.GracefulStop()
-}
 
-func getenv(k, def string) string {
-\tif v := os.Getenv(k); v != "" {
-\t\treturn v
+\tshutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+\tdefer cancel()
+${prom ? "\t_ = metricsSrv.Shutdown(shutdown)\n" : ""}\tfor i := len(closers) - 1; i >= 0; i-- {
+\t\tif err := closers[i](shutdown); err != nil {
+\t\t\tlog.Warn("shutdown", "err", err)
+\t\t}
 \t}
-\treturn def
 }
 `;
+  return `package main
+
+${goImports(code, [["context", "context"], ["errors", "errors"], ["slog", "log/slog"], ["net", "net"], ["http", "net/http"], ["os", "os"], ["signal", "os/signal"], ["syscall", "syscall"], ["time", "time"]], [
+    ["config", `${module}/internal/config`],
+    ["grpcserver", `${module}/internal/grpcserver`],
+    ["monitoring", `${module}/internal/monitoring`],
+    ["tracing", `${module}/internal/tracing`],
+    ["pb", pkgPath],
+    ["promhttp", "github.com/prometheus/client_golang/prometheus/promhttp"],
+    ["otelgrpc", "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"],
+    ["grpc", "google.golang.org/grpc"],
+    ["health", "google.golang.org/grpc/health"],
+    ["healthpb", "google.golang.org/grpc/health/grpc_health_v1"],
+    ["reflection", "google.golang.org/grpc/reflection"],
+    ["grpctrace", "gopkg.in/DataDog/dd-trace-go.v1/contrib/google.golang.org/grpc"],
+  ])}
+
+${code}`;
 }
 
 function goGrpcServer(pkg: string, pkgPath: string, _entities: Entity[]): string {

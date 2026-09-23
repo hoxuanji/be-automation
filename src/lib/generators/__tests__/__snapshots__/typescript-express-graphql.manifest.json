@@ -96,8 +96,8 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 25,
-    "size": 613
+    "lines": 19,
+    "size": 396
   },
   {
     "path": "graphql/schema.graphql",
@@ -106,8 +106,8 @@
   },
   {
     "path": "package.json",
-    "lines": 24,
-    "size": 526
+    "lines": 40,
+    "size": 1021
   },
   {
     "path": "prisma/seed.ts",
@@ -135,14 +135,34 @@
     "size": 2175
   },
   {
+    "path": "src/cache.ts",
+    "lines": 7,
+    "size": 220
+  },
+  {
     "path": "src/main.ts",
-    "lines": 22,
-    "size": 628
+    "lines": 70,
+    "size": 2694
+  },
+  {
+    "path": "src/middleware/audit.ts",
+    "lines": 20,
+    "size": 526
+  },
+  {
+    "path": "src/middleware/auth.ts",
+    "lines": 43,
+    "size": 1489
+  },
+  {
+    "path": "src/middleware/rate-limit.ts",
+    "lines": 19,
+    "size": 561
   },
   {
     "path": "src/resolvers.ts",
     "lines": 26,
-    "size": 805
+    "size": 796
   },
   {
     "path": "src/resolvers/post.ts",
@@ -161,8 +181,13 @@
   },
   {
     "path": "src/schema.ts",
-    "lines": 12,
-    "size": 518
+    "lines": 11,
+    "size": 503
+  },
+  {
+    "path": "src/tracing.ts",
+    "lines": 14,
+    "size": 650
   },
   {
     "path": "tests/api.contract.test.ts",
@@ -171,7 +196,12 @@
   },
   {
     "path": "tsconfig.json",
-    "lines": 16,
-    "size": 321
+    "lines": 27,
+    "size": 490
+  },
+  {
+    "path": "vitest.config.ts",
+    "lines": 8,
+    "size": 139
   }
 ]

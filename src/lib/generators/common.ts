@@ -287,7 +287,7 @@ must follow.
 
 \`\`\`bash
 # Local development
-curl -s http://localhost:4000/graphql \\
+curl -s http://localhost:8080/graphql \\
   -H 'Content-Type: application/json' \\
   -d '{"query":"{ health }"}'
 \`\`\`
@@ -367,6 +367,10 @@ function observabilityClaims(config: StackConfig): string[] {
   switch (config.monitoring) {
     case "grafana":
       out.push(`- Prometheus metrics at \`${metricsPath(config)}\`; \`deploy/prometheus.yml\` + a Grafana datasource are included${config.docker ? " and run via docker compose (Grafana on :3000)" : ""}.`);
+      // gRPC servers expose metrics on a separate plain-HTTP listener, not the gRPC port.
+      if (config.api === "grpc" && isGrpcSupported(lang)) {
+        out.push("- gRPC: metrics are served on `:9464/metrics` (`METRICS_PORT`), not the gRPC port — point the `deploy/prometheus.yml` target at `api:9464`.");
+      }
       break;
     case "datadog":
       out.push(full
