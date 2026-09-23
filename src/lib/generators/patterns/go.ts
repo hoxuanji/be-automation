@@ -1,6 +1,8 @@
 import type { Endpoint, Entity, StackConfig } from "../types";
 import type { PatternId } from "./index";
 import type { GeneratedFile } from "../types";
+import { safeName } from "../types";
+import { authProviderSpec } from "../auth/providers";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -134,25 +136,31 @@ function crudList(fw: Fw, table: string): string {
   return `${dbNilCheck(fw)}
 \tpage := ${x.queryInt("page", 1)}
 \tlimit := ${x.queryInt("limit", 20)}
-\tif page < 1 { page = 1 }
-\tif limit < 1 || limit > 100 { limit = 20 }
+\tif page < 1 {
+\t\tpage = 1
+\t}
+\tif limit < 1 || limit > 100 {
+\t\tlimit = 20
+\t}
 
 \tq := h.db.Table(${JSON.stringify(table)})
 \tif s := strings.TrimSpace(${x.queryStr("q")}); s != "" {
-\t\tq = q.Where("name ILIKE ?", "%"+s+"%")
+\t\tq = q.Where("LOWER(name) LIKE LOWER(?)", "%"+s+"%")
 \t}
 
 \tvar total int64
 \tq.Count(&total)
 
 \tvar rows []map[string]any
-\tif err := q.Order("created_at DESC").Offset((page-1)*limit).Limit(limit).Scan(&rows).Error; err != nil {
+\tif err := q.Order("created_at DESC").Offset((page - 1) * limit).Limit(limit).Scan(&rows).Error; err != nil {
 \t\th.log.Error("list", "table", ${JSON.stringify(table)}, "err", err)
 \t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
 \t}
 
 \tpages := (total + int64(limit) - 1) / int64(limit)
-\tif pages < 1 { pages = 1 }
+\tif pages < 1 {
+\t\tpages = 1
+\t}
 \t${x.retOK(mapLit(fw, ["data", "rows"], ["meta", meta]))}`;
 }
 
@@ -332,11 +340,11 @@ ${x.getBodyTyped("regReq")}
 
 function authMeFw(fw: Fw): string {
   const x = fwCtx(fw);
-  return `\tsub, ok := h.claimsFromContext(${fw === "gin" ? "c" : fw === "fiber" ? "c" : fw === "echo" ? "c" : "r"})
+  return `\tclaims, ok := h.claimsFromContext(${fw === "gin" ? "c" : fw === "fiber" ? "c" : fw === "echo" ? "c" : "r"})
 \tif !ok {
 \t\t${x.retErr("http.StatusUnauthorized", "missing_or_invalid_token")}
 \t}
-\t${x.retOK(mapLit(fw, ["sub", "sub"]))}`;
+\t${x.retOK(mapLit(fw, ["sub", "claims.Subject"], ["email", "claims.Email"]))}`;
 }
 
 function authLogout(fw: Fw): string {
@@ -375,10 +383,11 @@ ${x.getBodyTyped("cpReq")}
 \tif len(body.NewPassword) < 8 {
 \t\t${x.retErr("http.StatusBadRequest", "new password must be at least 8 characters")}
 \t}
-\tsub, ok := h.claimsFromContext(${fw === "gin" ? "c" : fw === "fiber" ? "c" : fw === "echo" ? "c" : "r"})
+\tclaims, ok := h.claimsFromContext(${fw === "gin" ? "c" : fw === "fiber" ? "c" : fw === "echo" ? "c" : "r"})
 \tif !ok {
 \t\t${x.retErr("http.StatusUnauthorized", "missing_or_invalid_token")}
 \t}
+\tsub := claims.Subject
 \tvar user struct{ PasswordHash string \`json:"password_hash"\` }
 \tif err := h.db.Table("users").Where("id = ?", sub).First(&user).Error; err != nil {
 \t\t${x.retErr("http.StatusNotFound", "user not found")}
@@ -418,7 +427,9 @@ function healthCheck(fw: Fw, config: StackConfig): string {
 \t\t}
 \t}
 \tstatus := http.StatusOK
-\tif dbStatus == "degraded" || cacheStatus == "degraded" { status = http.StatusServiceUnavailable }
+\tif dbStatus == "degraded" || cacheStatus == "degraded" {
+\t\tstatus = http.StatusServiceUnavailable
+\t}
 \t${x.sendJSON("status", checks)}`;
 }
 
@@ -495,7 +506,9 @@ fw === "fiber" || fw === "echo" ? `\theader, err := c.FormFile("file")
 \tdefer file.Close()
 \tmimeType := header.Header.Get("Content-Type")`}
 
-\tif mimeType == "" { mimeType = mime.TypeByExtension(filepath.Ext(header.Filename)) }
+\tif mimeType == "" {
+\t\tmimeType = mime.TypeByExtension(filepath.Ext(header.Filename))
+\t}
 \tallowed := ${allowedMimes}
 \tvalidMime := false
 \tfor _, m := range allowed { if m == mimeType { validMime = true; break } }
@@ -526,26 +539,32 @@ function paginatedSearch(fw: Fw, table: string): string {
 \tq := ${x.queryStr("q")}
 \tcursor := ${x.queryStr("cursor")}
 \tlimit := ${x.queryInt("limit", 20)}
-\tif limit < 1 || limit > 100 { limit = 20 }
+\tif limit < 1 || limit > 100 {
+\t\tlimit = 20
+\t}
 
 \tgq := h.db.Table(${JSON.stringify(table)})
 \tif q != "" {
-\t\tgq = gq.Where("name ILIKE ? OR description ILIKE ?", "%"+q+"%", "%"+q+"%")
+\t\tgq = gq.Where("LOWER(name) LIKE LOWER(?) OR LOWER(description) LIKE LOWER(?)", "%"+q+"%", "%"+q+"%")
 \t}
 \tif cursor != "" {
 \t\tgq = gq.Where("created_at < (SELECT created_at FROM ${table} WHERE id = ?)", cursor)
 \t}
 
 \tvar rows []map[string]any
-\tif err := gq.Order("created_at DESC").Limit(limit+1).Scan(&rows).Error; err != nil {
+\tif err := gq.Order("created_at DESC").Limit(limit + 1).Scan(&rows).Error; err != nil {
 \t\t${x.retErr("http.StatusInternalServerError", "search failed")}
 \t}
 
 \thasMore := len(rows) > limit
-\tif hasMore { rows = rows[:limit] }
+\tif hasMore {
+\t\trows = rows[:limit]
+\t}
 \tnextCursor := ""
 \tif hasMore && len(rows) > 0 {
-\t\tif id, ok := rows[len(rows)-1]["id"].(string); ok { nextCursor = id }
+\t\tif id, ok := rows[len(rows)-1]["id"].(string); ok {
+\t\t\tnextCursor = id
+\t\t}
 \t}
 \t${x.retOK(mapLit(fw, ["data", "rows"], ["next_cursor", "nextCursor"], ["has_more", "hasMore"]))}`;
 }
@@ -561,8 +580,12 @@ function aggregateStats(fw: Fw, table: string): string {
 \t\tSelect("DATE_TRUNC('day', created_at) AS period, COUNT(*) AS count, SUM(amount) AS total").
 \t\tGroup(groupBy).
 \t\tOrder("period DESC")
-\tif from != "" { gq = gq.Where("created_at >= ?", from) }
-\tif to != "" { gq = gq.Where("created_at <= ?", to) }
+\tif from != "" {
+\t\tgq = gq.Where("created_at >= ?", from)
+\t}
+\tif to != "" {
+\t\tgq = gq.Where("created_at <= ?", to)
+\t}
 
 \tvar rows []map[string]any
 \tif err := gq.Scan(&rows).Error; err != nil {
@@ -640,6 +663,15 @@ function customHandler(fw: Fw, e: Endpoint): string {
 
 function patternBody(pattern: string | undefined, fw: Fw, e: Endpoint, config: StackConfig, _entities: Entity[]): string {
   const table = inferTableName(e.path);
+  // Token design: with an external provider (Clerk, Auth0, ...) authRequired
+  // verifies provider-issued tokens via JWKS, so this service must not mint its
+  // own — credential endpoints answer 501 and auth_me reads the provider's
+  // claims. With auth "none" (self-managed) login/register/refresh mint HS256
+  // tokens with JWT_SECRET and authRequired verifies exactly those.
+  if (authProviderSpec(config) && ["auth_login", "auth_register", "auth_refresh", "auth_change_password"].includes(pattern ?? "")) {
+    return `\t// Credentials are managed by ${config.auth}; tokens minted here would fail JWKS verification.
+\t${fwCtx(fw).retErr("http.StatusNotImplemented", `handled_by_${config.auth}`)}`;
+  }
   switch (pattern as PatternId) {
     case "crud_list":    return crudList(fw, table);
     case "crud_get":     return crudGet(fw, table);
@@ -681,14 +713,14 @@ const GO_EXT: [string, string][] = [
   ["chi", "github.com/go-chi/chi/v5"],
 ];
 
-function buildImports(code: string): string {
+function buildImports(code: string, module: string): string {
   const pick = (list: [string, string][]) =>
     list
       .filter(([name]) => new RegExp(`\\b${name}\\.`).test(code))
       .map(([, path]) => `\t"${path}"`)
       .sort()
       .join("\n");
-  return `import (\n${pick(GO_STD)}\n\n${pick(GO_EXT)}\n)`;
+  return `import (\n${pick(GO_STD)}\n\n${pick([...GO_EXT, ["auth", `${module}/internal/auth`]])}\n)`;
 }
 
 // ── struct + helpers ──────────────────────────────────────────────────────────
@@ -697,7 +729,9 @@ function buildStruct(fw: Fw, methods: string, usesDb: boolean, usesRdb: boolean)
   const helpers: string[] = [];
   if (methods.includes("h.issueJWT(")) helpers.push(`func (h *APIHandlers) issueJWT(sub string) (string, error) {
 \tsecret := os.Getenv("JWT_SECRET")
-\tif secret == "" { return "", fmt.Errorf("JWT_SECRET not set") }
+\tif secret == "" {
+\t\treturn "", fmt.Errorf("JWT_SECRET not set")
+\t}
 \tclaims := jwt.MapClaims{
 \t\t"sub": sub,
 \t\t"iat": time.Now().Unix(),
@@ -707,23 +741,27 @@ function buildStruct(fw: Fw, methods: string, usesDb: boolean, usesRdb: boolean)
 }`);
   if (methods.includes("h.verifyRefreshToken(")) helpers.push(`func (h *APIHandlers) verifyRefreshToken(token string) (string, error) {
 \tsecret := os.Getenv("JWT_REFRESH_SECRET")
-\tif secret == "" { secret = os.Getenv("JWT_SECRET") }
+\tif secret == "" {
+\t\tsecret = os.Getenv("JWT_SECRET")
+\t}
 \tt, err := jwt.Parse(token, func(t *jwt.Token) (any, error) {
-\t\tif _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok { return nil, fmt.Errorf("unexpected signing method") }
+\t\tif _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+\t\t\treturn nil, fmt.Errorf("unexpected signing method")
+\t\t}
 \t\treturn []byte(secret), nil
 \t})
-\tif err != nil || !t.Valid { return "", fmt.Errorf("invalid token") }
+\tif err != nil || !t.Valid {
+\t\treturn "", fmt.Errorf("invalid token")
+\t}
 \tclaims, _ := t.Claims.(jwt.MapClaims)
 \tsub, _ := claims["sub"].(string)
 \treturn sub, nil
 }`);
-  if (methods.includes("h.claimsFromContext(")) helpers.push(`func (h *APIHandlers) claimsFromContext(${fw === "gin" ? "c *gin.Context" : fw === "fiber" ? "c *fiber.Ctx" : fw === "echo" ? "c echo.Context" : "r *http.Request"}) (string, bool) {
-\t// Sub is set by the auth middleware. Adapt to your JWT middleware's convention.
-\t${fw === "gin" ? `if sub, exists := c.Get("sub"); exists { if s, ok := sub.(string); ok { return s, true } }` :
-    fw === "fiber" ? `if sub, ok := c.Locals("sub").(string); ok && sub != "" { return sub, true }` :
-    fw === "echo" ? `if sub, ok := c.Get("sub").(string); ok && sub != "" { return sub, true }` :
-    `if sub := r.Context().Value("sub"); sub != nil { if s, ok := sub.(string); ok { return s, true } }`}
-\treturn "", false
+  if (methods.includes("h.claimsFromContext(")) helpers.push(`// claimsFromContext returns the claims authRequired verified and stored on the
+// request context. Mount these routes behind authRequired, otherwise it is
+// always false (401).
+func (h *APIHandlers) claimsFromContext(${fw === "gin" ? "c *gin.Context" : fw === "fiber" ? "c *fiber.Ctx" : fw === "echo" ? "c echo.Context" : "r *http.Request"}) (*auth.Claims, bool) {
+\treturn auth.FromContext(${fw === "gin" ? "c.Request.Context()" : fw === "fiber" ? "c.UserContext()" : fw === "echo" ? "c.Request().Context()" : "r.Context()"})
 }`);
   if (methods.includes("generateID(")) helpers.push(`func generateID() string {
 \treturn uuid.New().String()
@@ -775,7 +813,7 @@ export function goApiHandlersFile(
   const usesDb = /\bh\.db\b/.test(methods);
   const usesRdb = /\bh\.rdb\b/.test(methods);
   const structCode = buildStruct(framework, methods, usesDb, usesRdb);
-  const imports = buildImports(structCode + "\n" + methods);
+  const imports = buildImports(structCode + "\n" + methods, `github.com/your-username/${safeName(config.name)}`);
 
   return {
     file: {

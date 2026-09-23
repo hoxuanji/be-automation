@@ -22,6 +22,20 @@ const languageMeta: Record<
 // not claim more for them.
 const hasAppObservability = (l: StackConfig["language"]) => l === "go" || l === "typescript" || l === "python";
 
+// Whether the app exports OTLP traces. Go also turns tracing on when OTel is the
+// monitoring choice (go.ts: withTracing).
+const emitsOtel = (c: StackConfig) =>
+  hasAppObservability(c.language) && (c.tracing || (c.language === "go" && c.monitoring === "otel"));
+
+// Only the Go HTTP server implements /health?ready=1 (dependency pings); every
+// other stack answers readiness with plain /health.
+const readyPath = (c: StackConfig) =>
+  c.language === "go" && c.api !== "grpc" && c.api !== "graphql" ? "/health?ready=1" : "/health";
+
+// Self-managed auth (no provider): pattern login/register endpoints sign JWTs with JWT_SECRET.
+const selfIssuesJwt = (c: StackConfig, endpoints: Endpoint[]) =>
+  !authProviderSpec(c) && endpoints.some((e) => e.pattern?.startsWith("auth_"));
+
 const isRedisLike = (cache: string) => cache === "redis" || cache === "upstash" || cache === "dragonfly";
 const isJvm = (l: StackConfig["language"]) => l === "java" || l === "kotlin";
 
@@ -77,7 +91,7 @@ export function commonFiles(
 
   files.push({ path: "QUICKSTART.md", content: quickstart(config) });
   files.push({ path: "DEPLOY.md", content: deployGuide(config) });
-  files.push({ path: ".env.example", content: envExample(config) });
+  files.push({ path: ".env.example", content: envExample(config, endpoints) });
   files.push({ path: ".gitignore", content: gitignore(config.language) });
   files.push({
     path: ".editorconfig",
@@ -148,7 +162,7 @@ export function commonFiles(
     });
     files.push({
       path: "deploy/helm/templates/deployment.yaml",
-      content: helmDeploymentTemplate(),
+      content: helmDeploymentTemplate(config),
     });
     files.push({
       path: "deploy/helm/templates/service.yaml",
@@ -589,7 +603,7 @@ function buildEnvVarDocs(config: StackConfig): string {
   }
 
   if (isRedisLike(config.cache) || config.queue === "bullmq") {
-    lines.push(`| \`REDIS_URL\` | \`redis://localhost:6379\` | Redis connection URL. For Upstash, get from the Upstash console |`);
+    lines.push(`| \`REDIS_URL\` | \`redis://localhost:6379\` | Redis connection URL (Dragonfly speaks the Redis protocol — same URL format). For Upstash, get from the Upstash console |`);
   } else if (config.cache === "memcached") {
     lines.push(`| \`MEMCACHED_URL\` | \`localhost:11211\` | Memcached server address |`);
   }
@@ -604,8 +618,9 @@ function buildEnvVarDocs(config: StackConfig): string {
     lines.push(`| \`AWS_ENDPOINT_URL_SQS\` | \`http://localhost:9324\` | ElasticMQ (local SQS) endpoint — remove in production |`);
   }
 
-  if (config.tracing && hasAppObservability(config.language)) {
+  if (emitsOtel(config)) {
     lines.push(`| \`OTEL_EXPORTER_OTLP_ENDPOINT\` | \`http://localhost:4318\` | OTLP/HTTP endpoint that receives traces |`);
+    lines.push(`| \`OTEL_SERVICE_NAME\` | \`${safeName(config.name)}\` | service.name attached to every span |`);
   }
 
   const authSpec = authProviderSpec(config);
@@ -1176,8 +1191,8 @@ function buildDeployEnvVarList(config: StackConfig): string[] {
     vars.push("NATS_URL");
   }
 
-  if (config.tracing && hasAppObservability(config.language)) {
-    vars.push("OTEL_EXPORTER_OTLP_ENDPOINT");
+  if (emitsOtel(config)) {
+    vars.push("OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_SERVICE_NAME");
   }
 
   const authSpec = authProviderSpec(config);
@@ -1198,7 +1213,7 @@ function buildDeployEnvVarList(config: StackConfig): string[] {
   return vars;
 }
 
-function envExample(config: StackConfig) {
+function envExample(config: StackConfig, endpoints: Endpoint[]) {
   const lines = [
     `# ─── Runtime ──────────────────────────────────────────────────────────────────`,
     `# APP_NAME — human-readable name shown in logs and health-check responses.`,
@@ -1277,7 +1292,9 @@ function envExample(config: StackConfig) {
   if (isRedisLike(config.cache) || config.queue === "bullmq") {
     const where = config.cache === "upstash"
       ? "upstash.com → your database → REST API → REDIS_URL"
-      : "your local Redis (brew install redis) or Upstash/Railway";
+      : config.cache === "dragonfly"
+        ? "your local Dragonfly (docker compose `cache` service) — it speaks the Redis protocol, so any redis:// URL works"
+        : "your local Redis (brew install redis) or Upstash/Railway";
     lines.push(`# ─── ${isRedisLike(config.cache) ? `Cache (${config.cache})` : "Redis (BullMQ)"} ─────────────────────────────────────────────────────────`);
     lines.push(`# REDIS_URL — Required. Redis connection string.`);
     lines.push(`# Format: redis://:password@host:6379 (or rediss:// for TLS)`);
@@ -1319,10 +1336,19 @@ function envExample(config: StackConfig) {
     lines.push(``);
   }
 
-  if (config.tracing && hasAppObservability(config.language)) {
+  if (emitsOtel(config)) {
     lines.push(`# ─── Tracing (OpenTelemetry) ───────────────────────────────────────────────────`);
     lines.push(`# OTEL_EXPORTER_OTLP_ENDPOINT — OTLP/HTTP collector base URL (traces go to /v1/traces).`);
     lines.push(`OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`);
+    lines.push(`# OTEL_SERVICE_NAME — service.name attached to every span.`);
+    lines.push(`OTEL_SERVICE_NAME=${safeName(config.name)}`);
+    lines.push(``);
+  }
+
+  if (selfIssuesJwt(config, endpoints)) {
+    lines.push(`# ─── Auth (self-managed JWT) ───────────────────────────────────────────────────`);
+    lines.push(`# JWT_SECRET — Required. HMAC key used to sign and verify HS256 access tokens.`);
+    lines.push(`JWT_SECRET=change-me-to-a-long-random-string`);
     lines.push(``);
   }
 
@@ -1527,7 +1553,7 @@ ${healthcheck(`["CMD", "redis-cli", "ping"]`)}` });
     out.push({
       name: "otel-collector",
       gate: null,
-      apiEnv: config.tracing ? { OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318" } : undefined,
+      apiEnv: emitsOtel(config) ? { OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318", OTEL_SERVICE_NAME: safeName(config.name) } : undefined,
       body: `    image: otel/opentelemetry-collector-contrib:0.111.0
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes: ["./deploy/otel-collector.yaml:/etc/otelcol/config.yaml:ro"]
@@ -1627,6 +1653,9 @@ function k8sDeployment(config: StackConfig) {
   const probe = isGrpc
     ? `grpc: { port: 8080 }`
     : `httpGet: { path: /health, port: 8080 }`;
+  // Readiness pings dependencies where the app supports it; liveness stays on
+  // plain /health so a flaky database never restarts healthy pods.
+  const readyProbe = isGrpc ? probe : `httpGet: { path: "${readyPath(config)}", port: 8080 }`;
   const portName = isGrpc ? "grpc" : "http";
   const p = k8sProfile(config);
 
@@ -1673,7 +1702,7 @@ spec:
             failureThreshold: ${p.startupFailureThreshold}
             periodSeconds: ${p.startupPeriodSeconds}
           readinessProbe:
-            ${probe}
+            ${readyProbe}
             periodSeconds: 5
             timeoutSeconds: 2
           livenessProbe:
@@ -1988,7 +2017,18 @@ resources:
 ${bitnamiBlocks.join("")}`;
 }
 
-function helmDeploymentTemplate() {
+function helmDeploymentTemplate(config: StackConfig) {
+  const probes = config.api === "grpc"
+    ? `          readinessProbe:
+            grpc: { port: 8080 }
+          livenessProbe:
+            grpc: { port: 8080 }
+`
+    : `          readinessProbe:
+            httpGet: { path: "${readyPath(config)}", port: 8080 }
+          livenessProbe:
+            httpGet: { path: /health, port: 8080 }
+`;
   return `apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -2010,7 +2050,7 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           ports:
             - containerPort: 8080
-          resources:
+${probes}          resources:
 {{ toYaml .Values.resources | indent 12 }}
 `;
 }

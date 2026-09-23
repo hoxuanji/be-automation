@@ -1,5 +1,6 @@
 import type { Endpoint, Entity, GeneratedFile, StackConfig } from "./types";
-import { safeName, toPascal } from "./types";
+import { isGraphqlSupported, safeName, toPascal } from "./types";
+import { goAuthMode } from "./go";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -91,26 +92,29 @@ function goContractTests(config: StackConfig, endpoints: Endpoint[]): string {
   const isFiber = config.framework === "fiber";
   const needsStrings = endpoints.some((e) => ["POST", "PUT", "PATCH"].includes(e.method));
 
+  // With a real verifier (goAuthMode) protected routes must reject a request
+  // without a valid token; with auth off they behave like public routes.
+  const authEnforced = goAuthMode(config, endpoints) !== "off";
+
   const testServerSetup = isFiber
-    ? `\tsrv := server.New(cfg, slog.Default())\n\tts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tsrv.App().Handler()(w, r)\n\t}))`
+    ? `\tsrv := server.New(cfg, slog.Default())\n\tts = httptest.NewServer(adaptor.FiberApp(srv.App()))`
     : `\tsrv := server.New(cfg, slog.Default())\n\tts = httptest.NewServer(srv.Handler())`;
 
-  const fiberImport = isFiber ? `\t"net/http"\n` : "";
+  const fiberImport = isFiber ? `\n\t"github.com/gofiber/fiber/v2/middleware/adaptor"\n` : "";
 
   const tests = endpoints.map((ep) => {
     const testPath = pathToParam(ep.path);
-    const status = expectedStatus(ep.method, ep.auth);
-    const authLine = ep.auth ? `\n\treq.Header.Set("Authorization", "Bearer test-token")` : "";
+    const status = ep.auth && authEnforced ? 401 : expectedStatus(ep.method, ep.auth);
     const bodyLine = ["POST", "PUT", "PATCH"].includes(ep.method)
       ? `\tbody := strings.NewReader("{}")\n\treq, err := http.NewRequest("${ep.method}", ts.URL+"${testPath}", body)`
       : `\treq, err := http.NewRequest("${ep.method}", ts.URL+"${testPath}", nil)`;
     return `
 func Test${toPascal(ep.method)}${toPascal(ep.path.replace(/[/:]/g, "_"))}(t *testing.T) {
 \t// ${ep.summary}
-\t${bodyLine}
+${bodyLine}
 \tif err != nil {
 \t\tt.Fatalf("build request: %v", err)
-\t}${authLine}
+\t}
 \tresp, err := http.DefaultClient.Do(req)
 \tif err != nil {
 \t\tt.Fatalf("request failed: %v", err)
@@ -133,9 +137,8 @@ import (
 \t"net/http"
 \t"net/http/httptest"
 \t"os"
-${needsStrings ? '\t"strings"\n' : ""}${fiberImport}
-\t"testing"
-
+${needsStrings ? '\t"strings"\n' : ""}\t"testing"
+${fiberImport}
 \t"${module}/internal/config"
 \t"${module}/internal/server"
 )
@@ -143,7 +146,10 @@ ${needsStrings ? '\t"strings"\n' : ""}${fiberImport}
 var ts *httptest.Server
 
 func TestMain(m *testing.M) {
-\tcfg := config.New() // reads from env; defaults work for tests
+\tcfg, err := config.Load() // reads from env; defaults work for tests
+\tif err != nil {
+\t\tpanic(err)
+\t}
 ${testServerSetup}
 \tcode := m.Run()
 \tts.Close()
@@ -323,6 +329,8 @@ export function contractTestFiles(
     case "typescript":
       return [{ path: "tests/api.contract.test.ts", content: tsContractTests(config, endpoints) }];
     case "go":
+      // gRPC / GraphQL stacks have no internal/server HTTP router to test.
+      if (config.api === "grpc" || (config.api === "graphql" && isGraphqlSupported("go"))) return [];
       return [{ path: "internal/api/contract/contract_test.go", content: goContractTests(config, endpoints) }];
     case "python":
       return [{ path: "tests/test_contracts.py", content: pythonContractTests(config, endpoints) }];

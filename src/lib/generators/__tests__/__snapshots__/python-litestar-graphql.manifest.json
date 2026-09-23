@@ -6,8 +6,8 @@
   },
   {
     "path": ".env.example",
-    "lines": 41,
-    "size": 2198
+    "lines": 43,
+    "size": 2284
   },
   {
     "path": ".github/workflows/ci.yml",
@@ -66,8 +66,8 @@
   },
   {
     "path": "deploy/helm/templates/deployment.yaml",
-    "lines": 24,
-    "size": 547
+    "lines": 28,
+    "size": 702
   },
   {
     "path": "deploy/helm/templates/hpa.yaml",
@@ -87,7 +87,7 @@
   {
     "path": "deploy/k8s/deployment.yaml",
     "lines": 63,
-    "size": 2037
+    "size": 2039
   },
   {
     "path": "deploy/k8s/hpa.yaml",
@@ -106,8 +106,8 @@
   },
   {
     "path": "deploy/k8s/secrets.example.env",
-    "lines": 21,
-    "size": 471
+    "lines": 22,
+    "size": 490
   },
   {
     "path": "deploy/k8s/service.yaml",
@@ -151,8 +151,8 @@
   },
   {
     "path": "QUICKSTART.md",
-    "lines": 106,
-    "size": 2544
+    "lines": 107,
+    "size": 2675
   },
   {
     "path": "README.md",
