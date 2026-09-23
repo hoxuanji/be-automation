@@ -101,8 +101,8 @@
   },
   {
     "path": "package.json",
-    "lines": 41,
-    "size": 1021
+    "lines": 48,
+    "size": 1293
   },
   {
     "path": "prisma/schema.prisma",
@@ -136,13 +136,13 @@
   },
   {
     "path": "src/app.controller.ts",
-    "lines": 33,
-    "size": 615
+    "lines": 38,
+    "size": 774
   },
   {
     "path": "src/app.module.ts",
-    "lines": 8,
-    "size": 309
+    "lines": 14,
+    "size": 545
   },
   {
     "path": "src/auth/jwt.guard.ts",
@@ -150,9 +150,24 @@
     "size": 1761
   },
   {
+    "path": "src/cache.ts",
+    "lines": 7,
+    "size": 220
+  },
+  {
+    "path": "src/db.ts",
+    "lines": 4,
+    "size": 90
+  },
+  {
     "path": "src/main.ts",
-    "lines": 32,
-    "size": 1146
+    "lines": 37,
+    "size": 1328
+  },
+  {
+    "path": "src/middleware/audit.ts",
+    "lines": 22,
+    "size": 697
   },
   {
     "path": "src/modules/post/post.controller.spec.ts",
@@ -197,12 +212,12 @@
   {
     "path": "src/repositories/post.repository.ts",
     "lines": 32,
-    "size": 983
+    "size": 995
   },
   {
     "path": "src/repositories/user.repository.ts",
     "lines": 32,
-    "size": 983
+    "size": 995
   },
   {
     "path": "src/services/post.service.ts",
@@ -213,6 +228,11 @@
     "path": "src/services/user.service.ts",
     "lines": 23,
     "size": 602
+  },
+  {
+    "path": "src/tracing.ts",
+    "lines": 14,
+    "size": 650
   },
   {
     "path": "src/validators/post.validator.ts",

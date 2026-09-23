@@ -4,7 +4,7 @@ import { pyGrpcFiles } from "./grpc/python";
 import { pythonGraphqlFiles } from "./graphql/python";
 import { isGraphqlSupported } from "./types";
 import { needsAuth } from "./auth/providers";
-import { pyPatternRoute, pyPatternImports } from "./patterns/python";
+import { pyPatternRoute, pyPatternImports, pyHasRedis } from "./patterns/python";
 
 export function pythonFiles(
   config: StackConfig,
@@ -86,6 +86,25 @@ settings = Settings()
 
   if (withAuth) {
     files.push({ path: "app/auth.py", content: pyAuthModule() });
+  }
+
+  if (pyHasRedis(config)) {
+    files.push({
+      path: "app/cache.py",
+      content: `"""Shared async Redis client (Redis, Dragonfly or Upstash via rediss://)."""
+import os
+
+import redis.asyncio as redis
+
+redis_client = redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=True)
+`,
+    });
+  }
+  if (config.tracing && config.framework !== "django") {
+    files.push({ path: "app/tracing.py", content: pyTracingModule(config.name) });
+  }
+  if (config.audit) {
+    files.push({ path: "app/audit.py", content: config.framework === "django" ? djangoAuditModule() : asgiAuditModule() });
   }
 
   files.push({
@@ -170,6 +189,15 @@ from .config import settings
 log = logging.getLogger(__name__)
 
 _url = settings.database_url or "sqlite:///./app.db"
+# Map the URLs used in .env to SQLAlchemy dialect+driver URLs: SQLAlchemy 2
+# rejects "postgres://", MySQL needs an explicit driver, and "file:" is the
+# Prisma-style SQLite form.
+for _prefix, _replacement in (("postgres://", "postgresql+psycopg2://"),
+                              ("mysql://", "mysql+pymysql://"),
+                              ("file:", "sqlite:///")):
+    if _url.startswith(_prefix):
+        _url = _replacement + _url[len(_prefix):]
+        break
 _is_sqlite = "sqlite" in _url
 
 _engine_kwargs = {
@@ -372,25 +400,40 @@ function saColType(t: FieldType, isPostgres: boolean): string {
 
 function pyproject(config: StackConfig, withModels = false, withAuth = false) {
   const isPostgres = /postgres|neon|supabase|cockroach/.test(config.database);
+  const isMysql = /mysql|planetscale/.test(config.database);
+  // db.py uses a sync SQLAlchemy engine, so the drivers are the sync ones:
+  // psycopg2 for Postgres, PyMySQL for MySQL, stdlib sqlite3 otherwise.
   const sqlDeps = withModels && !(/mongo/.test(config.database))
-    ? `\nsqlalchemy = "^2.0.0"\nalembic = "^1.13.0"\n${isPostgres ? `psycopg2-binary = "^2.9.0"\n` : `aiosqlite = "^0.20.0"\n`}`
+    ? `\nsqlalchemy = "^2.0.0"\nalembic = "^1.13.0"\n${isPostgres ? `psycopg2-binary = "^2.9.0"\n` : isMysql ? `pymysql = "^1.1.1"\n` : ""}`
     : "";
   const authDeps = withAuth
     ? `\npyjwt = { version = "^2.9.0", extras = ["crypto"] }`
     : "";
-  const monDeps = /prometheus|grafana/.test(config.monitoring) && config.framework === "fastapi"
-    ? `\nprometheus-fastapi-instrumentator = "^7.0.0"`
-    : /sentry/.test(config.monitoring)
-    ? `\nsentry-sdk = { version = "^2.19.0", extras = ["fastapi"] }`
-    : /datadog/.test(config.monitoring)
-    ? `\nddtrace = "^2.14.0"`
-    : "";
+  const fw = config.framework;
+  const extra: string[] = [];
+  if (/prometheus|grafana/.test(config.monitoring)) {
+    extra.push(fw === "fastapi" ? `prometheus-fastapi-instrumentator = "^7.0.0"` : fw === "litestar" ? `prometheus-client = "^0.21.0"` : `django-prometheus = "^2.3.1"`);
+  } else if (/sentry/.test(config.monitoring)) {
+    extra.push(fw === "fastapi" ? `sentry-sdk = { version = "^2.19.0", extras = ["fastapi"] }` : `sentry-sdk = "^2.19.0"`);
+  } else if (/datadog/.test(config.monitoring)) {
+    extra.push(`ddtrace = "^2.14.0"`);
+  }
+  if (config.rateLimit && fw === "fastapi") extra.push(`slowapi = "^0.1.9"`);
+  if (config.tracing && fw !== "django") {
+    extra.push(
+      `opentelemetry-sdk = "~1.29.0"`,
+      `opentelemetry-exporter-otlp-proto-http = "~1.29.0"`,
+      fw === "fastapi" ? `opentelemetry-instrumentation-fastapi = "~0.50b0"` : `opentelemetry-instrumentation-asgi = "~0.50b0"`,
+    );
+  }
+  if (pyHasRedis(config)) extra.push(`redis = "^5.2.0"`);
+  const monDeps = extra.map((l) => `\n${l}`).join("");
   const deps =
     config.framework === "fastapi"
       ? `fastapi = "^0.115.0"\nuvicorn = { extras = ["standard"], version = "^0.30.0" }\npydantic = "^2.9.0"\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}${monDeps}`
       : config.framework === "litestar"
-      ? `litestar = { extras = ["standard"], version = "^2.12.0" }\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}`
-      : `django = "^5.1.0"\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}`;
+      ? `litestar = { extras = ["standard"], version = "^2.12.0" }\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}${monDeps}`
+      : `django = "^5.1.0"\nuvicorn = { extras = ["standard"], version = "^0.30.0" }\npydantic-settings = "^2.5.0"${sqlDeps}${authDeps}${monDeps}`;
   return `[tool.poetry]
 name = "${config.name}"
 version = "0.1.0"
@@ -505,9 +548,142 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
 `;
 }
 
+function pyTracingModule(name: string): string {
+  return `"""OpenTelemetry tracing — spans are exported over OTLP/HTTP.
+
+The exporter reads OTEL_EXPORTER_OTLP_ENDPOINT (default http://localhost:4318).
+"""
+import os
+
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+
+def configure_tracing() -> None:
+    provider = TracerProvider(
+        resource=Resource.create({"service.name": os.environ.get("OTEL_SERVICE_NAME", ${JSON.stringify(name)})})
+    )
+    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+    trace.set_tracer_provider(provider)
+`;
+}
+
+function asgiAuditModule(): string {
+  return `"""Audit log — one structured log line per HTTP request.
+
+Plain ASGI middleware, so it works with FastAPI (app.add_middleware) and
+Litestar (middleware=[...]) alike.
+"""
+import logging
+
+log = logging.getLogger("audit")
+
+
+class AuditMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        status = {"code": 500}
+
+        async def _send(message):
+            if message["type"] == "http.response.start":
+                status["code"] = message["status"]
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        finally:
+            client = scope.get("client")
+            log.info("audit", extra={
+                "event": "audit",
+                "method": scope["method"],
+                "path": scope["path"],
+                "status": status["code"],
+                "ip": client[0] if client else None,
+            })
+`;
+}
+
+function djangoAuditModule(): string {
+  return `"""Audit log — one structured log line per HTTP request."""
+import logging
+
+log = logging.getLogger("audit")
+
+
+class AuditMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        user = getattr(request, "user", None)
+        log.info("audit", extra={
+            "event": "audit",
+            "method": request.method,
+            "path": request.path,
+            "status": response.status_code,
+            "user_id": getattr(user, "pk", None),
+            "ip": request.META.get("REMOTE_ADDR"),
+        })
+        return response
+`;
+}
+
+// Monitoring / tracing / rate-limit / audit wiring shared by both FastAPI
+// entrypoints. `top` runs before the app exists; `after` runs right after.
+function fastapiWiring(config: StackConfig): { top: string; after: string } {
+  const top: string[] = [];
+  const after: string[] = [];
+  if (/sentry/.test(config.monitoring)) {
+    top.push(`import os\nimport sentry_sdk\n\n# Initialised before the app so the FastAPI integration can hook in.\nsentry_sdk.init(dsn=os.environ.get("SENTRY_DSN"), traces_sample_rate=1.0)`);
+  }
+  if (/prometheus|grafana/.test(config.monitoring)) {
+    after.push(`from prometheus_fastapi_instrumentator import Instrumentator\nInstrumentator().instrument(app).expose(app)  # GET /metrics`);
+  }
+  if (config.rateLimit) {
+    after.push(`from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
+
+# 60 requests / minute / client IP, in-memory. Pass storage_uri="redis://…" to share across replicas.
+app.state.limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)`);
+  }
+  if (config.audit) {
+    after.push(`from .audit import AuditMiddleware\napp.add_middleware(AuditMiddleware)`);
+  }
+  if (config.tracing) {
+    after.push(`from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from .tracing import configure_tracing
+
+configure_tracing()
+FastAPIInstrumentor.instrument_app(app)`);
+  }
+  return {
+    top: top.length ? "\n" + top.join("\n\n") + "\n" : "",
+    after: after.length ? "\n" + after.join("\n\n") + "\n" : "",
+  };
+}
+
+// ddtrace.auto must be the very first import: it patches libraries as they load.
+function ddtracePreamble(config: StackConfig): string {
+  return /datadog/.test(config.monitoring) ? "import ddtrace.auto  # noqa: F401 — must stay the first import\n" : "";
+}
+
 function appMain(config: StackConfig, endpoints: Endpoint[], entities: Entity[], withAuth = false) {
   if (config.framework === "fastapi") {
-    const patternExtraImports = pyPatternImports(endpoints).join("\n");
+    const patternExtraImports = pyPatternImports(endpoints, config, entities).join("\n");
+    const wiring = fastapiWiring(config);
     const routes = endpoints
       .map((e) => {
         if (e.pattern) return pyPatternRoute(e, "fastapi", config, entities);
@@ -529,17 +705,20 @@ async def ${handlerName(e)}(${paramsDecl}):
         .map((e) => `app.include_router(${toSnake(e.name)}.router)`)
         .join("\n");
 
-      return `from fastapi import FastAPI, Depends, HTTPException, Header
+      return `${ddtracePreamble(config)}from fastapi import FastAPI, Depends, HTTPException, Header
 from .config import settings
 from .db import engine
+from .logging_config import configure_logging
 from .models import Base
 ${withAuth ? "from .auth import auth_required\n" : ""}${routerImports}
 ${patternExtraImports}
 
+configure_logging()
+${wiring.top}
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title=settings.app_name)
-
+${wiring.after}
 ${routerIncludes}
 
 
@@ -551,7 +730,7 @@ ${routes}
 `;
     }
 
-    return `from contextlib import asynccontextmanager
+    return `${ddtracePreamble(config)}from contextlib import asynccontextmanager
 import math
 from typing import Optional
 
@@ -564,7 +743,7 @@ ${withAuth ? "from .auth import auth_required\n" : ""}${patternExtraImports}
 
 
 configure_logging()
-
+${wiring.top}
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -583,17 +762,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
-${/prometheus|grafana/.test(config.monitoring) ? `
-from prometheus_fastapi_instrumentator import Instrumentator
-Instrumentator().instrument(app).expose(app)
-` : /sentry/.test(config.monitoring) ? `
-import sentry_sdk
-sentry_sdk.init(dsn=settings.sentry_dsn if hasattr(settings, "sentry_dsn") else None, traces_sample_rate=1.0)
-` : /datadog/.test(config.monitoring) ? `
-from ddtrace.contrib.asgi import TraceMiddleware
-from starlette.middleware import Middleware
-app.add_middleware(TraceMiddleware)
-` : ""}
+${wiring.after}
 
 @app.get("/health")
 async def health():
@@ -603,10 +772,27 @@ ${routes}
 `;
   }
   if (config.framework === "litestar") {
-    return `from contextlib import asynccontextmanager
+    const prom = /prometheus|grafana/.test(config.monitoring);
+    const middleware = [
+      config.rateLimit ? "RateLimitConfig(rate_limit=(\"minute\", 60)).middleware" : "",
+      prom ? "PrometheusConfig().middleware" : "",
+      config.tracing ? "OpenTelemetryConfig().middleware" : "",
+      config.audit ? "AuditMiddleware" : "",
+    ].filter(Boolean);
+    return `${ddtracePreamble(config)}from contextlib import asynccontextmanager
 
 from litestar import Litestar, get
+${config.rateLimit ? "from litestar.middleware.rate_limit import RateLimitConfig\n" : ""}${prom ? "from litestar.contrib.prometheus import PrometheusConfig, PrometheusController\n" : ""}${config.tracing ? "from litestar.contrib.opentelemetry import OpenTelemetryConfig\n" : ""}
+from .logging_config import configure_logging
+${config.audit ? "from .audit import AuditMiddleware\n" : ""}${config.tracing ? "from .tracing import configure_tracing\n" : ""}
+configure_logging()
+${config.tracing ? "configure_tracing()\n" : ""}${/sentry/.test(config.monitoring) ? `
+import os
+import sentry_sdk
 
+# Initialised before the app; sentry-sdk auto-enables its Litestar integration.
+sentry_sdk.init(dsn=os.environ.get("SENTRY_DSN"), traces_sample_rate=1.0)
+` : ""}
 
 @asynccontextmanager
 async def lifespan(_app: Litestar):
@@ -620,18 +806,57 @@ async def health() -> dict:
     return {"ok": True}
 
 
-app = Litestar(route_handlers=[health], lifespan=[lifespan])
+app = Litestar(
+    route_handlers=[health${prom ? ", PrometheusController" : ""}],
+    lifespan=[lifespan],
+    logging_config=None,  # keep the JSON root handler from configure_logging()
+${middleware.length ? `    middleware=[${middleware.join(", ")}],\n` : ""})
 `;
   }
-  // django minimal
-  return `# Minimal Django entrypoint — see deploy/k8s for production setup
-from django.http import JsonResponse
-from django.urls import path
+  // Django: single-module project so `uvicorn app.main:app` (the Dockerfile
+  // CMD) serves it without a separate settings package.
+  const prom = /prometheus|grafana/.test(config.monitoring);
+  const djMiddleware = [
+    prom ? `"django_prometheus.middleware.PrometheusBeforeMiddleware"` : "",
+    config.audit ? `"app.audit.AuditMiddleware"` : "",
+    prom ? `"django_prometheus.middleware.PrometheusAfterMiddleware"` : "",
+  ].filter(Boolean);
+  return `${ddtracePreamble(config)}import os
+
+from django.conf import settings
+
+from .logging_config import configure_logging
+
+configure_logging()
+${/sentry/.test(config.monitoring) ? `
+import sentry_sdk
+
+# sentry-sdk auto-enables its Django integration.
+sentry_sdk.init(dsn=os.environ.get("SENTRY_DSN"), traces_sample_rate=1.0)
+` : ""}
+settings.configure(
+    DEBUG=os.environ.get("DEBUG") == "1",
+    SECRET_KEY=os.environ.get("DJANGO_SECRET_KEY", "insecure-dev-only-set-DJANGO_SECRET_KEY"),
+    ALLOWED_HOSTS=os.environ.get("ALLOWED_HOSTS", "*").split(","),
+    ROOT_URLCONF=__name__,
+    INSTALLED_APPS=[${prom ? `"django_prometheus"` : ""}],
+    MIDDLEWARE=[${djMiddleware.join(", ")}],
+)
+
+from django.core.asgi import get_asgi_application  # noqa: E402 — needs settings
+from django.http import JsonResponse  # noqa: E402
+from django.urls import ${prom ? "include, " : ""}path  # noqa: E402
+
 
 def health(_):
     return JsonResponse({"ok": True})
 
-urlpatterns = [path("health", health)]
+
+urlpatterns = [
+    path("health", health),
+${prom ? `    path("", include("django_prometheus.urls")),  # GET /metrics\n` : ""}]
+
+app = get_asgi_application()
 `;
 }
 

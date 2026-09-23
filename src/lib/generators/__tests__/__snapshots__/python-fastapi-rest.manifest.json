@@ -40,9 +40,19 @@
     "size": 0
   },
   {
+    "path": "app/audit.py",
+    "lines": 37,
+    "size": 1045
+  },
+  {
     "path": "app/auth.py",
     "lines": 66,
     "size": 2220
+  },
+  {
+    "path": "app/cache.py",
+    "lines": 7,
+    "size": 227
   },
   {
     "path": "app/config.py",
@@ -51,8 +61,8 @@
   },
   {
     "path": "app/db.py",
-    "lines": 65,
-    "size": 1837
+    "lines": 74,
+    "size": 2307
   },
   {
     "path": "app/logging_config.py",
@@ -61,8 +71,8 @@
   },
   {
     "path": "app/main.py",
-    "lines": 41,
-    "size": 926
+    "lines": 66,
+    "size": 1859
   },
   {
     "path": "app/models.py",
@@ -83,6 +93,11 @@
     "path": "app/routers/user.py",
     "lines": 63,
     "size": 1619
+  },
+  {
+    "path": "app/tracing.py",
+    "lines": 20,
+    "size": 719
   },
   {
     "path": "DEPLOY.md",
@@ -171,8 +186,8 @@
   },
   {
     "path": "pyproject.toml",
-    "lines": 28,
-    "size": 612
+    "lines": 33,
+    "size": 779
   },
   {
     "path": "QUICKSTART.md",

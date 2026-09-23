@@ -40,9 +40,19 @@
     "size": 0
   },
   {
+    "path": "app/audit.py",
+    "lines": 23,
+    "size": 655
+  },
+  {
     "path": "app/auth.py",
     "lines": 66,
     "size": 2220
+  },
+  {
+    "path": "app/cache.py",
+    "lines": 7,
+    "size": 227
   },
   {
     "path": "app/config.py",
@@ -56,8 +66,8 @@
   },
   {
     "path": "app/main.py",
-    "lines": 9,
-    "size": 226
+    "lines": 33,
+    "size": 954
   },
   {
     "path": "app/models.py",
@@ -151,8 +161,8 @@
   },
   {
     "path": "pyproject.toml",
-    "lines": 25,
-    "size": 487
+    "lines": 28,
+    "size": 590
   },
   {
     "path": "QUICKSTART.md",
