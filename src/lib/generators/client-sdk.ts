@@ -117,7 +117,7 @@ function pyEndpointFn(e: Endpoint): string {
     ? `\n        if self._token:\n            kwargs.setdefault("headers", {})["Authorization"] = f"Bearer {self._token}"`
     : "";
 
-  return `    def ${name}(self, ${args.join(", ")}) -> httpx.Response:
+  return `    def ${name}(${args.join(", ")}) -> httpx.Response:
         """${e.method} ${e.path}${e.summary ? ` — ${e.summary}` : ""}"""${headers}${bodyLine}
         return self._request("${e.method}", ${pathExpr}, **kwargs)`;
 }
@@ -173,7 +173,7 @@ export function clientSdkFiles(name: string, endpoints: Endpoint[]): GeneratedFi
       content: clientSdkTs(baseUrl, endpoints),
     },
     {
-      path: `sdk/${name}_client.py`,
+      path: `sdk/${name.replace(/-/g, "_")}_client.py`, // must be a valid Python module name
       content: clientSdkPy(baseUrl, endpoints),
     },
   ];

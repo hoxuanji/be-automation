@@ -172,8 +172,17 @@ jobs:
         if: matrix.combo.language == 'python'
         working-directory: /tmp/smoke-repo
         run: |
-          pip install -r requirements.txt -q
-          python -m py_compile $(find . -name "*.py" -not -path "./.venv/*" | head -20)
+          # Generated Python repos use Poetry (pyproject.toml), same as their Dockerfile.
+          set -o pipefail
+          {
+            pip install -q poetry==1.8.3 &&
+            poetry config virtualenvs.create false &&
+            poetry install --no-root &&
+            python -m py_compile $(find . -name "*.py" -not -path "./.venv/*" | head -20)
+          } 2>&1 | tee /tmp/py.log || {
+            grep -iE "error|failed|because|not found|No such" /tmp/py.log | head -25 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
 
       - name: Setup Java
         if: matrix.combo.language == 'java' || matrix.combo.language == 'kotlin'
@@ -193,8 +202,13 @@ jobs:
         if: matrix.combo.language == 'kotlin'
         working-directory: /tmp/smoke-repo
         run: |
-          chmod +x gradlew 2>/dev/null || true
-          ./gradlew compileKotlin -q 2>/dev/null || gradle compileKotlin -q
+          gradle --version | grep -E "^Gradle"
+          set -o pipefail
+          if [ -x ./gradlew ]; then GRADLE=./gradlew; else GRADLE=gradle; fi
+          $GRADLE compileKotlin -q 2>&1 | tee /tmp/gradle.log || {
+            grep -E "^e: |What went wrong|> |error:" /tmp/gradle.log | head -25 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
 
       - name: Setup Rust
         if: matrix.combo.language == 'rust'

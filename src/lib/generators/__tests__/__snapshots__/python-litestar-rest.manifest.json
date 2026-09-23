@@ -180,9 +180,9 @@
     "size": 1962
   },
   {
-    "path": "sdk/test-app_client.py",
+    "path": "sdk/test_app_client.py",
     "lines": 65,
-    "size": 2338
+    "size": 2308
   },
   {
     "path": "sdk/test-app-client.ts",

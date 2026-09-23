@@ -86,7 +86,7 @@ function ktorBuildGradle(safeName: string, withAuth = false, mysql = false, metr
   return `plugins {
     kotlin("jvm") version "2.0.21"
     kotlin("plugin.serialization") version "2.0.21"
-    id("com.github.johnrengelman.shadow") version "8.1.1"
+    id("com.gradleup.shadow") version "8.3.5"
     application
 }
 
