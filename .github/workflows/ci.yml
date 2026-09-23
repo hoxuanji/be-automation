@@ -20,7 +20,9 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-      - run: npm ci
+      - run: npm ci 2>&1 | tee /tmp/npmci.log; exit ${PIPESTATUS[0]}
+      - if: failure()
+        run: grep -iE "npm (error|ERR)" /tmp/npmci.log | head -25 | while IFS= read -r l; do echo "::error::$l"; done
       - run: npm run lint
 
   typecheck:
