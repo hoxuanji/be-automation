@@ -20,7 +20,7 @@ export function goFiles(
 
   if (config.api === "grpc") {
     const files: GeneratedFile[] = [];
-    files.push({ path: "Dockerfile", content: goDockerfile() });
+    files.push({ path: "Dockerfile", content: goDockerfile("grpc") });
     files.push({ path: "internal/config/config.go", content: goConfig() });
     files.push(...goGrpcFiles(config, entities));
     // `make proto` output (gen/go, not in the zip) imports protobuf.
@@ -31,7 +31,9 @@ export function goFiles(
   // GraphQL: the REST server (router, middleware, observability) with no
   // routes of its own, plus gqlgen mounted on that same router.
   if (config.api === "graphql" && isGraphqlSupported(config.language)) {
-    const rest = goFiles({ ...config, api: "rest" }, [], []).filter((f) => f.path !== "go.mod");
+    const rest = goFiles({ ...config, api: "rest" }, [], [])
+      .filter((f) => f.path !== "go.mod")
+      .map((f) => (f.path === "Dockerfile" ? { ...f, content: goDockerfile("graphql") } : f));
     const files = goGraphqlFiles(config, entities, rest);
     // gqlgen's generated code (graph/generated.go, not in the zip) imports gqlparser.
     files.push({ path: "go.mod", content: goMod(module, files, [...migrate, "github.com/vektah/gqlparser/v2"]) });
@@ -59,7 +61,7 @@ export function goFiles(
 
   const deps: GoDeps = { fw, kind, isSQL, needsGorm, docStore, withRedis, withTracing, monitoring, api };
 
-  files.push({ path: "Dockerfile", content: goDockerfile() });
+  files.push({ path: "Dockerfile", content: goDockerfile(config.api) });
   files.push({ path: "cmd/api/main.go", content: goMain(module) });
   files.push({ path: "internal/config/config.go", content: goConfig(kind === "mongo") });
   files.push({ path: "internal/server/server.go", content: goServer(module, config, endpoints, entities, deps) });
@@ -1881,14 +1883,22 @@ function buildGORMTags(f: { type: FieldType; primaryKey?: boolean; unique: boole
   return tags.join(" ");
 }
 
-function goDockerfile() {
+// gRPC and GraphQL code (gen/go, graph/generated.go) isn't shipped in the zip, so the
+// image build must generate it before `go build` — same as `make proto` / `make gql`.
+function goDockerfile(api: StackConfig["api"] = "rest") {
+  const codegen =
+    api === "grpc"
+      ? "COPY --from=bufbuild/buf:1.47.2 /usr/local/bin/buf /usr/local/bin/buf\nRUN buf generate\n"
+      : api === "graphql"
+        ? "RUN go run github.com/99designs/gqlgen generate\n"
+        : "";
   return `# syntax=docker/dockerfile:1
 FROM golang:1.23-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOFLAGS=-mod=mod go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
+${codegen}RUN CGO_ENABLED=0 GOFLAGS=-mod=mod go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/api /api

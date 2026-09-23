@@ -106,8 +106,8 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 14,
-    "size": 336
+    "lines": 15,
+    "size": 384
   },
   {
     "path": "go.mod",

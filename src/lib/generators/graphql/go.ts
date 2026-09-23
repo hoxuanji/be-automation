@@ -134,7 +134,7 @@ function goGraphqlResolverRoot(entities: Entity[]): string {
   // (those live in the per-entity *.resolvers.go files). Per-entity stores
   // are sync.Map values keyed by primary key string.
   const stores = entities.length === 0
-    ? "// No entities — only the health resolver is defined."
+    ? "\t// No entities — only the health resolver is defined."
     : entities
         .map((e) => `\t${storeFieldName(e.name)} sync.Map // map[string]*${e.name}`)
         .join("\n");
@@ -145,9 +145,7 @@ function goGraphqlResolverRoot(entities: Entity[]): string {
 // Per-entity CRUD lives in <entity>.resolvers.go. We use sync.Map for the
 // in-memory store so resolver methods can be called concurrently without
 // extra locking. Replace these with real DB calls when wiring persistence.
-
-import "sync"
-
+${entities.length > 0 ? '\nimport "sync"\n' : ""}
 type Resolver struct {
 ${stores}
 }
