@@ -1,6 +1,8 @@
 import { cookies } from "next/headers";
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
+import { getCurrentUser } from "@/lib/auth";
+import { isGhName, isGhRef } from "../_validate";
 
 export const runtime = "nodejs";
 
@@ -21,6 +23,7 @@ async function ghFetch(path: string, token: string, init?: RequestInit) {
 // GET /api/github/cleanup?owner=&repo=&base=
 // Returns branches whose PRs have been merged into `base`
 export async function GET(req: NextRequest) {
+  if (!(await getCurrentUser(req))) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const cookieStore = await cookies();
   const token = cookieStore.get("github_token")?.value;
   if (!token) return NextResponse.json({ error: "no_token" }, { status: 401 });
@@ -31,10 +34,13 @@ export async function GET(req: NextRequest) {
   const base = searchParams.get("base") ?? "main";
 
   if (!owner || !repo) return NextResponse.json({ error: "missing_params" }, { status: 400 });
+  if (!isGhName(owner) || !isGhName(repo) || !isGhRef(base)) {
+    return NextResponse.json({ error: "invalid_params" }, { status: 400 });
+  }
 
   const [branchRes, prRes] = await Promise.all([
     ghFetch(`/repos/${owner}/${repo}/branches?per_page=100`, token),
-    ghFetch(`/repos/${owner}/${repo}/pulls?state=closed&base=${base}&per_page=100`, token),
+    ghFetch(`/repos/${owner}/${repo}/pulls?state=closed&base=${encodeURIComponent(base)}&per_page=100`, token),
   ]);
 
   if (!branchRes.ok || !prRes.ok) {
@@ -57,12 +63,13 @@ export async function GET(req: NextRequest) {
 
 // DELETE /api/github/cleanup — batch delete branches
 const deleteSchema = z.object({
-  owner: z.string().min(1).max(100),
-  repo: z.string().min(1).max(100),
-  branches: z.array(z.string().min(1).max(255)).min(1).max(50),
+  owner: z.string().min(1).max(100).refine(isGhName),
+  repo: z.string().min(1).max(100).refine(isGhName),
+  branches: z.array(z.string().min(1).max(255).refine(isGhRef)).min(1).max(50),
 });
 
 export async function DELETE(req: NextRequest) {
+  if (!(await getCurrentUser(req))) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const cookieStore = await cookies();
   const token = cookieStore.get("github_token")?.value;
   if (!token) return NextResponse.json({ error: "no_token" }, { status: 401 });

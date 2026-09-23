@@ -92,5 +92,26 @@ export function buildSetCookieHeader(token: string): string {
 }
 
 export function buildClearCookieHeader(): string {
-  return `${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`;
+  return `${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${IS_PROD ? "; Secure" : ""}`;
+}
+
+/**
+ * Same-origin path check for post-auth redirects. Rejects protocol-relative
+ * (`//evil.com`) and backslash (`/\evil.com`) forms that browsers treat as
+ * cross-origin.
+ */
+export function safeReturnTo(value: string | null | undefined): string | null {
+  if (!value || !value.startsWith("/")) return null;
+  if (value.startsWith("//") || value.startsWith("/\\")) return null;
+  return value;
+}
+
+/**
+ * True when the OAuth state's nonce matches the browser-bound nonce cookie
+ * set by the flow's start route. Binds the callback to the browser that
+ * began the flow (login CSRF defence).
+ */
+export function nonceMatches(stateNonce: string, cookieNonce: string | undefined): boolean {
+  if (!cookieNonce || cookieNonce.length !== stateNonce.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(stateNonce), Buffer.from(cookieNonce));
 }

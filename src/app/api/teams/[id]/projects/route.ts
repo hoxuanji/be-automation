@@ -20,9 +20,12 @@ export async function GET(
   // decide whether to render an Edit affordance vs a read-only badge. Owner
   // rows always come back as "owner"; non-owner rows fall through to the
   // share check (which may upgrade them to edit if the share grants it).
-  const projects = listProjectsForTeamMembers(teamId).map((p) => {
-    const access = getProjectAccessRow(p.id, claims.sub);
-    return { ...p, permission: access?.level ?? null };
-  });
+  // Rows with no access are dropped — team membership alone grants nothing.
+  const projects = listProjectsForTeamMembers(teamId)
+    .map((p) => {
+      const access = getProjectAccessRow(p.id, claims.sub);
+      return { ...p, permission: access?.level ?? null };
+    })
+    .filter((p) => p.permission !== null);
   return Response.json({ projects });
 }

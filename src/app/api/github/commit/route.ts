@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
+import { getCurrentUser } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -21,6 +22,7 @@ const bodySchema = z.object({
 // POST /api/github/commit
 // Commits a set of file changes to an existing branch via GraphQL
 export async function POST(req: NextRequest) {
+  if (!(await getCurrentUser(req))) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const cookieStore = await cookies();
   const token = cookieStore.get("github_token")?.value;
   if (!token) {

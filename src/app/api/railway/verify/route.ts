@@ -1,4 +1,5 @@
 import { type NextRequest } from "next/server";
+import { getCurrentUser } from "@/lib/auth";
 import { verifyRailwayToken } from "@/lib/railway";
 
 export const runtime = "nodejs";
@@ -39,6 +40,9 @@ function classify(err: unknown): { code: VerifyErrorCode; status: number; error:
 }
 
 export async function POST(req: NextRequest) {
+  if (!(await getCurrentUser(req))) {
+    return Response.json({ code: "unauthorized", error: "Sign in required." }, { status: 401 });
+  }
   let body: unknown;
   try {
     body = await req.json();

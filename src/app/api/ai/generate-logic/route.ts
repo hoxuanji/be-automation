@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { PATTERN_CATALOG } from "@/lib/generators/patterns/index";
+import { getCurrentUser } from "@/lib/auth";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -22,6 +24,13 @@ const requestSchema = z.object({
 });
 
 export async function POST(req: NextRequest) {
+  const claims = await getCurrentUser(req);
+  if (!claims) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+
+  if (!checkRateLimit(`generate-logic:${claims.sub}`, 20)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
+
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return NextResponse.json({ error: "missing_api_key" }, { status: 503 });

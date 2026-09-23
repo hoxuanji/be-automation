@@ -1,6 +1,8 @@
 import { cookies } from "next/headers";
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
+import { getCurrentUser } from "@/lib/auth";
+import { isGhName, isGhRef } from "../_validate";
 
 export const runtime = "nodejs";
 
@@ -20,6 +22,7 @@ async function ghFetch(path: string, token: string, init?: RequestInit) {
 
 // GET /api/github/branches?owner=&repo=  — list branches
 export async function GET(req: NextRequest) {
+  if (!(await getCurrentUser(req))) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const cookieStore = await cookies();
   const token = cookieStore.get("github_token")?.value;
   if (!token) return NextResponse.json({ error: "no_token" }, { status: 401 });
@@ -28,6 +31,7 @@ export async function GET(req: NextRequest) {
   const owner = searchParams.get("owner");
   const repo = searchParams.get("repo");
   if (!owner || !repo) return NextResponse.json({ error: "missing_params" }, { status: 400 });
+  if (!isGhName(owner) || !isGhName(repo)) return NextResponse.json({ error: "invalid_params" }, { status: 400 });
 
   const res = await ghFetch(`/repos/${owner}/${repo}/branches?per_page=100`, token);
   if (!res.ok) {
@@ -44,13 +48,14 @@ export async function GET(req: NextRequest) {
 
 // POST /api/github/branches — create a branch from base
 const createSchema = z.object({
-  owner: z.string().min(1).max(100),
-  repo: z.string().min(1).max(100),
-  branchName: z.string().min(1).max(255),
-  baseBranch: z.string().min(1).max(255),
+  owner: z.string().min(1).max(100).refine(isGhName),
+  repo: z.string().min(1).max(100).refine(isGhName),
+  branchName: z.string().min(1).max(255).refine(isGhRef),
+  baseBranch: z.string().min(1).max(255).refine(isGhRef),
 });
 
 export async function POST(req: NextRequest) {
+  if (!(await getCurrentUser(req))) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const cookieStore = await cookies();
   const token = cookieStore.get("github_token")?.value;
   if (!token) return NextResponse.json({ error: "no_token" }, { status: 401 });

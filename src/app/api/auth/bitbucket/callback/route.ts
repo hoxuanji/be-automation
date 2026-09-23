@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import crypto from "crypto";
-import { signToken } from "@/lib/auth";
+import { signToken, safeReturnTo, nonceMatches } from "@/lib/auth";
 import { upsertUserByBitbucket, createSession } from "@/lib/db";
 import { getJwtSecret } from "@/lib/env";
 
@@ -9,7 +9,7 @@ export const runtime = "nodejs";
 const STATE_TTL_SEC = 600; // must match the issuer in src/app/api/auth/bitbucket/route.ts
 const IS_PROD = process.env.NODE_ENV === "production";
 
-function verifyState(state: string): { mode: string } | null {
+function verifyState(state: string): { nonce: string; mode: string } | null {
   // State format: `bb:${nonce}:${mode}:${issued}:${sig}` — see issuer for details.
   const parts = state.split(":");
   if (parts.length !== 5) return null;
@@ -27,7 +27,7 @@ function verifyState(state: string): { mode: string } | null {
   if (!Number.isFinite(issued)) return null;
   const now = Math.floor(Date.now() / 1000);
   if (Math.abs(now - issued) > STATE_TTL_SEC) return null;
-  return { mode };
+  return { nonce, mode };
 }
 
 async function getBitbucketToken(code: string): Promise<string | null> {
@@ -94,6 +94,11 @@ export async function GET(req: NextRequest) {
       console.error("[bitbucket/callback] invalid state signature");
       return NextResponse.redirect(new URL("/login?bitbucket=error", req.url));
     }
+    if (!nonceMatches(verified.nonce, req.cookies.get("bitbucket_oauth_nonce")?.value)) {
+      console.error("[bitbucket/callback] state nonce does not match browser cookie");
+      return NextResponse.redirect(new URL("/login?bitbucket=error", req.url));
+    }
+    const clearNonce = `bitbucket_oauth_nonce=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax${IS_PROD ? "; Secure" : ""}`;
 
     const { mode } = verified;
 
@@ -130,6 +135,7 @@ export async function GET(req: NextRequest) {
       const headers = new Headers({ "Content-Type": "text/html" });
       headers.append("Set-Cookie", `helios_token=${jwtToken}; ${cookieOpts}`);
       headers.append("Set-Cookie", `bitbucket_token=${bbToken}; ${cookieOpts}`);
+      headers.append("Set-Cookie", clearNonce);
       return new Response(
         `<!doctype html><html><head><meta charset="utf-8">
         <script>window.location.replace("/dashboard")</script></head>
@@ -139,14 +145,14 @@ export async function GET(req: NextRequest) {
     }
 
     // Connect mode — store the Bitbucket access token for future repo pushes.
-    const returnTo = req.cookies.get("bitbucket_return_to")?.value;
-    const dest = returnTo && returnTo.startsWith("/") ? returnTo : "/preview?bitbucket=connected";
+    const dest = safeReturnTo(req.cookies.get("bitbucket_return_to")?.value) ?? "/preview?bitbucket=connected";
 
     const maxAge = 86400 * 7;
     const cookieOpts = `Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${IS_PROD ? "; Secure" : ""}`;
     const headers = new Headers({ "Content-Type": "text/html" });
     headers.append("Set-Cookie", `bitbucket_token=${bbToken}; ${cookieOpts}`);
     headers.append("Set-Cookie", `bitbucket_return_to=; Path=/; Max-Age=0`);
+    headers.append("Set-Cookie", clearNonce);
     return new Response(
       `<!doctype html><html><head><meta charset="utf-8">
       <script>window.location.replace(${JSON.stringify(dest)})</script></head>

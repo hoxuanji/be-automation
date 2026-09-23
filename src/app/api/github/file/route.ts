@@ -1,11 +1,14 @@
 import { cookies } from "next/headers";
 import { NextResponse, type NextRequest } from "next/server";
+import { getCurrentUser } from "@/lib/auth";
+import { isGhName, encodeGhPath } from "../_validate";
 
 export const runtime = "nodejs";
 
 // GET /api/github/file?owner=&repo=&path=&ref=
 // Returns decoded file content from a GitHub repo
 export async function GET(req: NextRequest) {
+  if (!(await getCurrentUser(req))) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const cookieStore = await cookies();
   const token = cookieStore.get("github_token")?.value;
   if (!token) return NextResponse.json({ error: "no_token" }, { status: 401 });
@@ -13,11 +16,15 @@ export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const owner = searchParams.get("owner");
   const repo = searchParams.get("repo");
-  const path = searchParams.get("path");
+  const rawPath = searchParams.get("path");
   const ref = searchParams.get("ref");
 
-  if (!owner || !repo || !path) {
+  if (!owner || !repo || !rawPath) {
     return NextResponse.json({ error: "missing_params" }, { status: 400 });
+  }
+  const path = encodeGhPath(rawPath);
+  if (!isGhName(owner) || !isGhName(repo) || !path) {
+    return NextResponse.json({ error: "invalid_params" }, { status: 400 });
   }
 
   const url = ref

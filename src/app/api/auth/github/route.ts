@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import crypto from "crypto";
 import { getJwtSecret } from "@/lib/env";
+import { safeReturnTo } from "@/lib/auth";
 
 // State format: `${nonce}:${mode}:${issuedAtSec}:${sig}`
 //   nonce  — 16 random bytes of hex, prevents state reuse / replay
@@ -33,8 +34,17 @@ export async function GET(req: NextRequest) {
     `https://github.com/login/oauth/authorize?${params.toString()}`
   );
 
-  const returnTo = req.nextUrl.searchParams.get("returnTo");
-  if (returnTo && returnTo.startsWith("/")) {
+  // Browser-bound copy of the nonce; the callback requires state nonce === cookie.
+  response.cookies.set("github_oauth_nonce", nonce, {
+    httpOnly: true,
+    path: "/",
+    maxAge: STATE_TTL_SEC,
+    sameSite: "lax",
+    secure: IS_PROD,
+  });
+
+  const returnTo = safeReturnTo(req.nextUrl.searchParams.get("returnTo"));
+  if (returnTo) {
     response.cookies.set("github_return_to", returnTo, {
       httpOnly: true,
       path: "/",

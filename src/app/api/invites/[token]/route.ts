@@ -37,6 +37,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
   const status = inviteStatus(invite);
   if (status !== "valid") return Response.json({ error: status }, { status: 410 });
 
+  if (invite.email && invite.email.toLowerCase() !== claims.email?.toLowerCase()) {
+    return Response.json({ error: "invite_email_mismatch" }, { status: 403 });
+  }
+
   const alreadyMember = getTeamMember(invite.team_id, claims.sub);
   if (!alreadyMember) {
     addTeamMember(invite.team_id, claims.sub, "member");

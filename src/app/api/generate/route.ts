@@ -3,13 +3,18 @@ import archiver from "archiver";
 import { generateRequestSchema } from "@/lib/schema";
 import { generate } from "@/lib/generators";
 import { safeName } from "@/lib/generators/types";
-import { checkRateLimit, getRateLimitKey } from "@/lib/rate-limit";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { getCurrentUser } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
-  if (!checkRateLimit(getRateLimitKey(req), 20)) {
+  // Every UI caller (/builder, /preview) is behind login.
+  const claims = await getCurrentUser(req);
+  if (!claims) return Response.json({ error: "unauthorized" }, { status: 401 });
+
+  if (!checkRateLimit(`generate:${claims.sub}`, 20)) {
     return Response.json({ error: "rate_limited" }, { status: 429 });
   }
 

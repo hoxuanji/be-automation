@@ -1,5 +1,7 @@
 import { cookies } from "next/headers";
 import { NextResponse, type NextRequest } from "next/server";
+import { getCurrentUser } from "@/lib/auth";
+import { isGhName } from "../_validate";
 
 export const runtime = "nodejs";
 
@@ -19,6 +21,7 @@ export type WorkflowRun = {
 
 // GET /api/github/runs?owner=&repo=&branch=&per_page=
 export async function GET(req: NextRequest) {
+  if (!(await getCurrentUser(req))) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const cookieStore = await cookies();
   const token = cookieStore.get("github_token")?.value;
   if (!token) return NextResponse.json({ error: "no_token" }, { status: 401 });
@@ -30,6 +33,7 @@ export async function GET(req: NextRequest) {
   const perPage = Math.min(Number(searchParams.get("per_page") ?? "10"), 30);
 
   if (!owner || !repo) return NextResponse.json({ error: "missing_params" }, { status: 400 });
+  if (!isGhName(owner) || !isGhName(repo)) return NextResponse.json({ error: "invalid_params" }, { status: 400 });
 
   const qs = new URLSearchParams({ per_page: String(perPage) });
   if (branch) qs.set("branch", branch);
