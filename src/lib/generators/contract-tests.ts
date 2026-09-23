@@ -1,6 +1,6 @@
 import type { Endpoint, Entity, GeneratedFile, StackConfig } from "./types";
 import { isGraphqlSupported, safeName, toPascal } from "./types";
-import { goAuthMode } from "./go";
+import { goAuthMode, goDbKind } from "./go";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -102,6 +102,17 @@ function goContractTests(config: StackConfig, endpoints: Endpoint[]): string {
 
   const fiberImport = isFiber ? `\n\t"github.com/gofiber/fiber/v2/middleware/adaptor"\n` : "";
 
+  // server.New exits the process when its database is unreachable, so probe
+  // with the same opener first and skip (not fail) when there is no DB.
+  const kind = goDbKind(config.database);
+  const probe =
+    kind === "postgres" || kind === "mysql"
+      ? `\tif conn, err := db.Open(cfg.DatabaseURL); err != nil {\n\t\tskipReason = "database unreachable (set DATABASE_URL to run): " + err.Error()\n\t} else {\n\t\t_ = conn.Close()\n\t}\n`
+      : kind === "mongo"
+        ? `\tif store, err := db.OpenMongo(context.Background(), cfg.MongoURI); err != nil {\n\t\tskipReason = "database unreachable (set MONGODB_URI to run): " + err.Error()\n\t} else {\n\t\t_ = store.Close(context.Background())\n\t}\n`
+        : "";
+  const skipCheck = probe ? `\trequireServer(t)\n` : "";
+
   const tests = endpoints.map((ep) => {
     const testPath = pathToParam(ep.path);
     const status = ep.auth && authEnforced ? 401 : expectedStatus(ep.method, ep.auth);
@@ -110,7 +121,7 @@ function goContractTests(config: StackConfig, endpoints: Endpoint[]): string {
       : `\treq, err := http.NewRequest("${ep.method}", ts.URL+"${testPath}", nil)`;
     return `
 func Test${toPascal(ep.method)}${toPascal(ep.path.replace(/[/:]/g, "_"))}(t *testing.T) {
-\t// ${ep.summary}
+${skipCheck}\t// ${ep.summary}
 ${bodyLine}
 \tif err != nil {
 \t\tt.Fatalf("build request: %v", err)
@@ -129,21 +140,47 @@ ${bodyLine}
   return `// Contract tests for ${safeName(config.name)}
 // Run with: go test ./internal/api/contract/...
 //
-// Prerequisites: no external dependencies — the server is started in-process.
+// Prerequisites: ${probe ? "the server is started in-process; tests skip when the database is unreachable." : "no external dependencies — the server is started in-process."}
 package api_contract_test
 
 import (
-\t"log/slog"
+${kind === "mongo" ? '\t"context"\n' : ""}\t"log/slog"
 \t"net/http"
 \t"net/http/httptest"
 \t"os"
 ${needsStrings ? '\t"strings"\n' : ""}\t"testing"
 ${fiberImport}
 \t"${module}/internal/config"
-\t"${module}/internal/server"
+${probe ? `\t"${module}/internal/db"\n` : ""}\t"${module}/internal/server"
 )
 
-var ts *httptest.Server
+${probe ? `var (
+\tts         *httptest.Server
+\tskipReason string
+)
+
+func TestMain(m *testing.M) {
+\tcfg, err := config.Load() // reads from env; defaults work for tests
+\tif err != nil {
+\t\tpanic(err)
+\t}
+${probe}\tif skipReason == "" {
+${testServerSetup.replace(/\t/g, "\t\t")}
+\t}
+\tcode := m.Run()
+\tif ts != nil {
+\t\tts.Close()
+\t}
+\tos.Exit(code)
+}
+
+// requireServer skips the test when TestMain could not reach the database.
+func requireServer(t *testing.T) {
+\tt.Helper()
+\tif ts == nil {
+\t\tt.Skip(skipReason)
+\t}
+}` : `var ts *httptest.Server
 
 func TestMain(m *testing.M) {
 \tcfg, err := config.Load() // reads from env; defaults work for tests
@@ -154,7 +191,7 @@ ${testServerSetup}
 \tcode := m.Run()
 \tts.Close()
 \tos.Exit(code)
-}
+}`}
 ${tests}
 `;
 }
