@@ -3,7 +3,7 @@ import { safeName, toPascal, toKebab, toSnake } from "./types";
 import { goGrpcFiles } from "./grpc/go";
 import { goGraphqlFiles } from "./graphql/go";
 import { isGraphqlSupported } from "./types";
-import { needsAuth } from "./auth/providers";
+import { authProviderSpec } from "./auth/providers";
 import { goApiHandlersFile, goHandlerMethodName } from "./patterns/go";
 
 export function goFiles(
@@ -35,8 +35,8 @@ export function goFiles(
   const module = `github.com/your-username/${safeName(config.name)}`;
   const fw = (["gin", "fiber", "echo", "chi"].includes(config.framework) ? config.framework : "gin") as GoFw;
   const files: GeneratedFile[] = [];
-  const anyProtected = endpoints.some((e) => e.auth);
-  const withAuth = needsAuth(config, anyProtected);
+  const authMode = goAuthMode(config, endpoints);
+  const withAuth = authMode !== "off";
   const hasPatterns = endpoints.some((e) => e.pattern);
   const api = hasPatterns ? goApiHandlersFile(fw, config, endpoints, entities) : null;
 
@@ -70,7 +70,7 @@ export function goFiles(
   }
 
   if (withAuth) {
-    files.push({ path: "internal/auth/jwt.go", content: goAuthJwt() });
+    files.push({ path: "internal/auth/jwt.go", content: authMode === "hs256" ? goAuthHS256() : goAuthJwt() });
   }
 
   if (kind === "postgres" || kind === "mysql") {
@@ -130,6 +130,17 @@ export function goFiles(
 }
 
 type GoFw = "gin" | "fiber" | "echo" | "chi";
+
+// How authRequired verifies bearer tokens (see patterns/go.ts patternBody):
+//   jwks  — external provider configured: verify provider tokens via JWKS.
+//   hs256 — auth "none" but auth_* patterns are used: the service issues its
+//           own HS256 tokens (JWT_SECRET) and verifies exactly those.
+//   off   — nothing to verify; authRequired is a pass-through.
+export function goAuthMode(config: StackConfig, endpoints: Endpoint[]): "jwks" | "hs256" | "off" {
+  const authPatterns = endpoints.some((e) => e.pattern?.startsWith("auth_"));
+  if (authProviderSpec(config)) return endpoints.some((e) => e.auth) || authPatterns ? "jwks" : "off";
+  return authPatterns ? "hs256" : "off";
+}
 type GoDbKind = "postgres" | "mysql" | "sqlite" | "mongo" | "memory" | "none";
 type GoMonitoring = "prometheus" | "sentry" | "datadog" | "none";
 type GoDeps = {
@@ -854,7 +865,8 @@ ${code}`;
 function goDocEntityTest(module: string, fw: GoFw, entity: Entity): string {
   const pascal = entity.name;
   return goEntityTest(module, fw, entity)
-    .replace(`\t"gorm.io/driver/sqlite"\n\t"gorm.io/gorm"\n`, "")
+    .replace(`\t"github.com/glebarez/sqlite"\n`, "")
+    .replace(`\t"gorm.io/gorm"\n`, "")
     .replace(`\t"${module}/internal/models"`, `\t"${module}/internal/db"`)
     .replace(new RegExp(`func setup${pascal}DB\\(t \\*testing\\.T\\) \\*gorm\\.DB \\{[\\s\\S]*?\\n\\}\\n\\n`), "")
     .replace(`\tdb := setup${pascal}DB(t)\n\th := handlers.New${pascal}Handler(db)`, `\th := handlers.New${pascal}Handler(db.NewMemoryStore())`);
@@ -1186,7 +1198,7 @@ import (
 \t"testing"
 
 \t"github.com/gin-gonic/gin"
-\t"gorm.io/driver/sqlite"
+\t"github.com/glebarez/sqlite"
 \t"gorm.io/gorm"
 
 \t"${module}/internal/handlers"
@@ -1196,8 +1208,12 @@ import (
 func setup${pascal}DB(t *testing.T) *gorm.DB {
 \tt.Helper()
 \tdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-\tif err != nil { t.Fatal(err) }
-\tif err := db.AutoMigrate(&models.${pascal}{}); err != nil { t.Fatal(err) }
+\tif err != nil {
+\t\tt.Fatal(err)
+\t}
+\tif err := db.AutoMigrate(&models.${pascal}{}); err != nil {
+\t\tt.Fatal(err)
+\t}
 \treturn db
 }
 
@@ -1218,7 +1234,9 @@ func Test${pascal}Handler(t *testing.T) {
 \tt.Run("list empty", func(t *testing.T) {
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/${kebab}s", nil))
-\t\tif w.Code != http.StatusOK { t.Errorf("want 200 got %d: %s", w.Code, w.Body) }
+\t\tif w.Code != http.StatusOK {
+\t\t\tt.Errorf("want 200 got %d: %s", w.Code, w.Body)
+\t\t}
 \t})
 
 \tt.Run("create", func(t *testing.T) {
@@ -1227,40 +1245,58 @@ func Test${pascal}Handler(t *testing.T) {
 \t\treq.Header.Set("Content-Type", "application/json")
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, req)
-\t\tif w.Code != http.StatusCreated { t.Errorf("want 201 got %d: %s", w.Code, w.Body) }
+\t\tif w.Code != http.StatusCreated {
+\t\t\tt.Errorf("want 201 got %d: %s", w.Code, w.Body)
+\t\t}
 \t\tvar resp map[string]any
 \t\t_ = json.Unmarshal(w.Body.Bytes(), &resp)
-\t\tif id, ok := resp["id"].(string); ok { createdID = id }
+\t\tif id, ok := resp["id"].(string); ok {
+\t\t\tcreatedID = id
+\t\t}
 \t})
 
 \tt.Run("get by id", func(t *testing.T) {
-\t\tif createdID == "" { t.Skip("depends on create") }
+\t\tif createdID == "" {
+\t\t\tt.Skip("depends on create")
+\t\t}
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/${kebab}s/"+createdID, nil))
-\t\tif w.Code != http.StatusOK { t.Errorf("want 200 got %d", w.Code) }
+\t\tif w.Code != http.StatusOK {
+\t\t\tt.Errorf("want 200 got %d", w.Code)
+\t\t}
 \t})
 
 \tt.Run("get not found", func(t *testing.T) {
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/${kebab}s/00000000-0000-0000-0000-000000000000", nil))
-\t\tif w.Code != http.StatusNotFound { t.Errorf("want 404 got %d", w.Code) }
+\t\tif w.Code != http.StatusNotFound {
+\t\t\tt.Errorf("want 404 got %d", w.Code)
+\t\t}
 \t})
 
 \tt.Run("update", func(t *testing.T) {
-\t\tif createdID == "" { t.Skip("depends on create") }
+\t\tif createdID == "" {
+\t\t\tt.Skip("depends on create")
+\t\t}
 \t\tbody, _ := json.Marshal(${updateBody})
 \t\treq := httptest.NewRequest(http.MethodPatch, "/${kebab}s/"+createdID, bytes.NewReader(body))
 \t\treq.Header.Set("Content-Type", "application/json")
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, req)
-\t\tif w.Code != http.StatusOK { t.Errorf("want 200 got %d: %s", w.Code, w.Body) }
+\t\tif w.Code != http.StatusOK {
+\t\t\tt.Errorf("want 200 got %d: %s", w.Code, w.Body)
+\t\t}
 \t})
 
 \tt.Run("delete", func(t *testing.T) {
-\t\tif createdID == "" { t.Skip("depends on create") }
+\t\tif createdID == "" {
+\t\t\tt.Skip("depends on create")
+\t\t}
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/${kebab}s/"+createdID, nil))
-\t\tif w.Code != http.StatusNoContent { t.Errorf("want 204 got %d", w.Code) }
+\t\tif w.Code != http.StatusNoContent {
+\t\t\tt.Errorf("want 204 got %d", w.Code)
+\t\t}
 \t})
 }
 `;
@@ -1277,8 +1313,8 @@ import (
 \t"net/http/httptest"
 \t"testing"
 
+\t"github.com/glebarez/sqlite"
 \t"github.com/gofiber/fiber/v2"
-\t"gorm.io/driver/sqlite"
 \t"gorm.io/gorm"
 
 \t"${module}/internal/handlers"
@@ -1288,8 +1324,12 @@ import (
 func setup${pascal}DB(t *testing.T) *gorm.DB {
 \tt.Helper()
 \tdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-\tif err != nil { t.Fatal(err) }
-\tif err := db.AutoMigrate(&models.${pascal}{}); err != nil { t.Fatal(err) }
+\tif err != nil {
+\t\tt.Fatal(err)
+\t}
+\tif err := db.AutoMigrate(&models.${pascal}{}); err != nil {
+\t\tt.Fatal(err)
+\t}
 \treturn db
 }
 
@@ -1309,8 +1349,12 @@ func Test${pascal}Handler(t *testing.T) {
 \tt.Run("list empty", func(t *testing.T) {
 \t\treq := httptest.NewRequest(http.MethodGet, "/${kebab}s", nil)
 \t\tresp, err := app.Test(req)
-\t\tif err != nil { t.Fatal(err) }
-\t\tif resp.StatusCode != http.StatusOK { t.Errorf("want 200 got %d", resp.StatusCode) }
+\t\tif err != nil {
+\t\t\tt.Fatal(err)
+\t\t}
+\t\tif resp.StatusCode != http.StatusOK {
+\t\t\tt.Errorf("want 200 got %d", resp.StatusCode)
+\t\t}
 \t})
 
 \tt.Run("create", func(t *testing.T) {
@@ -1318,45 +1362,73 @@ func Test${pascal}Handler(t *testing.T) {
 \t\treq := httptest.NewRequest(http.MethodPost, "/${kebab}s", bytes.NewReader(body))
 \t\treq.Header.Set("Content-Type", "application/json")
 \t\tresp, err := app.Test(req)
-\t\tif err != nil { t.Fatal(err) }
-\t\tif resp.StatusCode != http.StatusCreated { t.Errorf("want 201 got %d", resp.StatusCode) }
+\t\tif err != nil {
+\t\t\tt.Fatal(err)
+\t\t}
+\t\tif resp.StatusCode != http.StatusCreated {
+\t\t\tt.Errorf("want 201 got %d", resp.StatusCode)
+\t\t}
 \t\trawBody, _ := io.ReadAll(resp.Body)
 \t\tvar result map[string]any
 \t\t_ = json.Unmarshal(rawBody, &result)
-\t\tif id, ok := result["id"].(string); ok { createdID = id }
+\t\tif id, ok := result["id"].(string); ok {
+\t\t\tcreatedID = id
+\t\t}
 \t})
 
 \tt.Run("get by id", func(t *testing.T) {
-\t\tif createdID == "" { t.Skip("depends on create") }
+\t\tif createdID == "" {
+\t\t\tt.Skip("depends on create")
+\t\t}
 \t\treq := httptest.NewRequest(http.MethodGet, "/${kebab}s/"+createdID, nil)
 \t\tresp, err := app.Test(req)
-\t\tif err != nil { t.Fatal(err) }
-\t\tif resp.StatusCode != http.StatusOK { t.Errorf("want 200 got %d", resp.StatusCode) }
+\t\tif err != nil {
+\t\t\tt.Fatal(err)
+\t\t}
+\t\tif resp.StatusCode != http.StatusOK {
+\t\t\tt.Errorf("want 200 got %d", resp.StatusCode)
+\t\t}
 \t})
 
 \tt.Run("get not found", func(t *testing.T) {
 \t\treq := httptest.NewRequest(http.MethodGet, "/${kebab}s/00000000-0000-0000-0000-000000000000", nil)
 \t\tresp, err := app.Test(req)
-\t\tif err != nil { t.Fatal(err) }
-\t\tif resp.StatusCode != http.StatusNotFound { t.Errorf("want 404 got %d", resp.StatusCode) }
+\t\tif err != nil {
+\t\t\tt.Fatal(err)
+\t\t}
+\t\tif resp.StatusCode != http.StatusNotFound {
+\t\t\tt.Errorf("want 404 got %d", resp.StatusCode)
+\t\t}
 \t})
 
 \tt.Run("update", func(t *testing.T) {
-\t\tif createdID == "" { t.Skip("depends on create") }
+\t\tif createdID == "" {
+\t\t\tt.Skip("depends on create")
+\t\t}
 \t\tbody, _ := json.Marshal(${updateBody})
 \t\treq := httptest.NewRequest(http.MethodPatch, "/${kebab}s/"+createdID, bytes.NewReader(body))
 \t\treq.Header.Set("Content-Type", "application/json")
 \t\tresp, err := app.Test(req)
-\t\tif err != nil { t.Fatal(err) }
-\t\tif resp.StatusCode != http.StatusOK { t.Errorf("want 200 got %d", resp.StatusCode) }
+\t\tif err != nil {
+\t\t\tt.Fatal(err)
+\t\t}
+\t\tif resp.StatusCode != http.StatusOK {
+\t\t\tt.Errorf("want 200 got %d", resp.StatusCode)
+\t\t}
 \t})
 
 \tt.Run("delete", func(t *testing.T) {
-\t\tif createdID == "" { t.Skip("depends on create") }
+\t\tif createdID == "" {
+\t\t\tt.Skip("depends on create")
+\t\t}
 \t\treq := httptest.NewRequest(http.MethodDelete, "/${kebab}s/"+createdID, nil)
 \t\tresp, err := app.Test(req)
-\t\tif err != nil { t.Fatal(err) }
-\t\tif resp.StatusCode != http.StatusNoContent { t.Errorf("want 204 got %d", resp.StatusCode) }
+\t\tif err != nil {
+\t\t\tt.Fatal(err)
+\t\t}
+\t\tif resp.StatusCode != http.StatusNoContent {
+\t\t\tt.Errorf("want 204 got %d", resp.StatusCode)
+\t\t}
 \t})
 }
 `;
@@ -1372,8 +1444,8 @@ import (
 \t"net/http/httptest"
 \t"testing"
 
+\t"github.com/glebarez/sqlite"
 \t"github.com/labstack/echo/v4"
-\t"gorm.io/driver/sqlite"
 \t"gorm.io/gorm"
 
 \t"${module}/internal/handlers"
@@ -1383,8 +1455,12 @@ import (
 func setup${pascal}DB(t *testing.T) *gorm.DB {
 \tt.Helper()
 \tdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-\tif err != nil { t.Fatal(err) }
-\tif err := db.AutoMigrate(&models.${pascal}{}); err != nil { t.Fatal(err) }
+\tif err != nil {
+\t\tt.Fatal(err)
+\t}
+\tif err := db.AutoMigrate(&models.${pascal}{}); err != nil {
+\t\tt.Fatal(err)
+\t}
 \treturn db
 }
 
@@ -1404,7 +1480,9 @@ func Test${pascal}Handler(t *testing.T) {
 \tt.Run("list empty", func(t *testing.T) {
 \t\tw := httptest.NewRecorder()
 \t\te.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/${kebab}s", nil))
-\t\tif w.Code != http.StatusOK { t.Errorf("want 200 got %d: %s", w.Code, w.Body) }
+\t\tif w.Code != http.StatusOK {
+\t\t\tt.Errorf("want 200 got %d: %s", w.Code, w.Body)
+\t\t}
 \t})
 
 \tt.Run("create", func(t *testing.T) {
@@ -1413,40 +1491,58 @@ func Test${pascal}Handler(t *testing.T) {
 \t\treq.Header.Set("Content-Type", "application/json")
 \t\tw := httptest.NewRecorder()
 \t\te.ServeHTTP(w, req)
-\t\tif w.Code != http.StatusCreated { t.Errorf("want 201 got %d: %s", w.Code, w.Body) }
+\t\tif w.Code != http.StatusCreated {
+\t\t\tt.Errorf("want 201 got %d: %s", w.Code, w.Body)
+\t\t}
 \t\tvar resp map[string]any
 \t\t_ = json.Unmarshal(w.Body.Bytes(), &resp)
-\t\tif id, ok := resp["id"].(string); ok { createdID = id }
+\t\tif id, ok := resp["id"].(string); ok {
+\t\t\tcreatedID = id
+\t\t}
 \t})
 
 \tt.Run("get by id", func(t *testing.T) {
-\t\tif createdID == "" { t.Skip("depends on create") }
+\t\tif createdID == "" {
+\t\t\tt.Skip("depends on create")
+\t\t}
 \t\tw := httptest.NewRecorder()
 \t\te.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/${kebab}s/"+createdID, nil))
-\t\tif w.Code != http.StatusOK { t.Errorf("want 200 got %d", w.Code) }
+\t\tif w.Code != http.StatusOK {
+\t\t\tt.Errorf("want 200 got %d", w.Code)
+\t\t}
 \t})
 
 \tt.Run("get not found", func(t *testing.T) {
 \t\tw := httptest.NewRecorder()
 \t\te.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/${kebab}s/00000000-0000-0000-0000-000000000000", nil))
-\t\tif w.Code != http.StatusNotFound { t.Errorf("want 404 got %d", w.Code) }
+\t\tif w.Code != http.StatusNotFound {
+\t\t\tt.Errorf("want 404 got %d", w.Code)
+\t\t}
 \t})
 
 \tt.Run("update", func(t *testing.T) {
-\t\tif createdID == "" { t.Skip("depends on create") }
+\t\tif createdID == "" {
+\t\t\tt.Skip("depends on create")
+\t\t}
 \t\tbody, _ := json.Marshal(${updateBody})
 \t\treq := httptest.NewRequest(http.MethodPatch, "/${kebab}s/"+createdID, bytes.NewReader(body))
 \t\treq.Header.Set("Content-Type", "application/json")
 \t\tw := httptest.NewRecorder()
 \t\te.ServeHTTP(w, req)
-\t\tif w.Code != http.StatusOK { t.Errorf("want 200 got %d: %s", w.Code, w.Body) }
+\t\tif w.Code != http.StatusOK {
+\t\t\tt.Errorf("want 200 got %d: %s", w.Code, w.Body)
+\t\t}
 \t})
 
 \tt.Run("delete", func(t *testing.T) {
-\t\tif createdID == "" { t.Skip("depends on create") }
+\t\tif createdID == "" {
+\t\t\tt.Skip("depends on create")
+\t\t}
 \t\tw := httptest.NewRecorder()
 \t\te.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/${kebab}s/"+createdID, nil))
-\t\tif w.Code != http.StatusNoContent { t.Errorf("want 204 got %d", w.Code) }
+\t\tif w.Code != http.StatusNoContent {
+\t\t\tt.Errorf("want 204 got %d", w.Code)
+\t\t}
 \t})
 }
 `;
@@ -1462,8 +1558,8 @@ import (
 \t"net/http/httptest"
 \t"testing"
 
+\t"github.com/glebarez/sqlite"
 \t"github.com/go-chi/chi/v5"
-\t"gorm.io/driver/sqlite"
 \t"gorm.io/gorm"
 
 \t"${module}/internal/handlers"
@@ -1473,8 +1569,12 @@ import (
 func setup${pascal}DB(t *testing.T) *gorm.DB {
 \tt.Helper()
 \tdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-\tif err != nil { t.Fatal(err) }
-\tif err := db.AutoMigrate(&models.${pascal}{}); err != nil { t.Fatal(err) }
+\tif err != nil {
+\t\tt.Fatal(err)
+\t}
+\tif err := db.AutoMigrate(&models.${pascal}{}); err != nil {
+\t\tt.Fatal(err)
+\t}
 \treturn db
 }
 
@@ -1494,7 +1594,9 @@ func Test${pascal}Handler(t *testing.T) {
 \tt.Run("list empty", func(t *testing.T) {
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/${kebab}s", nil))
-\t\tif w.Code != http.StatusOK { t.Errorf("want 200 got %d: %s", w.Code, w.Body) }
+\t\tif w.Code != http.StatusOK {
+\t\t\tt.Errorf("want 200 got %d: %s", w.Code, w.Body)
+\t\t}
 \t})
 
 \tt.Run("create", func(t *testing.T) {
@@ -1503,40 +1605,58 @@ func Test${pascal}Handler(t *testing.T) {
 \t\treq.Header.Set("Content-Type", "application/json")
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, req)
-\t\tif w.Code != http.StatusCreated { t.Errorf("want 201 got %d: %s", w.Code, w.Body) }
+\t\tif w.Code != http.StatusCreated {
+\t\t\tt.Errorf("want 201 got %d: %s", w.Code, w.Body)
+\t\t}
 \t\tvar resp map[string]any
 \t\t_ = json.Unmarshal(w.Body.Bytes(), &resp)
-\t\tif id, ok := resp["id"].(string); ok { createdID = id }
+\t\tif id, ok := resp["id"].(string); ok {
+\t\t\tcreatedID = id
+\t\t}
 \t})
 
 \tt.Run("get by id", func(t *testing.T) {
-\t\tif createdID == "" { t.Skip("depends on create") }
+\t\tif createdID == "" {
+\t\t\tt.Skip("depends on create")
+\t\t}
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/${kebab}s/"+createdID, nil))
-\t\tif w.Code != http.StatusOK { t.Errorf("want 200 got %d", w.Code) }
+\t\tif w.Code != http.StatusOK {
+\t\t\tt.Errorf("want 200 got %d", w.Code)
+\t\t}
 \t})
 
 \tt.Run("get not found", func(t *testing.T) {
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/${kebab}s/00000000-0000-0000-0000-000000000000", nil))
-\t\tif w.Code != http.StatusNotFound { t.Errorf("want 404 got %d", w.Code) }
+\t\tif w.Code != http.StatusNotFound {
+\t\t\tt.Errorf("want 404 got %d", w.Code)
+\t\t}
 \t})
 
 \tt.Run("update", func(t *testing.T) {
-\t\tif createdID == "" { t.Skip("depends on create") }
+\t\tif createdID == "" {
+\t\t\tt.Skip("depends on create")
+\t\t}
 \t\tbody, _ := json.Marshal(${updateBody})
 \t\treq := httptest.NewRequest(http.MethodPatch, "/${kebab}s/"+createdID, bytes.NewReader(body))
 \t\treq.Header.Set("Content-Type", "application/json")
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, req)
-\t\tif w.Code != http.StatusOK { t.Errorf("want 200 got %d: %s", w.Code, w.Body) }
+\t\tif w.Code != http.StatusOK {
+\t\t\tt.Errorf("want 200 got %d: %s", w.Code, w.Body)
+\t\t}
 \t})
 
 \tt.Run("delete", func(t *testing.T) {
-\t\tif createdID == "" { t.Skip("depends on create") }
+\t\tif createdID == "" {
+\t\t\tt.Skip("depends on create")
+\t\t}
 \t\tw := httptest.NewRecorder()
 \t\tr.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/${kebab}s/"+createdID, nil))
-\t\tif w.Code != http.StatusNoContent { t.Errorf("want 204 got %d", w.Code) }
+\t\tif w.Code != http.StatusNoContent {
+\t\t\tt.Errorf("want 204 got %d", w.Code)
+\t\t}
 \t})
 }
 `;
@@ -1547,7 +1667,7 @@ function goGormDB(kind: GoDbKind): string {
     return `package db
 
 import (
-\t"gorm.io/driver/sqlite"
+\t"github.com/glebarez/sqlite"
 \t"gorm.io/gorm"
 )
 
@@ -1622,7 +1742,7 @@ const GO_MODULE_VERSIONS: [string, string][] = [
   ["gopkg.in/DataDog/dd-trace-go.v1", "v1.69.0"],
   ["gorm.io/driver/mysql", "v1.5.7"],
   ["gorm.io/driver/postgres", "v1.5.11"],
-  ["gorm.io/driver/sqlite", "v1.5.5"],
+  ["github.com/glebarez/sqlite", "v1.11.0"],
   ["gorm.io/gorm", "v1.25.12"],
 ];
 const GO_MODULES_BY_LENGTH = [...GO_MODULE_VERSIONS].sort((a, b) => b[0].length - a[0].length);
@@ -1667,17 +1787,12 @@ function goModels(module: string, entities: Entity[]): string {
 
   const structs = entities
     .map((e) => {
-      const fields = e.fields.map((f) => {
-        const goType = goFieldType(f.type);
-        const tags = buildGORMTags(f);
-        return `\t${toPascal(f.name)} ${goType} \`${tags} json:"${f.name}"\``;
-      });
-      if (!e.fields.some((f) => f.name === "createdAt"))
-        fields.push("\tCreatedAt time.Time");
-      if (!e.fields.some((f) => f.name === "updatedAt"))
-        fields.push("\tUpdatedAt time.Time");
-      if (!e.fields.some((f) => f.name === "deletedAt"))
-        fields.push("\tDeletedAt gorm.DeletedAt `gorm:\"index\"`");
+      const rows: [string, string, string?][] = e.fields.map((f) =>
+        [toPascal(f.name), goFieldType(f.type), `\`${buildGORMTags(f)} json:"${f.name}"\``]);
+      if (!e.fields.some((f) => f.name === "createdAt")) rows.push(["CreatedAt", "time.Time"]);
+      if (!e.fields.some((f) => f.name === "updatedAt")) rows.push(["UpdatedAt", "time.Time"]);
+      if (!e.fields.some((f) => f.name === "deletedAt")) rows.push(["DeletedAt", "gorm.DeletedAt", '`gorm:"index"`']);
+      const fields = goAlignFields(rows);
       const uuidPk = e.fields.find((f) => f.primaryKey && f.type === "uuid");
       // UUIDs are assigned in Go so inserts behave the same on Postgres,
       // MySQL and the SQLite used by the handler tests (no DB-side default).
@@ -1702,6 +1817,22 @@ ${imports}
 
 ${structs}
 `;
+}
+
+// gofmt column alignment: names pad across the whole struct, types pad across
+// each contiguous run of tagged fields.
+function goAlignFields(rows: [string, string, string?][]): string[] {
+  const nameW = Math.max(...rows.map((r) => r[0].length));
+  const typeW = rows.map(() => 0);
+  for (let i = 0; i < rows.length; ) {
+    let j = i;
+    while (j < rows.length && rows[j][2]) j++;
+    const w = Math.max(0, ...rows.slice(i, j).map((r) => r[1].length));
+    for (let k = i; k < j; k++) typeW[k] = w;
+    i = j === i ? i + 1 : j;
+  }
+  return rows.map(([n, t, tag], i) =>
+    `\t${n.padEnd(nameW)} ${tag ? `${t.padEnd(typeW[i])} ${tag}` : t}`);
 }
 
 function goFieldType(t: FieldType): string {
@@ -2224,6 +2355,85 @@ func ExtractBearer(h http.Header) (string, error) {
 `;
 }
 
+// Self-managed variant of internal/auth: same API as goAuthJwt (Default,
+// Verify, ExtractBearer, NewContext/FromContext) so middleware is shared.
+function goAuthHS256(): string {
+  return `// Package auth verifies the HS256 JWTs this service issues itself (auth "none"
+// = self-managed): the login/register/refresh handlers sign with JWT_SECRET
+// and Verify checks the same secret. Pick an external provider in the builder
+// to verify provider-issued tokens via JWKS instead.
+package auth
+
+import (
+\t"context"
+\t"errors"
+\t"fmt"
+\t"net/http"
+\t"os"
+\t"strings"
+
+\t"github.com/golang-jwt/jwt/v5"
+)
+
+// Claims holds the verified token fields handlers need.
+type Claims struct {
+\tSubject string
+\tEmail   string
+}
+
+type contextKey struct{}
+
+// NewContext / FromContext thread claims through request context.
+func NewContext(ctx context.Context, c *Claims) context.Context {
+\treturn context.WithValue(ctx, contextKey{}, c)
+}
+func FromContext(ctx context.Context) (*Claims, bool) {
+\tc, ok := ctx.Value(contextKey{}).(*Claims)
+\treturn c, ok
+}
+
+type Verifier struct {
+\tsecret []byte
+}
+
+// Default builds a Verifier from JWT_SECRET.
+func Default() (*Verifier, error) {
+\tsecret := os.Getenv("JWT_SECRET")
+\tif secret == "" {
+\t\treturn nil, errors.New("auth: JWT_SECRET must be set")
+\t}
+\treturn &Verifier{secret: []byte(secret)}, nil
+}
+
+// Verify checks signature (HS256 only), expiry, and returns the claims.
+func (v *Verifier) Verify(_ context.Context, raw string) (*Claims, error) {
+\ttok, err := jwt.Parse(raw, func(*jwt.Token) (any, error) { return v.secret, nil },
+\t\tjwt.WithValidMethods([]string{"HS256"}), jwt.WithExpirationRequired())
+\tif err != nil {
+\t\treturn nil, fmt.Errorf("auth: verify: %w", err)
+\t}
+\tsub, _ := tok.Claims.GetSubject()
+\tmc, _ := tok.Claims.(jwt.MapClaims)
+\temail, _ := mc["email"].(string)
+\treturn &Claims{Subject: sub, Email: email}, nil
+}
+
+// ExtractBearer pulls the token out of an \`Authorization: Bearer <token>\`
+// header and returns an error when the header is missing or malformed.
+func ExtractBearer(h http.Header) (string, error) {
+\tauth := h.Get("Authorization")
+\tif auth == "" {
+\t\treturn "", errors.New("missing Authorization header")
+\t}
+\tconst prefix = "Bearer "
+\tif !strings.HasPrefix(auth, prefix) {
+\t\treturn "", errors.New("Authorization header must be a Bearer token")
+\t}
+\treturn strings.TrimSpace(auth[len(prefix):]), nil
+}
+`;
+}
+
 function goMiddleware(config: StackConfig, module: string, withAuth: boolean) {
   const fw = config.framework;
   // Per-framework import of the shared auth package. We import it only when
@@ -2264,14 +2474,14 @@ ${config.audit ? `func auditLog(log *slog.Logger) gin.HandlerFunc {
 ` : ""}${
   withAuth
     ? `func authRequired(c *gin.Context) {
-\tv, err := auth.Default()
-\tif err != nil {
-\t\tc.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "auth_unconfigured"})
-\t\treturn
-\t}
 \traw, err := auth.ExtractBearer(c.Request.Header)
 \tif err != nil {
 \t\tc.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing_or_malformed_token"})
+\t\treturn
+\t}
+\tv, err := auth.Default()
+\tif err != nil {
+\t\tc.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "auth_unconfigured"})
 \t\treturn
 \t}
 \tclaims, err := v.Verify(c.Request.Context(), raw)
@@ -2330,13 +2540,13 @@ ${config.audit ? `func auditLog(log *slog.Logger) fiber.Handler {
 ` : ""}${
   withAuth
     ? `func authRequired(c *fiber.Ctx) error {
-\tv, err := auth.Default()
-\tif err != nil {
-\t\treturn c.Status(500).JSON(fiber.Map{"error": "auth_unconfigured"})
-\t}
 \traw, err := auth.ExtractBearer(http.Header(c.GetReqHeaders()))
 \tif err != nil {
 \t\treturn c.Status(401).JSON(fiber.Map{"error": "missing_or_malformed_token"})
+\t}
+\tv, err := auth.Default()
+\tif err != nil {
+\t\treturn c.Status(500).JSON(fiber.Map{"error": "auth_unconfigured"})
 \t}
 \tclaims, err := v.Verify(c.UserContext(), raw)
 \tif err != nil {
@@ -2397,13 +2607,13 @@ ${config.audit ? `func auditLog(log *slog.Logger) echo.MiddlewareFunc {
   withAuth
     ? `func authRequired(next echo.HandlerFunc) echo.HandlerFunc {
 \treturn func(c echo.Context) error {
-\t\tv, err := auth.Default()
-\t\tif err != nil {
-\t\t\treturn c.JSON(http.StatusInternalServerError, map[string]string{"error": "auth_unconfigured"})
-\t\t}
 \t\traw, err := auth.ExtractBearer(c.Request().Header)
 \t\tif err != nil {
 \t\t\treturn c.JSON(http.StatusUnauthorized, map[string]string{"error": "missing_or_malformed_token"})
+\t\t}
+\t\tv, err := auth.Default()
+\t\tif err != nil {
+\t\t\treturn c.JSON(http.StatusInternalServerError, map[string]string{"error": "auth_unconfigured"})
 \t\t}
 \t\tclaims, err := v.Verify(c.Request().Context(), raw)
 \t\tif err != nil {
@@ -2462,14 +2672,14 @@ ${config.audit ? `func auditLog(log *slog.Logger) func(http.Handler) http.Handle
   withAuth
     ? `func authRequired(next http.Handler) http.Handler {
 \treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-\t\tv, err := auth.Default()
-\t\tif err != nil {
-\t\t\twriteJSONErr(w, http.StatusInternalServerError, "auth_unconfigured")
-\t\t\treturn
-\t\t}
 \t\traw, err := auth.ExtractBearer(r.Header)
 \t\tif err != nil {
 \t\t\twriteJSONErr(w, http.StatusUnauthorized, "missing_or_malformed_token")
+\t\t\treturn
+\t\t}
+\t\tv, err := auth.Default()
+\t\tif err != nil {
+\t\t\twriteJSONErr(w, http.StatusInternalServerError, "auth_unconfigured")
 \t\t\treturn
 \t\t}
 \t\tclaims, err := v.Verify(r.Context(), raw)

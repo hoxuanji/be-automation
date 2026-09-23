@@ -6,8 +6,8 @@
   },
   {
     "path": ".env.example",
-    "lines": 41,
-    "size": 2198
+    "lines": 43,
+    "size": 2284
   },
   {
     "path": ".github/workflows/ci.yml",
@@ -36,8 +36,8 @@
   },
   {
     "path": "cmd/migrate/main.go",
-    "lines": 77,
-    "size": 1878
+    "lines": 87,
+    "size": 2170
   },
   {
     "path": "DEPLOY.md",
@@ -51,8 +51,8 @@
   },
   {
     "path": "deploy/helm/templates/deployment.yaml",
-    "lines": 24,
-    "size": 547
+    "lines": 28,
+    "size": 710
   },
   {
     "path": "deploy/helm/templates/hpa.yaml",
@@ -72,7 +72,7 @@
   {
     "path": "deploy/k8s/deployment.yaml",
     "lines": 63,
-    "size": 2037
+    "size": 2047
   },
   {
     "path": "deploy/k8s/hpa.yaml",
@@ -91,8 +91,8 @@
   },
   {
     "path": "deploy/k8s/secrets.example.env",
-    "lines": 21,
-    "size": 471
+    "lines": 22,
+    "size": 490
   },
   {
     "path": "deploy/k8s/service.yaml",
@@ -112,12 +112,12 @@
   {
     "path": "go.mod",
     "lines": 23,
-    "size": 663
+    "size": 669
   },
   {
     "path": "internal/api/contract/contract_test.go",
-    "lines": 118,
-    "size": 2970
+    "lines": 115,
+    "size": 2758
   },
   {
     "path": "internal/auth/jwt.go",
@@ -146,8 +146,8 @@
   },
   {
     "path": "internal/handlers/post_test.go",
-    "lines": 93,
-    "size": 3108
+    "lines": 129,
+    "size": 3199
   },
   {
     "path": "internal/handlers/post.go",
@@ -156,8 +156,8 @@
   },
   {
     "path": "internal/handlers/user_test.go",
-    "lines": 93,
-    "size": 3102
+    "lines": 129,
+    "size": 3193
   },
   {
     "path": "internal/handlers/user.go",
@@ -167,7 +167,7 @@
   {
     "path": "internal/models/models.go",
     "lines": 44,
-    "size": 971
+    "size": 1022
   },
   {
     "path": "internal/monitoring/metrics.go",
@@ -216,8 +216,8 @@
   },
   {
     "path": "QUICKSTART.md",
-    "lines": 105,
-    "size": 2402
+    "lines": 106,
+    "size": 2533
   },
   {
     "path": "README.md",

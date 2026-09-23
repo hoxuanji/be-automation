@@ -510,4 +510,33 @@ describe("Stack-option wiring", () => {
     assert.ok(gen({ language: "kotlin", framework: "ktor" }, eps).get("src/main/kotlin/Application.kt")?.includes('post("/orders")'));
     assert.ok(gen({ language: "kotlin", framework: "spring-kt" }, eps).files.some((f) => f.path.endsWith("/ApiController.kt") && f.content.includes('@PostMapping("/orders")')));
   });
+
+  it("Go auth patterns stay consistent with the token verifier authRequired uses", () => {
+    const eps = [
+      { id: "1", method: "POST" as const, path: "/auth/login", summary: "Login", auth: false, pattern: "auth_login" },
+      { id: "2", method: "GET" as const, path: "/auth/me", summary: "Me", auth: true, pattern: "auth_me" },
+    ];
+    // Self-managed: login mints HS256 tokens, so the verifier must be HS256 with the same secret.
+    const self = gen({ auth: "none" }, eps, SAMPLE_ENTITIES);
+    assert.match(self.get("internal/auth/jwt.go")!, /WithValidMethods\(\[\]string\{"HS256"\}\)/);
+    assert.match(self.get("internal/handlers/api.go")!, /SigningMethodHS256/);
+    assert.match(self.get(".env.example")!, /^JWT_SECRET=/m);
+    // External provider: tokens come from the provider (JWKS); the service must not mint its own.
+    const clerk = gen({ auth: "clerk" }, eps, SAMPLE_ENTITIES);
+    assert.match(clerk.get("internal/auth/jwt.go")!, /jwk\.NewCache/);
+    const api = clerk.get("internal/handlers/api.go")!;
+    assert.ok(!api.includes("SigningMethodHS256") && api.includes("handled_by_clerk"));
+    assert.match(api, /auth\.FromContext/);
+  });
+
+  it("Go migrate command matches the database driver and handles config errors", () => {
+    const main = (database: string) => gen({ database }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("cmd/migrate/main.go")!;
+    assert.match(main("postgres"), /migrate\/v4\/database\/postgres"/);
+    assert.match(main("cockroach"), /migrate\/v4\/database\/cockroachdb"/);
+    assert.match(main("mysql"), /migrate\/v4\/database\/mysql"/);
+    assert.match(main("sqlite"), /migrate\/v4\/database\/sqlite"/);
+    assert.match(main("postgres"), /cfg, err := config\.Load\(\)/);
+    // Pure-Go sqlite so CGO_ENABLED=0 Docker builds work.
+    assert.ok(gen({ database: "sqlite" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("internal/db/gorm.go")!.includes("github.com/glebarez/sqlite"));
+  });
 });

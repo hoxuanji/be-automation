@@ -38,6 +38,59 @@ export function migrationFiles(config: StackConfig, entities: Entity[]): Generat
 
 function goMigrationFiles(config: StackConfig, up: string, down: string): GeneratedFile[] {
   const module = `github.com/your-username/${safeName(config.name)}`;
+  // golang-migrate picks its database driver from the URL scheme, so map
+  // DATABASE_URL onto the scheme of the driver we import.
+  const dialect = dialectFor(config.database);
+  const cockroach = config.database === "cockroach";
+  const driver = dialect === "mysql" ? "mysql" : dialect === "sqlite" ? "sqlite" : cockroach ? "cockroachdb" : "postgres";
+  const urlFn =
+    dialect === "mysql"
+      ? `
+// migrateURL turns mysql://user:pass@host:3306/db?k=v (the .env.example form)
+// into mysql://user:pass@tcp(host:3306)/db?k=v, which golang-migrate expects.
+func migrateURL(raw string) (string, error) {
+\tif !strings.HasPrefix(raw, "mysql://") || strings.Contains(raw, "@tcp(") {
+\t\treturn raw, nil
+\t}
+\tu, err := url.Parse(raw)
+\tif err != nil {
+\t\treturn "", err
+\t}
+\tpass, _ := u.User.Password()
+\tout := "mysql://" + u.User.Username() + ":" + pass + "@tcp(" + u.Host + ")" + u.Path
+\tq := u.Query()${config.database === "planetscale" ? `
+\tif q.Get("tls") == "" {
+\t\tq.Set("tls", "true") // PlanetScale only accepts TLS connections
+\t}` : ""}
+\tif len(q) > 0 {
+\t\tout += "?" + q.Encode()
+\t}
+\treturn out, nil
+}
+`
+      : dialect === "sqlite"
+        ? `
+// migrateURL turns file:./app.db (the .env.example form) into sqlite://./app.db.
+func migrateURL(raw string) (string, error) {
+\treturn "sqlite://" + strings.TrimPrefix(strings.TrimPrefix(raw, "sqlite://"), "file:"), nil
+}
+`
+        : cockroach
+          ? `
+// migrateURL swaps postgres:// for cockroachdb:// so golang-migrate uses its
+// CockroachDB driver (the postgres driver's advisory locks are unsupported).
+func migrateURL(raw string) (string, error) {
+\tif _, rest, ok := strings.Cut(raw, "://"); ok {
+\t\treturn "cockroachdb://" + rest, nil
+\t}
+\treturn raw, nil
+}
+`
+          : `
+// migrateURL is the identity: the postgres driver accepts DATABASE_URL as-is.
+func migrateURL(raw string) (string, error) { return raw, nil }
+`;
+  const needsStrings = dialect !== "postgres" || cockroach;
   return [
     { path: "migrations/000001_init.up.sql", content: up },
     { path: "migrations/000001_init.down.sql", content: down },
@@ -59,23 +112,30 @@ function goMigrationFiles(config: StackConfig, up: string, down: string): Genera
 import (
 \t"errors"
 \t"log"
-\t"os"
+${dialect === "mysql" ? '\t"net/url"\n' : ""}\t"os"
 \t"strconv"
-
+${needsStrings ? '\t"strings"\n' : ""}
 \t"github.com/golang-migrate/migrate/v4"
-\t_ "github.com/golang-migrate/migrate/v4/database/postgres"
+\t_ "github.com/golang-migrate/migrate/v4/database/${driver}"
 \t_ "github.com/golang-migrate/migrate/v4/source/file"
 
 \t"${module}/internal/config"
 )
 
 func main() {
-\tcfg := config.Load()
+\tcfg, err := config.Load()
+\tif err != nil {
+\t\tlog.Fatalf("config: %v", err)
+\t}
 \tif cfg.DatabaseURL == "" {
 \t\tlog.Fatal("DATABASE_URL must be set to run migrations")
 \t}
+\tdbURL, err := migrateURL(cfg.DatabaseURL)
+\tif err != nil {
+\t\tlog.Fatalf("DATABASE_URL: %v", err)
+\t}
 
-\tm, err := migrate.New("file://migrations", cfg.DatabaseURL)
+\tm, err := migrate.New("file://migrations", dbURL)
 \tif err != nil {
 \t\tlog.Fatalf("open migrations: %v", err)
 \t}
@@ -119,7 +179,7 @@ func main() {
 \t\tlog.Fatalf("unknown subcommand: %s (want up/down/version)", cmd)
 \t}
 }
-`,
+${urlFn}`,
     },
   ];
 }

@@ -41,8 +41,8 @@
   },
   {
     "path": "deploy/helm/templates/deployment.yaml",
-    "lines": 24,
-    "size": 547
+    "lines": 28,
+    "size": 664
   },
   {
     "path": "deploy/helm/templates/hpa.yaml",
@@ -107,7 +107,7 @@
   {
     "path": "QUICKSTART.md",
     "lines": 105,
-    "size": 2516
+    "size": 2572
   },
   {
     "path": "README.md",
