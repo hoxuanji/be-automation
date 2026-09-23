@@ -148,7 +148,7 @@ function springFiles(
     });
     files.push({
       path: `src/test/java/dev/helios/app/${pascal}ControllerTest.java`,
-      content: controllerTest(entity),
+      content: controllerTest(entity, withAuth),
     });
   }
 
@@ -191,6 +191,12 @@ function springPom(artifactId: string, withAuth = false, mysql = false, metrics 
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+    </dependency>
+    <!-- jwt() request post-processor for MockMvc tests of protected routes. -->
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-test</artifactId>
+      <scope>test</scope>
     </dependency>
 `
     : "";
@@ -773,7 +779,7 @@ public class ${pascal}Controller {
 
 // ─── Controller test ──────────────────────────────────────────────────────────
 
-function controllerTest(entity: Entity): string {
+function controllerTest(entity: Entity, withAuth = false): string {
   const pascal = toPascal(entity.name);
   const kebab = toKebab(entity.name);
 
@@ -789,9 +795,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.http.MediaType;
-import org.springframework.test.web.servlet.MockMvc;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+${withAuth ? "import org.springframework.boot.test.mock.mockito.MockBean;\n" : ""}import org.springframework.http.MediaType;
+${withAuth ? "import org.springframework.security.oauth2.jwt.JwtDecoder;\n" : ""}import org.springframework.test.web.servlet.MockMvc;
+${withAuth ? "import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;\n" : ""}import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @SpringBootTest
@@ -800,17 +806,22 @@ class ${pascal}ControllerTest {
 
     @Autowired
     MockMvc mvc;
-
+${withAuth ? `
+    // Routes require a Bearer JWT; jwt() injects an authenticated principal and
+    // the mocked decoder keeps the context from needing a live JWKS endpoint.
+    @MockBean
+    JwtDecoder jwtDecoder;
+` : ""}
     @Test
     void list${pascal}s_returnsOk() throws Exception {
-        mvc.perform(get("/${kebab}s"))
+        mvc.perform(get("/${kebab}s")${withAuth ? ".with(jwt())" : ""})
            .andExpect(status().isOk());
     }
 
     @Test
     void create${pascal}_returnsCreated() throws Exception {
         String body = ${createBody};
-        mvc.perform(post("/${kebab}s")
+        mvc.perform(post("/${kebab}s")${withAuth ? "\n                .with(jwt())" : ""}
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(body))
            .andExpect(status().isCreated());
