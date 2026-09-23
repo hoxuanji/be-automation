@@ -296,7 +296,7 @@ function ktDataClassType(field: EntityField): string {
     case "uuid":    return "String";
     case "string":  return "String";
     case "text":    return "String";
-    case "number":  return "Long";
+    case "number":  return "Double";
     case "boolean": return "Boolean";
     case "date":    return "String"; // ISO-8601 string for serialization simplicity
     case "json":    return "String"; // stored as JSON string
@@ -309,10 +309,10 @@ function ktExposedColumn(field: EntityField): string {
     case "uuid":    return `uuid("${col}").autoGenerate()`;
     case "string":  return `varchar("${col}", 255)`;
     case "text":    return `text("${col}")`;
-    case "number":  return `long("${col}")`;
+    case "number":  return `double("${col}")`;
     case "boolean": return `bool("${col}")`;
     case "date":    return `timestamp("${col}")`;
-    case "json":    return `text("${col}") // JSON stored as text`;
+    case "json":    return `text("${col}")`;
   }
 }
 
@@ -348,6 +348,8 @@ function ktorModel(entity: Entity): string {
   const nonPkLines = nonPkFields.map((f) => {
     let line = `    val ${toCamel(f.name)} = ${ktExposedColumn(f)}`;
     if (f.unique) line += ".uniqueIndex()";
+    if (!f.required) line += ".nullable()"; // data class field is `T? = null`
+    if (f.type === "json") line += " // JSON stored as text";
     return line;
   });
 
@@ -365,7 +367,7 @@ function ktorModel(entity: Entity): string {
     const nullable = !f.required ? "?" : "";
     const defaultVal = !f.required ? " = null" : "";
     const comment = f.type === "json" ? " // JSON string" : "";
-    return `    val ${toCamel(f.name)}: ${type}${nullable},${comment}${defaultVal}`;
+    return `    val ${toCamel(f.name)}: ${type}${nullable}${defaultVal},${comment}`;
   });
 
   const dataClassFields = [pkClassField, ...nonPkClassFields].join("\n");
@@ -376,7 +378,7 @@ function ktorModel(entity: Entity): string {
     const nullable = !f.required ? "?" : "";
     const defaultVal = !f.required ? " = null" : "";
     const comment = f.type === "json" ? " // JSON string" : "";
-    return `    val ${toCamel(f.name)}: ${type}${nullable},${comment}${defaultVal}`;
+    return `    val ${toCamel(f.name)}: ${type}${nullable}${defaultVal},${comment}`;
   });
 
   // Build Update DTO (all non-PK fields are nullable with defaults)
@@ -907,7 +909,7 @@ function springKtEntity(pkg: string, entity: Entity): string {
     const nullable = !f.required ? "?" : "";
     const defaultVal = !f.required ? " = null" : "";
     const columnAnnotation = f.unique ? `    @Column(unique = true)\n` : `    @Column\n`;
-    return `${columnAnnotation}    val ${toCamel(f.name)}: ${type}${nullable},${defaultVal}`;
+    return `${columnAnnotation}    val ${toCamel(f.name)}: ${type}${nullable}${defaultVal},`;
   });
 
   const allLines = [pkLine, ...fieldLines].join("\n");
@@ -929,7 +931,7 @@ function springKtFieldType(t: FieldType): string {
     case "uuid":    return "java.util.UUID";
     case "string":  return "String";
     case "text":    return "String";
-    case "number":  return "Long";
+    case "number":  return "Double";
     case "boolean": return "Boolean";
     case "date":    return "java.time.Instant";
     case "json":    return "String"; // stored as JSON string

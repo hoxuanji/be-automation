@@ -307,6 +307,24 @@ describe("Generator invariants", () => {
     assert.ok(!/\bself,\s*self\b/.test(sdk.content), "SDK methods must not declare `self` twice");
   });
 
+  // Optional entity fields used to emit `val x: T?, = null` (a Kotlin syntax error) and a
+  // non-nullable Exposed column, so every Kotlin repo with an optional field failed to build.
+  it("Kotlin optional entity fields are `T? = null` with a nullable column", () => {
+    const entities = [{
+      id: "e1", name: "Item", fields: [
+        { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+        { id: "f2", name: "score", type: "number" as const, required: false, unique: false },
+      ],
+    }];
+    for (const framework of ["ktor", "spring-kt"]) {
+      const config = { ...BASE_CONFIG, language: "kotlin" as const, framework, api: "rest" as const };
+      const kt = generate(config, [], entities).filter((f) => f.path.endsWith(".kt")).map((f) => f.content).join("\n");
+      assert.ok(!/\?,\s*=\s*null/.test(kt), `${framework}: default must precede the comma`);
+      assert.match(kt, /val score: Double\? = null,/, `${framework}: optional number field`);
+      if (framework === "ktor") assert.match(kt, /double\("score"\)\.nullable\(\)/, "ktor: optional column must be nullable");
+    }
+  });
+
   it("generates with empty endpoints", () => {
     const config = { ...BASE_CONFIG, language: "typescript" as const, framework: "express", api: "rest" as const };
     const files = generate(config, []);
