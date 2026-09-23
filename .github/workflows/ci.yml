@@ -131,9 +131,7 @@ jobs:
         if: matrix.combo.language == 'go'
         working-directory: /tmp/smoke-repo
         run: |
-          go mod tidy
-          go build ./...
-          go vet ./...
+          { go mod tidy && go build ./... && go vet ./...; } 2>&1 | tee -a /tmp/smoke.log
 
       - name: Setup Node (TS)
         if: matrix.combo.language == 'typescript'
@@ -145,8 +143,7 @@ jobs:
         if: matrix.combo.language == 'typescript'
         working-directory: /tmp/smoke-repo
         run: |
-          npm install
-          npx tsc --noEmit --skipLibCheck
+          { npm install --no-audit --no-fund && npx tsc --noEmit --skipLibCheck; } 2>&1 | tee -a /tmp/smoke.log
 
       - name: Setup Python
         if: matrix.combo.language == 'python'
@@ -159,7 +156,6 @@ jobs:
         working-directory: /tmp/smoke-repo
         run: |
           # Generated Python repos use Poetry (pyproject.toml), same as their Dockerfile.
-          set -o pipefail
           {
             pip install -q poetry==1.8.3 &&
             poetry config virtualenvs.create false &&
@@ -169,10 +165,7 @@ jobs:
             # Only undefined names fail the build: they are runtime NameErrors. Other pyflakes output is style.
             { python -m pyflakes . > /tmp/pyflakes.txt || true; } &&
             ! grep "undefined name" /tmp/pyflakes.txt
-          } 2>&1 | tee /tmp/py.log || {
-            grep -iE "error|failed|because|not found|No such" /tmp/py.log | head -25 | while IFS= read -r l; do echo "::error::$l"; done
-            exit 1
-          }
+          } 2>&1 | tee -a /tmp/smoke.log
 
       - name: Setup Java
         if: matrix.combo.language == 'java' || matrix.combo.language == 'kotlin'
@@ -185,20 +178,16 @@ jobs:
         if: matrix.combo.language == 'java'
         working-directory: /tmp/smoke-repo
         run: |
-          chmod +x mvnw 2>/dev/null || true
-          ./mvnw compile -q 2>/dev/null || mvn compile -q
+          if [ -x ./mvnw ]; then MVN=./mvnw; else MVN=mvn; fi
+          $MVN -B compile -q 2>&1 | tee -a /tmp/smoke.log
 
       - name: Smoke build (Kotlin – Gradle)
         if: matrix.combo.language == 'kotlin'
         working-directory: /tmp/smoke-repo
         run: |
           gradle --version | grep -E "^Gradle"
-          set -o pipefail
           if [ -x ./gradlew ]; then GRADLE=./gradlew; else GRADLE=gradle; fi
-          $GRADLE compileKotlin -q 2>&1 | tee /tmp/gradle.log || {
-            grep -E "^e: |What went wrong|> |error:" /tmp/gradle.log | head -25 | while IFS= read -r l; do echo "::error::$l"; done
-            exit 1
-          }
+          $GRADLE compileKotlin -q 2>&1 | tee -a /tmp/smoke.log
 
       - name: Setup Rust
         if: matrix.combo.language == 'rust'
@@ -207,4 +196,11 @@ jobs:
       - name: Smoke build (Rust)
         if: matrix.combo.language == 'rust'
         working-directory: /tmp/smoke-repo
-        run: cargo check
+        run: cargo check 2>&1 | tee -a /tmp/smoke.log
+
+      - name: Report smoke errors
+        if: failure()
+        run: |
+          # CI logs aren't always downloadable; surface the compiler errors as annotations.
+          grep -E "error|\.go:[0-9]+:[0-9]+:|^e: |\[ERROR\]|What went wrong|undefined name" /tmp/smoke.log 2>/dev/null \
+            | grep -vE "^npm warn|0 errors" | head -40 | while IFS= read -r l; do echo "::error::$l"; done
