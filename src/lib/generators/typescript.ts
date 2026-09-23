@@ -4,7 +4,7 @@ import { tsGrpcFiles } from "./grpc/typescript";
 import { tsGraphqlFiles } from "./graphql/typescript";
 import { isGraphqlSupported } from "./types";
 import { needsAuth } from "./auth/providers";
-import { tsPatternRoute, tsPatternImports } from "./patterns/typescript";
+import { tsPatternRoute, tsPatternImports, usesPrisma, hasRedisCache } from "./patterns/typescript";
 
 function tsMockField(name: string, type: FieldType): string {
   switch (type) {
@@ -44,7 +44,7 @@ export function typescriptFiles(
   // service stubs can plug into PrismaClient without further ceremony.
   if (config.api === "grpc") {
     const files: GeneratedFile[] = [];
-    if (entities.length > 0) {
+    if (usesPrisma(config, entities)) {
       files.push(...prismaFiles(config, entities));
     }
     files.push(...tsGrpcFiles(config, entities));
@@ -56,15 +56,20 @@ export function typescriptFiles(
   const anyProtected = endpoints.some((e) => e.auth);
   const withAuth = needsAuth(config, anyProtected);
 
-  files.push({ path: "package.json", content: pkgJson(name, config.framework, entities.length > 0, config.database, withAuth, config.monitoring) });
+  files.push({ path: "package.json", content: pkgJson(name, config, usesPrisma(config, entities), withAuth) });
   files.push({ path: "tsconfig.json", content: tsconfig() });
   files.push({ path: "Dockerfile", content: tsDockerfile() });
   files.push({ path: "vitest.config.ts", content: vitestConfig() });
 
-  if (entities.length > 0) {
+  if (usesPrisma(config, entities)) {
     files.push(...prismaFiles(config, entities));
+    files.push({ path: "src/db.ts", content: `import { PrismaClient } from "@prisma/client";\n\nexport const prisma = new PrismaClient();\n` });
+  }
+  if (entities.length > 0) {
     files.push(...entityCrudFiles(config, entities));
   }
+  if (config.tracing) files.push({ path: "src/tracing.ts", content: tracingFile(name) });
+  if (hasRedis(config)) files.push({ path: "src/cache.ts", content: cacheFile() });
 
   if (config.framework === "nestjs") {
     files.push(...nestjsFiles(config, endpoints, entities));
@@ -79,9 +84,63 @@ export function typescriptFiles(
   return files;
 }
 
+const hasProm = (c: StackConfig) => /prometheus|grafana/.test(c.monitoring);
+const hasSentry = (c: StackConfig) => /sentry/.test(c.monitoring);
+const hasDatadog = (c: StackConfig) => /datadog/.test(c.monitoring);
+const hasRedis = hasRedisCache;
+
+function tracingFile(name: string): string {
+  return `// OpenTelemetry bootstrap — imported first in main.ts so auto-instrumentation
+// can patch http / express / fastify / ioredis before they are loaded.
+// The exporter reads OTEL_EXPORTER_OTLP_ENDPOINT (default http://localhost:4318).
+import { NodeSDK } from "@opentelemetry/sdk-node";
+import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+
+const sdk = new NodeSDK({
+  serviceName: process.env.OTEL_SERVICE_NAME ?? ${JSON.stringify(name)},
+  traceExporter: new OTLPTraceExporter(),
+  instrumentations: [getNodeAutoInstrumentations()],
+});
+sdk.start();
+`;
+}
+
+function cacheFile(): string {
+  return `import Redis from "ioredis";
+
+// Works for Redis, Dragonfly and Upstash (use the rediss:// URL for TLS).
+export const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", {
+  maxRetriesPerRequest: 2,
+});
+`;
+}
+
+// Lines that must run before anything else in main.ts: tracing first, then
+// APM / error-tracking agents, then the metrics registry.
+function tsInstrumentPreamble(c: StackConfig): string {
+  return [
+    c.tracing ? `import "./tracing";` : "",
+    hasDatadog(c) ? `import tracer from "dd-trace";\ntracer.init();` : "",
+    hasSentry(c)
+      ? `import * as Sentry from "@sentry/node";\nSentry.init({ dsn: process.env.SENTRY_DSN, tracesSampleRate: 1.0${c.tracing ? ", skipOpenTelemetrySetup: true" : ""} });`
+      : "",
+    hasProm(c) ? `import { collectDefaultMetrics, register } from "prom-client";\ncollectDefaultMetrics();` : "",
+  ].filter(Boolean).map((l) => l + "\n").join("");
+}
+
+// Pattern handlers inline in main.ts need these clients.
+function tsPatternClientImports(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): string {
+  const patterns = endpoints.map((e) => e.pattern ?? "");
+  const needsDb = usesPrisma(config, entities) && patterns.some((p) => /^(crud_|paginated_search|cache_read|health_check)/.test(p));
+  const needsCache = hasRedis(config) && patterns.some((p) => p === "cache_read" || p === "health_check");
+  return `${needsDb ? `import { prisma } from "./db";\n` : ""}${needsCache ? `import { redis } from "./cache";\n` : ""}`;
+}
+
 function entityCrudFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
   const files: GeneratedFile[] = [];
-  const isMongo = /mongo/.test(config.database);
+  // No Prisma → in-memory repository so the app still builds and runs.
+  const isMongo = !usesPrisma(config, entities);
 
   for (const entity of entities) {
     const pascal = entity.name;
@@ -96,7 +155,7 @@ function entityCrudFiles(config: StackConfig, entities: Entity[]): GeneratedFile
 
     files.push({
       path: `src/repositories/${kebab}.repository.ts`,
-      content: repositoryFile(pascal, camel, kebab, nonPkFields, isMongo),
+      content: repositoryFile(pascal, camel, kebab, nonPkFields, isMongo, entity.fields.find((f) => f.primaryKey)),
     });
 
     files.push({
@@ -187,7 +246,9 @@ export function validate${pascal}Query(data: unknown) {
 `;
 }
 
-function repositoryFile(pascal: string, _camel: string, _kebab: string, nonPkFields: EntityField[], isMongo: boolean): string {
+function repositoryFile(pascal: string, _camel: string, _kebab: string, nonPkFields: EntityField[], isMongo: boolean, pk?: EntityField): string {
+  const pkName = pk?.name ?? "id";
+  const where = `{ ${pkName}: ${pk?.type === "number" ? "Number(id)" : "id"} }`;
   if (isMongo) {
     const initLines = nonPkFields.map((f) => `    ${f.name}: data.${f.name},`).join("\n");
     return `import type { ${pascal}Input } from "../validators/${toKebab(pascal)}.validator";
@@ -252,7 +313,7 @@ export async function findMany(opts: { page?: number; pageSize?: number; search?
 }
 
 export async function findById(id: string) {
-  return prisma.${toCamel(pascal)}.findUnique({ where: { id } });
+  return prisma.${toCamel(pascal)}.findUnique({ where: ${where} });
 }
 
 export async function create(data: ${pascal}Input) {
@@ -260,11 +321,11 @@ export async function create(data: ${pascal}Input) {
 }
 
 export async function update(id: string, data: Partial<${pascal}Input>) {
-  return prisma.${toCamel(pascal)}.update({ where: { id }, data }).catch(() => null);
+  return prisma.${toCamel(pascal)}.update({ where: ${where}, data }).catch(() => null);
 }
 
 export async function remove(id: string): Promise<void> {
-  await prisma.${toCamel(pascal)}.delete({ where: { id } }).catch(() => null);
+  await prisma.${toCamel(pascal)}.delete({ where: ${where} }).catch(() => null);
 }
 `;
 }
@@ -518,17 +579,18 @@ function prismaFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
     ? "sqlite"
     : "postgresql";
 
+  const isMongo = provider === "mongodb";
   const models = entities
     .map((e) => {
       const lines: string[] = [];
       for (const f of e.fields) {
-        const pk = f.primaryKey ? " @id" : "";
+        const pk = f.primaryKey ? (isMongo ? ` @id @map("_id")` : " @id") : "";
         const uniq = f.unique && !f.primaryKey ? " @unique" : "";
         const opt = !f.required ? "?" : "";
         const def = f.primaryKey
           ? f.type === "uuid"
             ? " @default(uuid())"
-            : " @default(autoincrement())"
+            : isMongo ? "" : " @default(autoincrement())"
           : "";
         lines.push(`  ${f.name}  ${prismaType(f.type)}${opt}${pk}${def}${uniq}`);
       }
@@ -567,7 +629,8 @@ function prismaType(t: FieldType): string {
   }
 }
 
-function pkgJson(name: string, framework: string, withPrisma = false, _db = "", withAuth = false, monitoring = "") {
+function pkgJson(name: string, config: StackConfig, withPrisma = false, withAuth = false) {
+  const framework = config.framework;
   const deps: Record<string, Record<string, string>> = {
     nestjs: {
       "@nestjs/common": "^10.4.0",
@@ -576,6 +639,7 @@ function pkgJson(name: string, framework: string, withPrisma = false, _db = "", 
       helmet: "^8.0.0",
       "reflect-metadata": "^0.2.2",
       "rxjs": "^7.8.1",
+      zod: "^3.24.1",
     },
     express: {
       express: "^4.21.0",
@@ -599,10 +663,21 @@ function pkgJson(name: string, framework: string, withPrisma = false, _db = "", 
   const dep = {
     ...(deps[framework] ?? deps.hono),
     ...(withPrisma ? { "@prisma/client": "^5.22.0" } : {}),
-    ...(withAuth ? { jose: "^5.9.6" } : {}),
-    ...(/prometheus|grafana/.test(monitoring) && framework === "express" ? { "prom-client": "^15.1.3" } : {}),
-    ...(/sentry/.test(monitoring) && framework === "express" ? { "@sentry/node": "^8.42.0" } : {}),
-    ...(/datadog/.test(monitoring) && framework === "express" ? { "dd-trace": "^5.23.0" } : {}),
+    // Express always emits src/middleware/auth.ts, which imports jose.
+    ...(withAuth || framework === "express" ? { jose: "^5.9.6" } : {}),
+    ...(hasProm(config) ? { "prom-client": "^15.1.3" } : {}),
+    ...(hasSentry(config) ? { "@sentry/node": "^8.42.0" } : {}),
+    ...(hasDatadog(config) ? { "dd-trace": "^5.23.0" } : {}),
+    ...(hasRedis(config) ? { ioredis: "^5.4.1" } : {}),
+    ...(config.tracing
+      ? {
+          "@opentelemetry/sdk-node": "^0.57.0",
+          "@opentelemetry/auto-instrumentations-node": "^0.55.0",
+          "@opentelemetry/exporter-trace-otlp-http": "^0.57.0",
+        }
+      : {}),
+    ...(config.rateLimit && framework === "nestjs" ? { "@nestjs/throttler": "^6.4.0" } : {}),
+    ...(config.rateLimit && framework === "fastify" ? { "@fastify/rate-limit": "^10.3.0" } : {}),
   };
   return (
     JSON.stringify(
@@ -1020,11 +1095,11 @@ function nestjsFiles(config: StackConfig, endpoints: Endpoint[], entities: Entit
   return [
     {
       path: "src/main.ts",
-      content: `import "reflect-metadata";
+      content: `${tsInstrumentPreamble(config)}import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import helmet from "helmet";
 import { AppModule } from "./app.module";
-
+${config.audit ? `import { auditLogger } from "./middleware/audit";\n` : ""}
 // Comma-separated list of origins, e.g. "https://app.example.com,https://admin.example.com".
 // Omit to keep CORS locked down — the app defaults to same-origin only.
 const allowedOrigins = process.env.ALLOWED_ORIGINS
@@ -1039,7 +1114,7 @@ async function bootstrap() {
       : false,
   });
   app.use(helmet());
-  // enableShutdownHooks wires Node's SIGTERM/SIGINT into the Nest application
+${config.audit ? "  app.use(auditLogger);\n" : ""}  // enableShutdownHooks wires Node's SIGTERM/SIGINT into the Nest application
   // lifecycle: controllers, providers, and the HTTP listener all receive
   // onModuleDestroy / onApplicationShutdown callbacks before the process exits.
   // Required for in-flight request draining during K8s rolling deploys.
@@ -1056,26 +1131,62 @@ bootstrap();
     {
       path: "src/app.module.ts",
       content: `import { Module } from "@nestjs/common";
-import { AppController } from "./app.controller";
+${config.rateLimit ? `import { APP_GUARD } from "@nestjs/core";\nimport { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";\n` : ""}import { AppController } from "./app.controller";
 ${entityModuleImports}
 
-@Module({ controllers: [AppController]${entities.length > 0 ? `, imports: [${entityModuleList}]` : ""} })
+@Module({
+  controllers: [AppController],
+  imports: [${[config.rateLimit ? "ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }])" : "", entityModuleList].filter(Boolean).join(", ")}],
+${config.rateLimit ? "  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],\n" : ""}})
 export class AppModule {}
 `,
     },
     {
       path: "src/app.controller.ts",
-      content: `import { Controller, Get, Post, Put, Patch, Delete } from "@nestjs/common";
-
+      content: `import { Controller, Get, Post, Put, Patch, Delete${hasProm(config) ? ", Header" : ""} } from "@nestjs/common";
+${hasProm(config) ? `import { register } from "prom-client";\n` : ""}
 @Controller()
 export class AppController {
   @Get("/health")
   health() { return { ok: true }; }
-
+${hasProm(config) ? `
+  @Get("/metrics")
+  @Header("Content-Type", register.contentType)
+  metrics() { return register.metrics(); }
+` : ""}
 ${routes}
 }
 `,
     },
+    ...(config.audit
+      ? [
+          {
+            path: "src/middleware/audit.ts",
+            content: `import type { IncomingMessage, ServerResponse } from "http";
+
+// Plain Node middleware — Nest runs on Express, so app.use() accepts it.
+// \`user\` is attached later by JwtAuthGuard; it is read on "finish".
+export function auditLogger(req: IncomingMessage & { user?: { sub?: string } }, res: ServerResponse, next: () => void) {
+  res.on("finish", () => {
+    process.stdout.write(
+      JSON.stringify({
+        level: "info",
+        event: "audit",
+        method: req.method,
+        path: req.url,
+        status: res.statusCode,
+        userId: req.user?.sub ?? "anonymous",
+        ip: req.socket.remoteAddress,
+        time: new Date().toISOString(),
+      }) + "\\n"
+    );
+  });
+  next();
+}
+`,
+          },
+        ]
+      : []),
     ...(withAuth
       ? [
           {
@@ -1150,11 +1261,11 @@ function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
   return [
     {
       path: "src/main.ts",
-      content: `import express from "express";
+      content: `${tsInstrumentPreamble(config)}import express from "express";
 import helmet from "helmet";
 import cors from "cors";
 import pinoHttp from "pino-http";
-${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}${config.audit ? `import { auditLogger } from "./middleware/audit";\n` : ""}${/prometheus|grafana/.test(config.monitoring) ? `import { collectDefaultMetrics, register } from "prom-client";\ncollectDefaultMetrics();\n` : ""}${/sentry/.test(config.monitoring) ? `import * as Sentry from "@sentry/node";\nSentry.init({ dsn: process.env.SENTRY_DSN, tracesSampleRate: 1.0 });\n` : ""}${/datadog/.test(config.monitoring) ? `import tracer from "dd-trace";\ntracer.init();\n` : ""}import { authRequired } from "./middleware/auth";
+${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}${config.audit ? `import { auditLogger } from "./middleware/audit";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}import { authRequired } from "./middleware/auth";
 ${entityImports ? entityImports + "\n" : ""}
 // Comma-separated list of origins in ALLOWED_ORIGINS, e.g.
 // "https://app.example.com,https://admin.example.com". Omit to keep CORS
@@ -1179,9 +1290,9 @@ app.use(pinoHttp({
 }));
 ${config.rateLimit ? "app.use(rateLimit);\n" : ""}${config.audit ? "app.use(auditLogger);\n" : ""}
 app.get("/health", (_, res) => res.json({ ok: true }));
-${/prometheus|grafana/.test(config.monitoring) ? `app.get("/metrics", async (_, res) => { res.set("Content-Type", register.contentType); res.end(await register.metrics()); });\n` : ""}${routes}
+${hasProm(config) ? `app.get("/metrics", async (_, res) => { res.set("Content-Type", register.contentType); res.end(await register.metrics()); });\n` : ""}${routes}
 ${entityMounts}
-const port = Number(process.env.PORT ?? 8080);
+${hasSentry(config) ? "Sentry.setupExpressErrorHandler(app);\n" : ""}const port = Number(process.env.PORT ?? 8080);
 const server = app.listen(port, () => console.log(JSON.stringify({ level: "info", msg: "listening", port })));
 
 // Graceful shutdown on SIGTERM — Kubernetes sends this before killing the pod.
@@ -1269,7 +1380,7 @@ export function auditLogger(req: Request, res: Response, next: NextFunction) {
         method: req.method,
         path: req.path,
         status: res.statusCode,
-        userId: (req as Record<string, unknown> & { user?: { sub?: string } }).user?.sub ?? "anonymous",
+        userId: req.user?.sub ?? "anonymous",
         ip: req.ip ?? req.socket.remoteAddress,
         time: new Date().toISOString(),
       }) + "\\n"
@@ -1329,16 +1440,32 @@ function fastifyFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
   return [
     {
       path: "src/main.ts",
-      content: `import Fastify from "fastify";
+      content: `${tsInstrumentPreamble(config)}import Fastify from "fastify";
 import helmet from "@fastify/helmet";
-${entityImports ? entityImports + "\n" : ""}
+${config.rateLimit ? `import rateLimit from "@fastify/rate-limit";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}${entityImports ? entityImports + "\n" : ""}
 async function main() {
   // Fastify's built-in logger (pino) already emits JSON, so no extra config needed.
   const app = Fastify({ logger: true });
   await app.register(helmet);
-
+${config.rateLimit ? `  // 60 requests / minute / IP, in-memory. Pass \`redis\` to share limits across replicas.
+  await app.register(rateLimit, { max: 60, timeWindow: "1 minute" });
+` : ""}${config.audit ? `  app.addHook("onResponse", async (request, reply) => {
+    request.log.info({
+      event: "audit",
+      method: request.method,
+      path: request.url,
+      status: reply.statusCode,
+      userId: (request as { user?: { sub?: string } }).user?.sub ?? "anonymous",
+      ip: request.ip,
+    }, "audit");
+  });
+` : ""}${hasSentry(config) ? "  Sentry.setupFastifyErrorHandler(app);\n" : ""}
   app.get("/health", async () => ({ ok: true }));
-${routes}
+${hasProm(config) ? `  app.get("/metrics", async (_request, reply) => {
+    reply.header("Content-Type", register.contentType);
+    return register.metrics();
+  });
+` : ""}${routes}
 ${entityRegistrations}
   const port = Number(process.env.PORT ?? 8080);
   await app.listen({ port, host: "0.0.0.0" });
@@ -1387,12 +1514,46 @@ function honoFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[
   return [
     {
       path: "src/main.ts",
-      content: `import { Hono } from "hono";
+      content: `${tsInstrumentPreamble(config)}import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-${entityImports ? entityImports + "\n" : ""}
+${config.rateLimit || config.audit ? `import { getConnInfo } from "@hono/node-server/conninfo";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}${entityImports ? entityImports + "\n" : ""}
 const app = new Hono();
+${config.rateLimit ? `
+// ponytail: in-memory fixed window (60 req / min / IP), per replica. Move the
+// counter to Redis if limits must hold across replicas.
+const buckets = new Map<string, { count: number; resetAt: number }>();
+app.use(async (c, next) => {
+  const key = getConnInfo(c).remote.address ?? "anon";
+  const now = Date.now();
+  const b = buckets.get(key);
+  if (!b || b.resetAt < now) buckets.set(key, { count: 1, resetAt: now + 60_000 });
+  else if (b.count >= 60) return c.json({ error: "rate_limited" }, 429);
+  else b.count++;
+  await next();
+});
+` : ""}${config.audit ? `
+app.use(async (c, next) => {
+  await next();
+  process.stdout.write(
+    JSON.stringify({
+      level: "info",
+      event: "audit",
+      method: c.req.method,
+      path: c.req.path,
+      status: c.res.status,
+      ip: getConnInfo(c).remote.address,
+      time: new Date().toISOString(),
+    }) + "\\n"
+  );
+});
+` : ""}${hasSentry(config) ? `
+app.onError((err, c) => {
+  Sentry.captureException(err);
+  return c.json({ error: "internal server error" }, 500);
+});
+` : ""}
 app.get("/health", (c) => c.json({ ok: true }));
-${routes}
+${hasProm(config) ? `app.get("/metrics", async (c) => c.body(await register.metrics(), 200, { "Content-Type": register.contentType }));\n` : ""}${routes}
 ${entityMounts}
 const port = Number(process.env.PORT ?? 8080);
 const server = serve({ fetch: app.fetch, port });

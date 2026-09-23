@@ -159,22 +159,32 @@ function authChangePassword(): string {
     return Response(status_code=204)`;
 }
 
-function healthCheck(config: StackConfig): string {
-  const hasDB = config.database !== "none" && config.database !== "";
-  const hasCache = /redis|upstash|dragonfly/.test(config.cache);
-  return `async def handler(db: Session = Depends(get_db)):
+export const pyHasRedis = (c: StackConfig) => /redis|upstash|dragonfly/.test(c.cache);
+
+// Entity declared for this route's resource segment ("users" → User), if any.
+function resolveEntity(table: string, entities: Entity[]): Entity | undefined {
+  const singular = table.replace(/s$/, "").replace(/[-_]/g, "").toLowerCase();
+  return entities.find((e) => e.name.toLowerCase() === singular);
+}
+
+function healthCheck(config: StackConfig, hasDb: boolean): string {
+  const hasCache = pyHasRedis(config);
+  return `async def handler(${hasDb ? "db: Session = Depends(get_db)" : ""}):
     checks: dict = {"status": "ok"}
     http_status = 200
-    ${hasDB ? `try:
+${hasDb ? `    try:
         db.execute(text("SELECT 1"))
         checks["db"] = "ok"
     except Exception:
         checks["db"] = "degraded"
-        http_status = 503` : "# db check omitted"}
-    ${hasCache ? `# TODO: add Redis ping check
-    # try: redis_client.ping(); checks["cache"] = "ok"
-    # except: checks["cache"] = "degraded"; http_status = 503` : ""}
-    return JSONResponse(status_code=http_status, content=checks)`;
+        http_status = 503
+` : ""}${hasCache ? `    try:
+        await redis_client.ping()
+        checks["cache"] = "ok"
+    except Exception:
+        checks["cache"] = "degraded"
+        http_status = 503
+` : ""}    return JSONResponse(status_code=http_status, content=checks)`;
 }
 
 function webhookReceive(): string {
@@ -273,23 +283,38 @@ function sendNotification(config: StackConfig): string {
     return {"queued": True, "channel": payload.channel}`;
 }
 
-function cacheRead(table: string): string {
-  const model = table.replace(/s$/, "").charAt(0).toUpperCase() + table.replace(/s$/, "").slice(1);
-  return `async def handler(item_id: str, db: Session = Depends(get_db)):
-    cache_key = f"${table}:{item_id}"
-    # Check Redis cache
-    # cached = await redis_client.get(cache_key)
-    # if cached:
-    #     return json.loads(cached)
-
-    # Cache miss — fetch from DB
-    item = db.query(${model}).filter(${model}.id == item_id).first()
+function cacheRead(table: string, param: string, entity: Entity | undefined, hasCache: boolean): string {
+  const pk = entity?.fields.find((f) => f.primaryKey)?.name ?? "id";
+  const sig = `async def handler(${param}: str${entity ? ", db: Session = Depends(get_db)" : ""}):`;
+  const lookup = entity
+    ? `    item = db.query(${entity.name}).filter(${entity.name}.${pk} == ${param}).first()
     if not item:
         raise HTTPException(status_code=404, detail="not found")
+    payload = jsonable_encoder({c.name: getattr(item, c.name) for c in item.__table__.columns})`
+    : `    # No entity matches this route — wire the lookup to your data layer.
+    raise HTTPException(status_code=404, detail="not found")`;
+  if (!hasCache) {
+    return `${sig}
+    # No Redis-compatible cache configured — this reads straight from the DB.
+${lookup}${entity ? "\n    return payload" : ""}`;
+  }
+  return `${sig}
+    cache_key = f"${table}:{${param}}"
+    try:
+        cached = await redis_client.get(cache_key)
+    except Exception:  # cache outage → fall through to the DB
+        cached = None
+    if cached:
+        return json.loads(cached)
 
-    # Populate cache (TTL 5 minutes)
-    # await redis_client.set(cache_key, json.dumps(item.__dict__), ex=300)
-    return item`;
+    # Cache miss — fetch from the DB, then populate.
+    # ponytail: TTL-only (5 min), no invalidation on write; delete the key in update/delete if staleness matters.
+${lookup}${entity ? `
+    try:
+        await redis_client.set(cache_key, json.dumps(payload), ex=300)
+    except Exception:
+        pass  # serving from the DB is still correct
+    return payload` : ""}`;
 }
 
 function customHandler(e: Endpoint): string {
@@ -305,7 +330,7 @@ export function pyPatternRoute(
   e: Endpoint,
   fw: PyFw,
   config: StackConfig,
-  _entities: Entity[]
+  entities: Entity[]
 ): string {
   const table = inferTableName(e.path);
   const pattern = e.pattern as PatternId | undefined;
@@ -327,13 +352,13 @@ export function pyPatternRoute(
     case "auth_logout":  handlerBody = authLogout(); break;
     case "auth_refresh": handlerBody = authRefresh(); break;
     case "auth_change_password": handlerBody = authChangePassword(); break;
-    case "health_check": handlerBody = healthCheck(config); break;
+    case "health_check": handlerBody = healthCheck(config, entities.length > 0); break;
     case "webhook_receive": handlerBody = webhookReceive(); break;
     case "file_upload":  handlerBody = fileUpload(); break;
     case "paginated_search": handlerBody = paginatedSearch(table); break;
     case "aggregate_stats":  handlerBody = aggregateStats(table); break;
     case "send_notification": handlerBody = sendNotification(config); break;
-    case "cache_read":   handlerBody = cacheRead(table); break;
+    case "cache_read":   handlerBody = cacheRead(table, params[params.length - 1] ?? "id", entities.length > 0 ? resolveEntity(table, entities) : undefined, pyHasRedis(config)); break;
     default:             handlerBody = customHandler(e); break;
   }
 
@@ -356,9 +381,33 @@ export function pyPatternRoute(
 }
 
 /** Extra imports needed in app/main.py when patterns require them */
-export function pyPatternImports(endpoints: Endpoint[]): string[] {
+export function pyPatternImports(endpoints: Endpoint[], config?: StackConfig, entities: Entity[] = []): string[] {
   const patterns = endpoints.map((e) => e.pattern ?? "");
   const imports: string[] = [];
+  const hasDb = entities.length > 0;
+  const cache = !!config && pyHasRedis(config);
+  // Names the handler signatures use as defaults / annotations — evaluated at
+  // import time, so they must exist in both FastAPI entrypoints.
+  if (patterns.some(Boolean)) {
+    imports.push(
+      "from typing import Optional",
+      "from fastapi import Query, Request, Response",
+      "from fastapi.responses import JSONResponse",
+    );
+    if (hasDb) imports.push("from sqlalchemy.orm import Session", "from .db import get_db");
+  }
+  for (const e of endpoints) {
+    if (!e.pattern || !hasDb) continue;
+    const entity = resolveEntity(inferTableName(e.path), entities);
+    if (entity) imports.push(`from .models import ${entity.name}`);
+  }
+  if (patterns.some((p) => p === "health_check" || p === "cache_read")) {
+    if (cache) imports.push("from .cache import redis_client");
+  }
+  if (patterns.some((p) => p === "cache_read")) {
+    imports.push("from fastapi.encoders import jsonable_encoder");
+    if (cache) imports.push("import json");
+  }
   if (patterns.some((p) => p.startsWith("auth_"))) {
     imports.push(
       "from passlib.context import CryptContext",
