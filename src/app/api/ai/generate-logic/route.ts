@@ -103,9 +103,10 @@ Requirements:
         controller.enqueue(encoder.encode("event: done\ndata: {}\n\n"));
         controller.close();
       } catch (err) {
+        console.error("[ai/generate-logic] stream failed", err);
         controller.enqueue(
           encoder.encode(
-            `event: error\ndata: ${JSON.stringify({ error: String(err) })}\n\n`
+            `event: error\ndata: ${JSON.stringify({ error: "generation_failed" })}\n\n`
           )
         );
         controller.close();

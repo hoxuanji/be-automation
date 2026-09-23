@@ -85,7 +85,7 @@ Provider grid with real brand marks (Vercel, Railway, Render, Fly, AWS, GCP, Azu
 
 ### `POST /api/generate`
 
-Validates `{ config, endpoints }` with Zod and streams a generated zip back.
+Requires a signed-in session (`helios_token` cookie; 401 otherwise). Validates `{ config, endpoints }` with Zod and streams a generated zip back.
 
 ```ts
 // request
