@@ -111,8 +111,8 @@
   },
   {
     "path": "go.mod",
-    "lines": 15,
-    "size": 348
+    "lines": 23,
+    "size": 690
   },
   {
     "path": "internal/api/contract/contract_test.go",
@@ -126,8 +126,8 @@
   },
   {
     "path": "internal/cache/redis.go",
-    "lines": 16,
-    "size": 308
+    "lines": 28,
+    "size": 683
   },
   {
     "path": "internal/config/config.go",
@@ -141,8 +141,8 @@
   },
   {
     "path": "internal/db/sql.go",
-    "lines": 59,
-    "size": 1675
+    "lines": 58,
+    "size": 1600
   },
   {
     "path": "internal/handlers/post_test.go",
@@ -166,28 +166,43 @@
   },
   {
     "path": "internal/models/models.go",
-    "lines": 28,
-    "size": 668
+    "lines": 44,
+    "size": 971
   },
   {
     "path": "internal/monitoring/metrics.go",
     "lines": 13,
-    "size": 320
+    "size": 344
   },
   {
     "path": "internal/server/health.go",
-    "lines": 6,
-    "size": 144
+    "lines": 34,
+    "size": 927
   },
   {
     "path": "internal/server/middleware.go",
-    "lines": 71,
-    "size": 2156
+    "lines": 70,
+    "size": 1933
+  },
+  {
+    "path": "internal/server/ratelimit_test.go",
+    "lines": 21,
+    "size": 512
+  },
+  {
+    "path": "internal/server/ratelimit.go",
+    "lines": 60,
+    "size": 1542
   },
   {
     "path": "internal/server/server.go",
-    "lines": 84,
-    "size": 2643
+    "lines": 109,
+    "size": 3601
+  },
+  {
+    "path": "internal/tracing/tracing.go",
+    "lines": 51,
+    "size": 1891
   },
   {
     "path": "migrations/000001_init.down.sql",

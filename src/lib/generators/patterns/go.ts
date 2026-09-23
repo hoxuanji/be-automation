@@ -22,19 +22,6 @@ function inferTableName(path: string): string {
   return parts[parts.length - 1] || "items";
 }
 
-function isDbPattern(p?: string): boolean {
-  return !!p && (
-    p.startsWith("crud_") ||
-    p === "paginated_search" ||
-    p === "aggregate_stats" ||
-    p === "cache_read"
-  );
-}
-
-function isRedisPattern(p?: string): boolean {
-  return p === "cache_read";
-}
-
 // ── per-framework body generators ────────────────────────────────────────────
 
 type Fw = "gin" | "fiber" | "echo" | "chi";
@@ -451,7 +438,7 @@ fw === "gin" ? `\trawBody, err := io.ReadAll(c.Request.Body)
 \t\t${x.retErr("http.StatusBadRequest", "cannot read body")}
 \t}` :
 fw === "fiber" ? `\trawBody := c.Body()` :
-`\trawBody, err := io.ReadAll(r.Body)
+`\trawBody, err := io.ReadAll(c.Request().Body)
 \tif err != nil {
 \t\t${x.retErr("http.StatusBadRequest", "cannot read body")}
 \t}`}
@@ -484,26 +471,18 @@ ${fw === "gin" ? `\tc.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Bod
 \t}
 \tdefer file.Close()
 \tmimeType := header.Header.Get("Content-Type")` :
-fw === "fiber" ? `\tfile, err := c.FormFile("file")
+fw === "fiber" || fw === "echo" ? `\theader, err := c.FormFile("file")
 \tif err != nil {
 \t\t${x.retErr("http.StatusBadRequest", "file field required")}
 \t}
-\tf, err := file.Open()
+\tif header.Size > maxSize {
+\t\t${x.retErr("http.StatusRequestEntityTooLarge", "file too large")}
+\t}
+\tfile, err := header.Open()
 \tif err != nil {
 \t\t${x.retErr("http.StatusInternalServerError", "cannot open upload")}
 \t}
-\tdefer f.Close()
-\tmimeType := file.Header.Get("Content-Type")` :
-fw === "echo" ? `\tform, err := c.MultipartForm()
-\tif err != nil {
-\t\t${x.retErr("http.StatusBadRequest", "multipart parse failed")}
-\t}
-\tfiles := form.File["file"]
-\tif len(files) == 0 {
-\t\t${x.retErr("http.StatusBadRequest", "file field required")}
-\t}
-\theader := files[0]
-\tf, _ := header.Open(); defer f.Close()
+\tdefer file.Close()
 \tmimeType := header.Header.Get("Content-Type")` :
 `\tr.Body = http.MaxBytesReader(w, r.Body, maxSize)
 \tif err := r.ParseMultipartForm(maxSize); err != nil {
@@ -516,7 +495,7 @@ fw === "echo" ? `\tform, err := c.MultipartForm()
 \tdefer file.Close()
 \tmimeType := header.Header.Get("Content-Type")`}
 
-\tif mimeType == "" { mimeType, _ = mime.ExtensionsByType(filepath.Ext(header.Filename)); _ = mimeType }
+\tif mimeType == "" { mimeType = mime.TypeByExtension(filepath.Ext(header.Filename)) }
 \tallowed := ${allowedMimes}
 \tvalidMime := false
 \tfor _, m := range allowed { if m == mimeType { validMime = true; break } }
@@ -524,11 +503,19 @@ fw === "echo" ? `\tform, err := c.MultipartForm()
 \t\t${x.retErr("http.StatusUnsupportedMediaType", "unsupported file type")}
 \t}
 
-\t// TODO: Replace with cloud storage (S3, GCS, R2). Writing to disk is a placeholder.
+\t// ponytail: local disk — files are per-instance and lost on redeploy; move to S3/GCS/R2 for multi-replica.
 \tdestName := fmt.Sprintf("%s-%s", generateID(), filepath.Base(header.Filename))
-\tdestPath := filepath.Join(uploadDir, destName)
-\t_ = os.MkdirAll(uploadDir, 0o750)
-\t// ... stream file to destPath
+\tif err := os.MkdirAll(uploadDir, 0o750); err != nil {
+\t\t${x.retErr("http.StatusInternalServerError", "cannot create upload dir")}
+\t}
+\tdst, err := os.Create(filepath.Join(uploadDir, destName))
+\tif err != nil {
+\t\t${x.retErr("http.StatusInternalServerError", "cannot store upload")}
+\t}
+\tdefer dst.Close()
+\tif _, err := io.Copy(dst, file); err != nil {
+\t\t${x.retErr("http.StatusInternalServerError", "cannot store upload")}
+\t}
 \th.log.Info("file uploaded", "name", destName, "mime", mimeType)
 \t${x.retCreated(mapLit(fw, ["id", "destName"], ["url", '"/uploads/"+destName'], ["mime", "mimeType"]))}`;
 }
@@ -678,99 +665,37 @@ function patternBody(pattern: string | undefined, fw: Fw, e: Endpoint, config: S
 
 // ── imports ───────────────────────────────────────────────────────────────────
 
-function buildImports(module: string, fw: Fw, usedPatterns: Set<string>, config: StackConfig): string {
-  const std: string[] = ['"context"', '"encoding/json"', '"fmt"', '"log/slog"', '"net/http"', '"os"', '"strings"', '"sync"', '"time"'];
-  const ext: string[] = [];
+// Imports are derived from the emitted code itself, so a handler set that never
+// touches a package never imports it (Go rejects unused imports).
+const GO_STD: [string, string][] = [
+  ["context", "context"], ["hmac", "crypto/hmac"], ["sha256", "crypto/sha256"],
+  ["hex", "encoding/hex"], ["json", "encoding/json"], ["fmt", "fmt"], ["io", "io"],
+  ["slog", "log/slog"], ["mime", "mime"], ["http", "net/http"], ["os", "os"],
+  ["filepath", "path/filepath"], ["strconv", "strconv"], ["strings", "strings"], ["time", "time"],
+];
+const GO_EXT: [string, string][] = [
+  ["jwt", "github.com/golang-jwt/jwt/v5"], ["uuid", "github.com/google/uuid"],
+  ["redis", "github.com/redis/go-redis/v9"], ["bcrypt", "golang.org/x/crypto/bcrypt"],
+  ["gorm", "gorm.io/gorm"], ["gin", "github.com/gin-gonic/gin"],
+  ["fiber", "github.com/gofiber/fiber/v2"], ["echo", "github.com/labstack/echo/v4"],
+  ["chi", "github.com/go-chi/chi/v5"],
+];
 
-  const needsStrconv = [...usedPatterns].some(p => p?.startsWith("crud_") || p === "paginated_search" || p === "aggregate_stats");
-  if (needsStrconv) std.push('"strconv"');
-
-  const needsBcrypt = [...usedPatterns].some(p => p === "auth_login" || p === "auth_register" || p === "auth_change_password");
-  if (needsBcrypt) ext.push('"golang.org/x/crypto/bcrypt"');
-
-  const needsJwt = [...usedPatterns].some(p => p?.startsWith("auth_"));
-  if (needsJwt) ext.push('"github.com/golang-jwt/jwt/v5"');
-
-  const needsHmac = usedPatterns.has("webhook_receive");
-  if (needsHmac) { std.push('"crypto/hmac"', '"crypto/sha256"', '"encoding/hex"', '"io"'); }
-
-  const needsMime = usedPatterns.has("file_upload");
-  if (needsMime) { std.push('"mime"', '"path/filepath"'); }
-
-  const needsUUID = [...usedPatterns].some(p => p === "auth_register" || p === "file_upload");
-  if (needsUUID) ext.push('"github.com/google/uuid"');
-
-  const needsDb = [...usedPatterns].some(p => isDbPattern(p));
-  if (needsDb) {
-    ext.push('"gorm.io/gorm"', '"gorm.io/driver/postgres"');
-    ext.push(`"${module}/internal/db"`);
-  }
-
-  const needsRedis = [...usedPatterns].some(p => isRedisPattern(p)) || config.cache === "redis" || config.cache === "upstash" || config.cache === "dragonfly";
-  if (needsRedis) ext.push('"github.com/redis/go-redis/v9"');
-
-  if (fw === "gin") ext.push('"github.com/gin-gonic/gin"');
-  else if (fw === "fiber") ext.push('"github.com/gofiber/fiber/v2"');
-  else if (fw === "echo") ext.push('"github.com/labstack/echo/v4"');
-  else ext.push('"github.com/go-chi/chi/v5"');
-
-  const stdBlock = [...new Set(std)].sort().map(i => `\t${i}`).join("\n");
-  const extBlock = [...new Set(ext)].sort().map(i => `\t${i}`).join("\n");
-
-  return `import (\n${stdBlock}\n\n${extBlock}\n)`;
+function buildImports(code: string): string {
+  const pick = (list: [string, string][]) =>
+    list
+      .filter(([name]) => new RegExp(`\\b${name}\\.`).test(code))
+      .map(([, path]) => `\t"${path}"`)
+      .sort()
+      .join("\n");
+  return `import (\n${pick(GO_STD)}\n\n${pick(GO_EXT)}\n)`;
 }
 
 // ── struct + helpers ──────────────────────────────────────────────────────────
 
-function buildStruct(fw: Fw, _usedPatterns: Set<string>, _config: StackConfig): string {
-  const chiHelper = fw === "chi" ? `
-func writeJSON(w http.ResponseWriter, status int, v any) {
-\tw.Header().Set("Content-Type", "application/json")
-\tw.WriteHeader(status)
-\t_ = json.NewEncoder(w).Encode(v)
-}` : "";
-
-  return `type APIHandlers struct {
-\tlog    *slog.Logger
-\tdb     *gorm.DB       // lazily initialized from DATABASE_URL
-\trdb    *redis.Client  // lazily initialized from REDIS_URL
-\tdbOnce sync.Once
-\trOnce  sync.Once
-}
-
-func NewAPIHandlers(log *slog.Logger) *APIHandlers {
-\treturn &APIHandlers{log: log}
-}
-
-func (h *APIHandlers) getDB() *gorm.DB {
-\th.dbOnce.Do(func() {
-\t\tdsn := os.Getenv("DATABASE_URL")
-\t\tif dsn == "" { return }
-\t\tgdb, err := db.OpenGorm(dsn)
-\t\tif err != nil {
-\t\t\th.log.Error("api_handlers: db open", "err", err)
-\t\t\treturn
-\t\t}
-\t\th.db = gdb
-\t})
-\treturn h.db
-}
-
-func (h *APIHandlers) getRedis() *redis.Client {
-\th.rOnce.Do(func() {
-\t\turl := os.Getenv("REDIS_URL")
-\t\tif url == "" { return }
-\t\topt, err := redis.ParseURL(url)
-\t\tif err != nil {
-\t\t\th.log.Error("api_handlers: redis parse", "err", err)
-\t\t\treturn
-\t\t}
-\t\th.rdb = redis.NewClient(opt)
-\t})
-\treturn h.rdb
-}
-
-func (h *APIHandlers) issueJWT(sub string) (string, error) {
+function buildStruct(fw: Fw, methods: string, usesDb: boolean, usesRdb: boolean): string {
+  const helpers: string[] = [];
+  if (methods.includes("h.issueJWT(")) helpers.push(`func (h *APIHandlers) issueJWT(sub string) (string, error) {
 \tsecret := os.Getenv("JWT_SECRET")
 \tif secret == "" { return "", fmt.Errorf("JWT_SECRET not set") }
 \tclaims := jwt.MapClaims{
@@ -779,9 +704,8 @@ func (h *APIHandlers) issueJWT(sub string) (string, error) {
 \t\t"exp": time.Now().Add(24 * time.Hour).Unix(),
 \t}
 \treturn jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
-}
-
-func (h *APIHandlers) verifyRefreshToken(token string) (string, error) {
+}`);
+  if (methods.includes("h.verifyRefreshToken(")) helpers.push(`func (h *APIHandlers) verifyRefreshToken(token string) (string, error) {
 \tsecret := os.Getenv("JWT_REFRESH_SECRET")
 \tif secret == "" { secret = os.Getenv("JWT_SECRET") }
 \tt, err := jwt.Parse(token, func(t *jwt.Token) (any, error) {
@@ -792,34 +716,52 @@ func (h *APIHandlers) verifyRefreshToken(token string) (string, error) {
 \tclaims, _ := t.Claims.(jwt.MapClaims)
 \tsub, _ := claims["sub"].(string)
 \treturn sub, nil
-}
-
-func (h *APIHandlers) claimsFromContext(${fw === "gin" ? "c *gin.Context" : fw === "fiber" ? "c *fiber.Ctx" : fw === "echo" ? "c echo.Context" : "r *http.Request"}) (string, bool) {
+}`);
+  if (methods.includes("h.claimsFromContext(")) helpers.push(`func (h *APIHandlers) claimsFromContext(${fw === "gin" ? "c *gin.Context" : fw === "fiber" ? "c *fiber.Ctx" : fw === "echo" ? "c echo.Context" : "r *http.Request"}) (string, bool) {
 \t// Sub is set by the auth middleware. Adapt to your JWT middleware's convention.
 \t${fw === "gin" ? `if sub, exists := c.Get("sub"); exists { if s, ok := sub.(string); ok { return s, true } }` :
     fw === "fiber" ? `if sub, ok := c.Locals("sub").(string); ok && sub != "" { return sub, true }` :
     fw === "echo" ? `if sub, ok := c.Get("sub").(string); ok && sub != "" { return sub, true }` :
     `if sub := r.Context().Value("sub"); sub != nil { if s, ok := sub.(string); ok { return s, true } }`}
 \treturn "", false
+}`);
+  if (methods.includes("generateID(")) helpers.push(`func generateID() string {
+\treturn uuid.New().String()
+}`);
+  if (fw === "chi" && methods.includes("writeJSON(")) helpers.push(`func writeJSON(w http.ResponseWriter, status int, v any) {
+\tw.Header().Set("Content-Type", "application/json")
+\tw.WriteHeader(status)
+\t_ = json.NewEncoder(w).Encode(v)
+}`);
+
+  const fields = [
+    "\tlog *slog.Logger",
+    usesDb ? "\tdb  *gorm.DB // nil when the stack has no SQL database" : "",
+    usesRdb ? "\trdb *redis.Client // nil when the stack has no Redis cache" : "",
+  ].filter(Boolean).join("\n");
+  const params = ["log *slog.Logger", usesDb ? "gdb *gorm.DB" : "", usesRdb ? "rdb *redis.Client" : ""].filter(Boolean).join(", ");
+  const inits = ["log: log", usesDb ? "db: gdb" : "", usesRdb ? "rdb: rdb" : ""].filter(Boolean).join(", ");
+
+  return [`type APIHandlers struct {
+${fields}
 }
 
-func generateID() string {
-\treturn uuid.New().String()
-}
-${chiHelper}`;
+// NewAPIHandlers receives the connections the server opened at startup, so
+// handlers share one pool instead of each opening their own.
+func NewAPIHandlers(${params}) *APIHandlers {
+\treturn &APIHandlers{${inits}}
+}`, ...helpers].join("\n\n");
 }
 
 // ── public entry point ────────────────────────────────────────────────────────
 
 export function goApiHandlersFile(
-  module: string,
   fw: string,
   config: StackConfig,
   endpoints: Endpoint[],
   entities: Entity[]
-): GeneratedFile {
+): { file: GeneratedFile; usesDb: boolean; usesRdb: boolean } {
   const framework = (["gin", "fiber", "echo", "chi"].includes(fw) ? fw : "gin") as Fw;
-  const usedPatterns = new Set(endpoints.map((e) => e.pattern).filter(Boolean) as string[]);
 
   const methods = endpoints
     .map((e) => {
@@ -830,12 +772,18 @@ export function goApiHandlersFile(
     })
     .join("\n\n");
 
-  const imports = buildImports(module, framework, usedPatterns, config);
-  const structCode = buildStruct(framework, usedPatterns, config);
+  const usesDb = /\bh\.db\b/.test(methods);
+  const usesRdb = /\bh\.rdb\b/.test(methods);
+  const structCode = buildStruct(framework, methods, usesDb, usesRdb);
+  const imports = buildImports(structCode + "\n" + methods);
 
   return {
-    path: "internal/handlers/api.go",
-    content: `package handlers\n\n${imports}\n\n${structCode}\n\n${methods}\n`,
+    file: {
+      path: "internal/handlers/api.go",
+      content: `package handlers\n\n${imports}\n\n${structCode}\n\n${methods}\n`,
+    },
+    usesDb,
+    usesRdb,
   };
 }
 
