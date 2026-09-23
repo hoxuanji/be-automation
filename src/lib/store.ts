@@ -1,9 +1,12 @@
 "use client";
 
 import { create } from "zustand";
+import { persist, createJSONStorage } from "zustand/middleware";
+import { type GitConfig, type WorkflowConfig, defaultGitConfig } from "./git-config";
 
 export type StackConfig = {
   name: string;
+  owner?: string;
   language: string;
   framework: string;
   database: string;
@@ -35,23 +38,149 @@ export type Endpoint = {
   auth: boolean;
   requestSchema?: string;
   responseSchema?: string;
+  pattern?: string;
+  logic?: string;
+  logicCode?: string;
 };
+
+export type FieldType =
+  | "string"
+  | "text"
+  | "number"
+  | "boolean"
+  | "date"
+  | "uuid"
+  | "json";
+
+export type EntityField = {
+  id: string;
+  name: string;
+  type: FieldType;
+  required: boolean;
+  unique: boolean;
+  primaryKey?: boolean;
+};
+
+export type Entity = {
+  id: string;
+  name: string;
+  fields: EntityField[];
+};
+
+export type RelationType = "one-to-many" | "many-to-many" | "one-to-one";
+
+export type Relation = {
+  id: string;
+  fromEntity: string;
+  toEntity: string;
+  type: RelationType;
+  label?: string;
+};
+
+export type SavedProject = {
+  id: string;
+  name: string;
+  savedAt: string;
+  config: StackConfig;
+  endpoints: Endpoint[];
+  entities: Entity[];
+  relations?: Relation[];
+};
+
+export type AuthUser = {
+  id: string;
+  email: string;
+  name: string;
+  hasApiKey: boolean;
+};
+
+export type GithubRepo = {
+  owner: string;
+  repo: string;
+  defaultBranch: string;
+};
+
+const STORAGE_KEY = "helios:projects";
+
+function readStoredProjects(): SavedProject[] {
+  if (typeof window === "undefined") return [];
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as SavedProject[];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredProjects(projects: SavedProject[]) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(projects));
+  } catch {
+    // quota exceeded or private browsing
+  }
+}
+
+export type { GitConfig, WorkflowConfig };
 
 type State = {
   config: StackConfig;
+  gitConfig: GitConfig;
+  githubRepo: GithubRepo | null;
   endpoints: Endpoint[];
+  entities: Entity[];
+  relations: Relation[];
   workspace: string;
   workspaces: string[];
+  savedProjects: SavedProject[];
+  authUser: AuthUser | null;
+
+  // Config mutations
   setWorkspace: (w: string) => void;
+  setGithubRepo: (r: GithubRepo | null) => void;
   set: <K extends keyof StackConfig>(k: K, v: StackConfig[K]) => void;
   patch: (p: Partial<StackConfig>) => void;
+  setGitConfig: (g: GitConfig) => void;
+  patchGitConfig: (p: Partial<GitConfig>) => void;
+  patchWorkflow: (id: string, patch: Partial<WorkflowConfig>) => void;
+  resetGitConfig: () => void;
+
+  // Endpoint mutations
+  setEndpoints: (endpoints: Endpoint[]) => void;
   addEndpoint: (e: Endpoint) => void;
   removeEndpoint: (id: string) => void;
   updateEndpoint: (id: string, e: Partial<Endpoint>) => void;
+
+  // Env var mutations
   addEnvVar: (v: { key: string; value: string; secret?: boolean }) => void;
   removeEnvVar: (key: string) => void;
-  applyProposal: (config: StackConfig) => void;
-  lastProposalAt?: string;
+
+  // Entity mutations
+  setEntities: (entities: Entity[]) => void;
+  addEntity: (entity: Entity) => void;
+  removeEntity: (id: string) => void;
+  updateEntity: (id: string, updates: Partial<Omit<Entity, "id" | "fields">>) => void;
+  addEntityField: (entityId: string, field: EntityField) => void;
+  removeEntityField: (entityId: string, fieldId: string) => void;
+  updateEntityField: (
+    entityId: string,
+    fieldId: string,
+    updates: Partial<EntityField>
+  ) => void;
+
+  // Relation mutations
+  setRelations: (relations: Relation[]) => void;
+  addRelation: (relation: Relation) => void;
+  removeRelation: (id: string) => void;
+
+  // Auth
+  loadAuth: () => Promise<void>;
+  logout: () => Promise<void>;
+
+  // Project persistence
+  loadSavedProjects: () => Promise<void>;
+  saveCurrentProject: () => Promise<void>;
+  loadProject: (id: string) => void;
+  deleteProject: (id: string) => Promise<void>;
 };
 
 const initialEndpoints: Endpoint[] = [
@@ -92,12 +221,56 @@ const initialEndpoints: Endpoint[] = [
   },
 ];
 
-export const useStackStore = create<State>((set) => ({
+const initialEntities: Entity[] = [
+  {
+    id: "entity-1",
+    name: "User",
+    fields: [
+      { id: "f1-1", name: "id", type: "uuid", required: true, unique: true, primaryKey: true },
+      { id: "f1-2", name: "email", type: "string", required: true, unique: true },
+      { id: "f1-3", name: "name", type: "string", required: true, unique: false },
+      { id: "f1-4", name: "createdAt", type: "date", required: true, unique: false },
+    ],
+  },
+  {
+    id: "entity-2",
+    name: "Post",
+    fields: [
+      { id: "f2-1", name: "id", type: "uuid", required: true, unique: true, primaryKey: true },
+      { id: "f2-2", name: "title", type: "string", required: true, unique: false },
+      { id: "f2-3", name: "body", type: "text", required: true, unique: false },
+      { id: "f2-4", name: "published", type: "boolean", required: true, unique: false },
+      { id: "f2-5", name: "createdAt", type: "date", required: true, unique: false },
+    ],
+  },
+];
+
+export const useStackStore = create<State>()(
+  persist(
+    (set, get) => ({
   workspace: "Acme Co.",
   workspaces: ["Acme Co.", "Helios Labs", "Personal"],
   setWorkspace: (w) => set({ workspace: w }),
+  savedProjects: [],
+  authUser: null,
+  gitConfig: defaultGitConfig(),
+  githubRepo: null,
+  setGithubRepo: (r) => set({ githubRepo: r }),
+  setGitConfig: (g) => set({ gitConfig: g }),
+  patchGitConfig: (p) => set((s) => ({ gitConfig: { ...s.gitConfig, ...p } })),
+  patchWorkflow: (id, patch) =>
+    set((s) => ({
+      gitConfig: {
+        ...s.gitConfig,
+        workflows: s.gitConfig.workflows.map((w) =>
+          w.id === id ? { ...w, ...patch } : w
+        ),
+      },
+    })),
+  resetGitConfig: () => set({ gitConfig: defaultGitConfig() }),
   config: {
     name: "helios-api",
+    owner: "",
     language: "go",
     framework: "gin",
     database: "postgres",
@@ -126,9 +299,14 @@ export const useStackStore = create<State>((set) => ({
     ],
   },
   endpoints: initialEndpoints,
+  entities: initialEntities,
+  relations: [],
+
   set: (k, v) =>
     set((s) => ({ config: { ...s.config, [k]: v } })),
   patch: (p) => set((s) => ({ config: { ...s.config, ...p } })),
+
+  setEndpoints: (endpoints) => set({ endpoints }),
   addEndpoint: (e) => set((s) => ({ endpoints: [...s.endpoints, e] })),
   removeEndpoint: (id) =>
     set((s) => ({ endpoints: s.endpoints.filter((e) => e.id !== id) })),
@@ -136,6 +314,7 @@ export const useStackStore = create<State>((set) => ({
     set((s) => ({
       endpoints: s.endpoints.map((e) => (e.id === id ? { ...e, ...patch } : e)),
     })),
+
   addEnvVar: (v) =>
     set((s) => ({
       config: {
@@ -150,9 +329,200 @@ export const useStackStore = create<State>((set) => ({
         envVars: s.config.envVars.filter((v) => v.key !== key),
       },
     })),
-  applyProposal: (config) =>
-    set(() => ({
-      config,
-      lastProposalAt: new Date().toISOString(),
+
+  setEntities: (entities) => set({ entities }),
+  addEntity: (entity) =>
+    set((s) => ({ entities: [...s.entities, entity] })),
+  removeEntity: (id) =>
+    set((s) => ({ entities: s.entities.filter((e) => e.id !== id) })),
+  updateEntity: (id, updates) =>
+    set((s) => ({
+      entities: s.entities.map((e) =>
+        e.id === id ? { ...e, ...updates } : e
+      ),
     })),
-}));
+  addEntityField: (entityId, field) =>
+    set((s) => ({
+      entities: s.entities.map((e) =>
+        e.id === entityId
+          ? { ...e, fields: [...e.fields, field] }
+          : e
+      ),
+    })),
+  removeEntityField: (entityId, fieldId) =>
+    set((s) => ({
+      entities: s.entities.map((e) =>
+        e.id === entityId
+          ? { ...e, fields: e.fields.filter((f) => f.id !== fieldId) }
+          : e
+      ),
+    })),
+  updateEntityField: (entityId, fieldId, updates) =>
+    set((s) => ({
+      entities: s.entities.map((e) =>
+        e.id === entityId
+          ? {
+              ...e,
+              fields: e.fields.map((f) =>
+                f.id === fieldId ? { ...f, ...updates } : f
+              ),
+            }
+          : e
+      ),
+    })),
+
+  setRelations: (relations) => set({ relations }),
+  addRelation: (relation) =>
+    set((s) => ({ relations: [...s.relations, relation] })),
+  removeRelation: (id) =>
+    set((s) => ({ relations: s.relations.filter((r) => r.id !== id) })),
+
+  loadAuth: async () => {
+    const PROTECTED_PREFIXES = [
+      "/dashboard", "/builder", "/api-builder", "/preview",
+      "/deploy", "/settings", "/git-settings", "/editor",
+      "/templates", "/gallery", "/from-repo",
+    ];
+    try {
+      const res = await fetch("/api/auth/me");
+      const data = await res.json();
+      const user = data.user ?? null;
+      set((s) => ({
+        authUser: user,
+        config: user && !s.config.owner
+          ? { ...s.config, owner: user.name }
+          : s.config,
+      }));
+      if (!user && typeof window !== "undefined") {
+        const path = window.location.pathname;
+        if (PROTECTED_PREFIXES.some((p) => path === p || path.startsWith(p + "/"))) {
+          window.location.href = "/login";
+        }
+      }
+    } catch {
+      set({ authUser: null });
+    }
+  },
+
+  logout: async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {}
+    set({ authUser: null, savedProjects: [] });
+    window.location.href = "/login";
+  },
+
+  loadSavedProjects: async () => {
+    try {
+      const res = await fetch("/api/projects");
+      if (res.ok) {
+        const data = await res.json();
+        const projects: SavedProject[] = (data.projects ?? []).map(
+          (p: {
+            id: string;
+            name: string;
+            savedAt: string;
+            config: StackConfig;
+            endpoints: Endpoint[];
+            entities?: Entity[];
+            relations?: Relation[];
+          }) => ({
+            id: p.id,
+            name: p.name,
+            savedAt: p.savedAt,
+            config: p.config,
+            endpoints: p.endpoints,
+            entities: p.entities ?? [],
+            relations: p.relations ?? [],
+          })
+        );
+        set({ savedProjects: projects });
+        return;
+      }
+    } catch {}
+    // 401 or network error → fall back to localStorage
+    set({ savedProjects: readStoredProjects() });
+  },
+
+  saveCurrentProject: async () => {
+    const s = get();
+    const payload = {
+      name: s.config.name,
+      data: {
+        config: s.config,
+        endpoints: s.endpoints,
+        entities: s.entities,
+        relations: s.relations,
+      },
+    };
+
+    if (s.authUser) {
+      const existing = s.savedProjects.find((p) => p.name === s.config.name);
+      const url = existing ? `/api/projects/${existing.id}` : "/api/projects";
+      const method = existing ? "PATCH" : "POST";
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error("Server save failed");
+      await get().loadSavedProjects();
+      return;
+    }
+
+    // localStorage path
+    const existing = readStoredProjects();
+    const id = `proj-${Date.now()}`;
+    const project: SavedProject = {
+      id,
+      name: s.config.name,
+      savedAt: new Date().toISOString(),
+      config: s.config,
+      endpoints: s.endpoints,
+      entities: s.entities,
+      relations: s.relations,
+    };
+    const updated = [
+      project,
+      ...existing.filter((p) => p.name !== s.config.name),
+    ].slice(0, 20);
+    writeStoredProjects(updated);
+    set({ savedProjects: updated });
+  },
+
+  loadProject: (id) => {
+    const project = get().savedProjects.find((p) => p.id === id);
+    if (!project) return;
+    set({
+      config: project.config,
+      endpoints: project.endpoints,
+      entities: project.entities,
+      relations: project.relations ?? [],
+    });
+  },
+
+  deleteProject: async (id) => {
+    if (get().authUser) {
+      await fetch(`/api/projects/${id}`, { method: "DELETE" });
+      set((s) => ({ savedProjects: s.savedProjects.filter((p) => p.id !== id) }));
+      return;
+    }
+    const updated = readStoredProjects().filter((p) => p.id !== id);
+    writeStoredProjects(updated);
+    set({ savedProjects: updated });
+  },
+    }),
+    {
+      name: "helios:stack",
+      storage: createJSONStorage(() => localStorage),
+      partialize: (s) => ({
+        config: s.config,
+        gitConfig: s.gitConfig,
+        githubRepo: s.githubRepo,
+        endpoints: s.endpoints,
+        entities: s.entities,
+        relations: s.relations,
+      }),
+    }
+  )
+);

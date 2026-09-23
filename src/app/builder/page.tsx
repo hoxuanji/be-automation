@@ -2,19 +2,21 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowRight,
-  Boxes,
+  CheckCircle2,
   ChevronDown,
   Cpu,
   Database,
-  HardDrive,
-  Lock,
+  Download,
+  Loader2,
   Network,
   Rocket,
   Save,
   Scale,
   ShieldCheck,
+  Share2,
   Sparkles,
   Terminal,
   Trash2,
@@ -26,7 +28,6 @@ import {
   Star,
 } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SelectableCard } from "@/components/ui/selectable-card";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -45,12 +46,14 @@ import {
 } from "@/components/ui/dropdown";
 import { ArchitecturePreview } from "@/components/builder/architecture-preview";
 import { StackSummary } from "@/components/builder/stack-summary";
-import { AIAssistant } from "@/components/shared/ai-assistant";
+import { GitHubConnectPanel } from "@/components/builder/github-connect-panel";
+import { NLPrompt } from "@/components/builder/nl-prompt";
+import { EntityBuilder } from "@/components/builder/entity-builder";
+import { OnboardingWizard } from "@/components/builder/onboarding-wizard";
 import { useStackStore } from "@/lib/store";
 import { toast } from "@/components/ui/toast";
+import { cn } from "@/lib/utils";
 import { BrandIcon } from "@/components/shared/brand-icon";
-import { PublishButton } from "@/components/shared/publish-button";
-import { proposalFromConfig } from "@/lib/proposal-from-config";
 import {
   authProviders,
   caches,
@@ -64,39 +67,230 @@ import {
   scalingStrategies,
 } from "@/data/stack-options";
 
-const tabs = [
-  { id: "runtime", label: "Runtime", icon: Cpu },
-  { id: "database", label: "Database", icon: Database },
-  { id: "cache", label: "Cache", icon: Zap },
-  { id: "queue", label: "Queue", icon: Workflow },
-  { id: "apis", label: "APIs", icon: Network },
-  { id: "security", label: "Security", icon: Lock },
-  { id: "deploy", label: "Deployment", icon: Rocket },
-  { id: "scaling", label: "Scaling", icon: Scale },
-  { id: "ci", label: "CI/CD", icon: GitBranch },
-  { id: "monitor", label: "Monitoring", icon: Terminal },
+function StackUrlLoader() {
+  const { patch, setEndpoints, setEntities } = useStackStore();
+  const searchParams = useSearchParams();
+
+  React.useEffect(() => {
+    const encoded = searchParams.get("stack");
+    if (!encoded) return;
+    try {
+      const decoded = JSON.parse(atob(encoded)) as {
+        config?: Partial<import("@/lib/store").StackConfig>;
+        endpoints?: import("@/lib/store").Endpoint[];
+        entities?: import("@/lib/store").Entity[];
+      };
+      if (decoded.config) patch(decoded.config);
+      if (decoded.endpoints) setEndpoints(decoded.endpoints);
+      if (decoded.entities) setEntities(decoded.entities);
+      window.history.replaceState({}, "", "/builder");
+    } catch {
+      // Malformed share link — silently ignore
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return null;
+}
+
+function MyProjectsMenu() {
+  const { savedProjects, loadProject, loadSavedProjects } = useStackStore();
+  const [renamingId, setRenamingId] = React.useState<string | null>(null);
+  const [renameVal, setRenameVal] = React.useState("");
+  const [projects, setProjects] = React.useState(savedProjects);
+
+  React.useEffect(() => {
+    void loadSavedProjects();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  React.useEffect(() => { setProjects(savedProjects); }, [savedProjects]);
+
+  async function handleRename(id: string) {
+    const name = renameVal.trim();
+    if (!name) return;
+    try {
+      await fetch(`/api/projects/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      setProjects((prev) => prev.map((p) => p.id === id ? { ...p, name } : p));
+      toast({ title: "Renamed", kind: "success" });
+    } catch {
+      toast({ title: "Rename failed", kind: "error" });
+    }
+    setRenamingId(null);
+  }
+
+  async function handleDelete(id: string, name: string) {
+    try {
+      await fetch(`/api/projects/${id}`, { method: "DELETE" });
+      setProjects((prev) => prev.filter((p) => p.id !== id));
+      toast({ title: `"${name}" deleted`, kind: "success" });
+    } catch {
+      toast({ title: "Delete failed", kind: "error" });
+    }
+  }
+
+  if (projects.length === 0) return null;
+
+  return (
+    <Dropdown>
+      <DropdownTrigger asChild>
+        <Button variant="ghost" size="sm">
+          <Star className="h-3.5 w-3.5" />
+          Projects
+          <ChevronDown className="h-3 w-3 opacity-60" />
+        </Button>
+      </DropdownTrigger>
+      <DropdownContent align="end" className="w-64">
+        <DropdownLabel>Saved projects</DropdownLabel>
+        <DropdownSeparator />
+        {projects.slice(0, 10).map((p) => (
+          <div key={p.id} className="px-1 py-0.5">
+            {renamingId === p.id ? (
+              <div className="flex gap-1 px-2 py-1">
+                <input
+                  autoFocus
+                  value={renameVal}
+                  onChange={(e) => setRenameVal(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") void handleRename(p.id); if (e.key === "Escape") setRenamingId(null); }}
+                  className="flex-1 bg-white/[0.04] border border-white/[0.1] rounded px-2 py-1 text-xs focus:outline-none"
+                />
+                <button onClick={() => void handleRename(p.id)} className="text-xs text-brand-300 hover:text-brand-200 px-1">Save</button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1 group rounded px-2 py-1.5 hover:bg-white/[0.04]">
+                <button
+                  className="flex-1 text-left"
+                  onClick={() => { loadProject(p.id); toast({ title: `Loaded "${p.name}"`, kind: "success" }); }}
+                >
+                  <div className="text-xs font-medium">{p.name}</div>
+                  <div className="text-[10px] text-muted-foreground">{new Date(p.savedAt).toLocaleDateString()} · {p.endpoints.length} endpoints</div>
+                </button>
+                <button
+                  onClick={() => { setRenamingId(p.id); setRenameVal(p.name); }}
+                  className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition-opacity p-0.5"
+                  title="Rename"
+                >
+                  <svg className="h-3 w-3" viewBox="0 0 16 16" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-8.5 8.5A2 2 0 016.5 15.5h-2a.5.5 0 01-.5-.5v-2a2 2 0 01.586-1.414l8.5-8.5z"/></svg>
+                </button>
+                <button
+                  onClick={() => void handleDelete(p.id, p.name)}
+                  className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-400 transition-opacity p-0.5"
+                  title="Delete"
+                >
+                  <svg className="h-3 w-3" viewBox="0 0 16 16" fill="currentColor"><path d="M6 2a1 1 0 000 2h4a1 1 0 100-2H6zM2 5a1 1 0 011-1h10a1 1 0 110 2H3a1 1 0 01-1-1zM4 8a1 1 0 012 0v5a1 1 0 01-2 0V8zm6 0a1 1 0 012 0v5a1 1 0 01-2 0V8z"/></svg>
+                </button>
+              </div>
+            )}
+          </div>
+        ))}
+      </DropdownContent>
+    </Dropdown>
+  );
+}
+
+const TABS = [
+  { id: "runtime",    label: "Runtime",    icon: Cpu },
+  { id: "database",   label: "Database",   icon: Database },
+  { id: "cache",      label: "Cache",      icon: Zap },
+  { id: "queue",      label: "Queue",      icon: Workflow },
+  { id: "api",        label: "APIs",       icon: Network },
+  { id: "security",   label: "Security",   icon: ShieldCheck },
+  { id: "deploy",     label: "Deployment", icon: Rocket },
+  { id: "scaling",    label: "Scaling",    icon: Scale },
+  { id: "cicd",       label: "CI/CD",      icon: GitBranch },
+  { id: "monitoring", label: "Monitoring", icon: Terminal },
 ];
 
 export default function BuilderPage() {
-  const { config, endpoints, set } = useStackStore();
+  const { config, gitConfig, endpoints, entities, set, saveCurrentProject } = useStackStore();
+  const router = useRouter();
+  const [saving, setSaving] = React.useState(false);
+  const [downloading, setDownloading] = React.useState(false);
+  const [activeTab, setActiveTab] = React.useState("runtime");
 
-  function saveStack() {
+  const saveRef = React.useRef(saveCurrentProject);
+  React.useEffect(() => { saveRef.current = saveCurrentProject; });
+  // Auto-save on unmount
+  React.useEffect(() => {
+    return () => { void saveRef.current().catch(() => {}); };
+  }, []);
+  // Debounced auto-save: fire 2s after any config/endpoint/entity change
+  React.useEffect(() => {
+    const timer = setTimeout(() => {
+      void saveRef.current().catch(() => {});
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [config, endpoints, entities]);
+
+  async function saveStack(silent = false) {
+    setSaving(true);
     try {
-      localStorage.setItem(
-        "helios:stack",
-        JSON.stringify({ config, endpoints, savedAt: new Date().toISOString() })
-      );
-      toast({
-        title: "Stack saved",
-        description: `${config.name} · ${endpoints.length} endpoint${endpoints.length === 1 ? "" : "s"}`,
-        kind: "success",
+      await saveCurrentProject();
+      if (!silent) {
+        toast({
+          title: "Project saved",
+          description: `${config.name} · ${endpoints.length} endpoint${endpoints.length === 1 ? "" : "s"} · ${entities.length} model${entities.length === 1 ? "" : "s"}`,
+          kind: "success",
+        });
+      }
+    } catch {
+      if (!silent) toast({ title: "Couldn't save", kind: "error" });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function downloadRepo() {
+    setDownloading(true);
+    try {
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config, endpoints, entities, gitConfig }),
+      });
+      if (!res.ok) throw new Error("Generation failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${config.name}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast({ title: `${config.name}.zip downloaded`, kind: "success" });
+    } catch {
+      toast({ title: "Download failed", kind: "error" });
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  async function previewRepo() {
+    await saveStack(true);
+    router.push("/preview");
+  }
+
+  function shareStack() {
+    try {
+      const payload = btoa(JSON.stringify({ config, endpoints, entities }));
+      const url = `${window.location.origin}/builder?stack=${payload}`;
+      void navigator.clipboard.writeText(url).then(() => {
+        toast({ title: "Share link copied", description: "Send this URL to load your exact stack configuration.", kind: "success" });
       });
     } catch {
-      toast({ title: "Couldn't save locally", kind: "error" });
+      toast({ title: "Couldn't copy link", kind: "error" });
     }
   }
 
   return (
+    <>
+    <OnboardingWizard />
+    <React.Suspense fallback={null}><StackUrlLoader /></React.Suspense>
     <WorkspaceShell
       breadcrumb={[
         { label: "Projects", href: "/dashboard" },
@@ -105,48 +299,56 @@ export default function BuilderPage() {
       ]}
       actions={
         <>
-          <Button variant="ghost" size="sm" onClick={saveStack}>
-            <Save className="h-3.5 w-3.5" /> Save
+          <MyProjectsMenu />
+          <Button variant="ghost" size="sm" onClick={shareStack}>
+            <Share2 className="h-3.5 w-3.5" /> Share
           </Button>
-          <PublishButton
-            proposal={proposalFromConfig(config)}
-            intent={`Manually configured: ${config.name}`}
-            variant="ghost"
-          />
-          <Button asChild variant="secondary" size="sm">
-            <Link href="/preview">
-              <Eye className="h-3.5 w-3.5" /> Preview repo
-            </Link>
+          <Button variant="ghost" size="sm" onClick={() => saveStack()} disabled={saving}>
+            {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+            {saving ? "Saving…" : "Save"}
+          </Button>
+          <Button variant="secondary" size="sm" onClick={downloadRepo} disabled={downloading}>
+            {downloading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+            {downloading ? "Building…" : "Download"}
+          </Button>
+          <Button variant="secondary" size="sm" onClick={previewRepo} disabled={saving}>
+            <Eye className="h-3.5 w-3.5" /> Review &amp; Download
           </Button>
         </>
       }
-      right={<AIAssistant />}
     >
       <div className="mx-auto max-w-[1200px] p-6 md:p-8 space-y-6">
         <BuilderHeader />
 
+        <NLPrompt />
+
         <ArchitecturePreview />
 
+        <QuickStart />
+
         <div className="grid gap-6 lg:grid-cols-[1fr,320px]">
-          <Tabs defaultValue="runtime" className="space-y-4">
-            <div className="relative">
-              <TabsList className="w-full overflow-x-auto no-scrollbar justify-start">
-                {tabs.map((t) => {
-                  const Icon = t.icon;
-                  return (
-                    <TabsTrigger key={t.id} value={t.id}>
-                      <Icon className="h-3.5 w-3.5" />
-                      {t.label}
-                    </TabsTrigger>
-                  );
-                })}
-              </TabsList>
+          <div className="min-w-0 space-y-4">
+            <div className="flex overflow-x-auto no-scrollbar border-b border-white/[0.06]">
+              {TABS.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveTab(tab.id)}
+                  className={cn(
+                    "flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-4 py-2.5 text-xs font-medium transition-colors",
+                    activeTab === tab.id
+                      ? "border-brand-400 text-foreground"
+                      : "border-transparent text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <tab.icon className="h-3.5 w-3.5" />
+                  {tab.label}
+                </button>
+              ))}
             </div>
 
-            <TabsContent value="runtime">
-              <RuntimePanel />
-            </TabsContent>
-            <TabsContent value="database">
+            {activeTab === "runtime" && <RuntimePanel />}
+            {activeTab === "database" && (
               <OptionPanel
                 title="Database"
                 description="Pick your primary datastore. Helios will generate migrations, typed clients, and connection pooling for you."
@@ -155,8 +357,8 @@ export default function BuilderPage() {
                 onSelect={(id) => set("database", id)}
                 icon={<Database className="h-4 w-4" />}
               />
-            </TabsContent>
-            <TabsContent value="cache">
+            )}
+            {activeTab === "cache" && (
               <OptionPanel
                 title="Cache"
                 description="Accelerate hot paths — sessions, rate limiting, pub/sub."
@@ -165,8 +367,8 @@ export default function BuilderPage() {
                 onSelect={(id) => set("cache", id)}
                 icon={<Zap className="h-4 w-4" />}
               />
-            </TabsContent>
-            <TabsContent value="queue">
+            )}
+            {activeTab === "queue" && (
               <OptionPanel
                 title="Message Queue"
                 description="Decouple services with durable messaging, pub/sub or streaming."
@@ -175,14 +377,28 @@ export default function BuilderPage() {
                 onSelect={(id) => set("queue", id)}
                 icon={<Workflow className="h-4 w-4" />}
               />
-            </TabsContent>
-            <TabsContent value="apis">
-              <ApiPanel />
-            </TabsContent>
-            <TabsContent value="security">
-              <SecurityPanel />
-            </TabsContent>
-            <TabsContent value="deploy">
+            )}
+            {activeTab === "api" && (
+              <div className="space-y-6">
+                {config.language === "python" &&
+                  (config.framework === "django" || config.framework === "litestar") &&
+                  entities.length > 0 && (
+                  <div className="flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-xs">
+                    <span className="text-amber-400 mt-0.5">⚠</span>
+                    <div>
+                      <span className="font-medium text-amber-300">Full CRUD generation is FastAPI-only right now.</span>
+                      <span className="text-amber-300/70 ml-1">
+                        {config.framework === "django" ? "Django" : "Litestar"} will generate models but no route handlers. Switch to FastAPI for complete output.
+                      </span>
+                    </div>
+                  </div>
+                )}
+                <EntityBuilder />
+                <ApiPanel />
+              </div>
+            )}
+            {activeTab === "security" && <SecurityPanel />}
+            {activeTab === "deploy" && (
               <OptionPanel
                 title="Deployment target"
                 description="Where should Helios ship this stack? One-click deploy included."
@@ -191,21 +407,29 @@ export default function BuilderPage() {
                 onSelect={(id) => set("deployment", id)}
                 icon={<Rocket className="h-4 w-4" />}
               />
-            </TabsContent>
-            <TabsContent value="scaling">
-              <ScalingPanel />
-            </TabsContent>
-            <TabsContent value="ci">
-              <OptionPanel
-                title="CI / CD"
-                description="Pipeline generated with security scans, matrix tests, and preview deploys."
-                options={cicd}
-                selected={config.cicd}
-                onSelect={(id) => set("cicd", id)}
-                icon={<GitBranch className="h-4 w-4" />}
-              />
-            </TabsContent>
-            <TabsContent value="monitor">
+            )}
+            {activeTab === "scaling" && <ScalingPanel />}
+            {activeTab === "cicd" && (
+              <div className="space-y-4">
+                <OptionPanel
+                  title="CI / CD"
+                  description="Pipeline generated with security scans, matrix tests, and preview deploys."
+                  options={cicd}
+                  selected={config.cicd}
+                  onSelect={(id) => set("cicd", id)}
+                  icon={<GitBranch className="h-4 w-4" />}
+                />
+                {config.cicd === "gh-actions" && <GitHubConnectPanel />}
+                <a
+                  href="/git-settings"
+                  className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-brand-300 transition-colors"
+                >
+                  <GitBranch className="h-3.5 w-3.5" />
+                  Configure branch rules & PR strategy →
+                </a>
+              </div>
+            )}
+            {activeTab === "monitoring" && (
               <OptionPanel
                 title="Monitoring"
                 description="Traces, metrics, logs — wired in with sensible defaults."
@@ -214,10 +438,11 @@ export default function BuilderPage() {
                 onSelect={(id) => set("monitoring", id)}
                 icon={<Terminal className="h-4 w-4" />}
               />
-            </TabsContent>
-          </Tabs>
+            )}
+          </div>
 
           <div className="space-y-4">
+            <CompletenessCard />
             <StackSummary />
             <RecommendationsCard />
             <ResourceUtilizationCard />
@@ -227,6 +452,156 @@ export default function BuilderPage() {
         <GenerateCTA />
       </div>
     </WorkspaceShell>
+    </>
+  );
+}
+
+const QUICK_LANGUAGES = [
+  { id: "go", label: "Go", accent: "#00ADD8" },
+  { id: "typescript", label: "TypeScript", accent: "#3178C6" },
+  { id: "python", label: "Python", accent: "#3776AB" },
+  { id: "rust", label: "Rust", accent: "#DEA584" },
+] as const;
+
+const QUICK_DATABASES = [
+  { id: "postgres", label: "Postgres" },
+  { id: "mongodb", label: "MongoDB" },
+  { id: "mysql", label: "MySQL" },
+  { id: "sqlite", label: "SQLite" },
+] as const;
+
+function QuickStart() {
+  const { config, set, patch } = useStackStore();
+  const router = useRouter();
+  const [open, setOpen] = React.useState(false);
+  const [name, setName] = React.useState(config.name);
+
+  function go() {
+    patch({ name: name || config.name });
+    router.push("/preview");
+  }
+
+  return (
+    <div className="rounded-xl border border-brand-500/20 bg-brand-500/[0.04] overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between px-4 py-3 text-left"
+      >
+        <div className="flex items-center gap-2.5">
+          <Sparkles className="h-4 w-4 text-brand-400" />
+          <div>
+            <span className="text-sm font-semibold">Quick start</span>
+            <span className="ml-2 text-xs text-muted-foreground">name + language + database → preview in one click</span>
+          </div>
+        </div>
+        <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div className="border-t border-brand-500/10 px-4 py-4 space-y-4">
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="space-y-2">
+              <label className="text-xs text-muted-foreground font-medium">Project name</label>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="my-api"
+                className="text-sm h-8"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs text-muted-foreground font-medium">Language</label>
+              <div className="flex flex-wrap gap-1.5">
+                {QUICK_LANGUAGES.map((l) => (
+                  <button
+                    key={l.id}
+                    type="button"
+                    onClick={() => set("language", l.id as import("@/lib/store").StackConfig["language"])}
+                    className={cn(
+                      "rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
+                      config.language === l.id
+                        ? "border-brand-500/50 bg-brand-500/10 text-foreground"
+                        : "border-white/[0.08] text-muted-foreground hover:text-foreground hover:border-white/[0.15]"
+                    )}
+                    style={config.language === l.id ? { color: l.accent } : {}}
+                  >
+                    {l.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs text-muted-foreground font-medium">Database</label>
+              <div className="flex flex-wrap gap-1.5">
+                {QUICK_DATABASES.map((d) => (
+                  <button
+                    key={d.id}
+                    type="button"
+                    onClick={() => set("database", d.id)}
+                    className={cn(
+                      "rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
+                      config.database === d.id
+                        ? "border-brand-500/50 bg-brand-500/10 text-brand-300"
+                        : "border-white/[0.08] text-muted-foreground hover:text-foreground hover:border-white/[0.15]"
+                    )}
+                  >
+                    {d.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <Button variant="glow" size="sm" onClick={go}>
+            <Eye className="h-3.5 w-3.5" /> Preview & download
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CompletenessCard() {
+  const { config, endpoints } = useStackStore();
+
+  const checks = [
+    { label: "Language & framework", done: !!config.language && !!config.framework },
+    { label: "Database", done: !!config.database && config.database !== "none" },
+    { label: "Auth provider", done: !!config.auth && config.auth !== "none" },
+    { label: "API endpoints", done: endpoints.length > 0 },
+    { label: "Deployment target", done: !!config.deployment && config.deployment !== "none" },
+    { label: "CI/CD pipeline", done: !!config.cicd && config.cicd !== "none" },
+  ];
+
+  const done = checks.filter((c) => c.done).length;
+  const pct = Math.round((done / checks.length) * 100);
+
+  return (
+    <Card>
+      <div className="p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold">Stack completeness</span>
+          <span className="text-xs font-mono text-muted-foreground">{done}/{checks.length}</span>
+        </div>
+        <div className="h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+          <div
+            className="h-full rounded-full bg-gradient-to-r from-brand-500 to-purple-500 transition-all duration-500"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <div className="space-y-1.5">
+          {checks.map((c) => (
+            <div key={c.label} className="flex items-center gap-2 text-[11px]">
+              {c.done ? (
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+              ) : (
+                <div className="h-3.5 w-3.5 shrink-0 rounded-full border border-white/[0.12]" />
+              )}
+              <span className={c.done ? "text-foreground/80" : "text-muted-foreground"}>{c.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Card>
   );
 }
 
@@ -351,7 +726,7 @@ function RuntimePanel() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             {languages.map((l) => (
               <SelectableCard
                 key={l.id}
@@ -389,7 +764,7 @@ function RuntimePanel() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2">
             {frameworksForLang.map((f) => (
               <SelectableCard
                 key={f.id}
@@ -438,7 +813,7 @@ function OptionPanel({
         <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           {options.map((o) => (
             <SelectableCard
               key={o.id}
@@ -461,13 +836,14 @@ function OptionPanel({
 }
 
 function ApiPanel() {
-  const { config, set, patch } = useStackStore();
+  const { config, set } = useStackStore();
   const apis: { id: "rest" | "grpc" | "graphql" | "trpc"; label: string; description: string }[] = [
     { id: "rest", label: "REST", description: "Resource HTTP APIs with OpenAPI specs." },
     { id: "grpc", label: "gRPC", description: "Protobuf, HTTP/2, bidirectional streaming." },
     { id: "graphql", label: "GraphQL", description: "Typed queries with a single endpoint." },
     { id: "trpc", label: "tRPC", description: "Full-stack type-safety for TS monorepos." },
   ];
+  const isTsOnly = (id: string) => id === "trpc" && config.language !== "typescript";
   return (
     <div className="space-y-6">
       <Card>
@@ -480,17 +856,24 @@ function ApiPanel() {
             stubs and client SDKs for each.
           </CardDescription>
         </CardHeader>
-        <CardContent>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+        <CardContent className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             {apis.map((a) => (
-              <SelectableCard
-                key={a.id}
-                selected={config.api === a.id}
-                label={a.label}
-                description={a.description}
-                onClick={() => set("api", a.id)}
-                icon={<Network className="h-4 w-4" />}
-              />
+              <div key={a.id} className="relative">
+                <SelectableCard
+                  selected={config.api === a.id}
+                  label={a.label}
+                  description={a.description}
+                  onClick={isTsOnly(a.id) ? undefined : () => set("api", a.id)}
+                  icon={<Network className="h-4 w-4" />}
+                  className={isTsOnly(a.id) ? "opacity-50 cursor-not-allowed pointer-events-none" : undefined}
+                />
+                {isTsOnly(a.id) && (
+                  <span className="pointer-events-none absolute top-2 right-2 rounded-full border border-white/20 bg-white/[0.06] px-1.5 py-0.5 text-[9px] font-medium text-muted-foreground">
+                    TS only
+                  </span>
+                )}
+              </div>
             ))}
           </div>
         </CardContent>
@@ -505,7 +888,7 @@ function ApiPanel() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             {authProviders.map((a) => (
               <SelectableCard
                 key={a.id}
@@ -717,7 +1100,7 @@ function ScalingPanel() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2">
             {scalingStrategies.map((s) => (
               <SelectableCard
                 key={s.id}

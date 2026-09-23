@@ -1,0 +1,117 @@
+import { SignJWT, jwtVerify } from "jose";
+import crypto from "crypto";
+import { NextRequest } from "next/server";
+import { getJwtSecret } from "./env";
+import { sessionExists } from "./db";
+
+const COOKIE_NAME = "helios_token";
+// Defer reading the secret until first use so that a dev process without
+// JWT_SECRET still boots (the `getJwtSecret` helper permits the dev fallback
+// in non-prod and throws in prod).
+let _jwtSecret: Uint8Array | null = null;
+function jwtSecret(): Uint8Array {
+  if (!_jwtSecret) {
+    _jwtSecret = new TextEncoder().encode(getJwtSecret());
+  }
+  return _jwtSecret;
+}
+
+// ─── JWT ─────────────────────────────────────────────────────────────────────
+
+export type JWTPayload = {
+  sub: string;
+  email: string;
+  name: string;
+  jti: string;
+};
+
+export async function signToken(payload: Omit<JWTPayload, "jti">): Promise<{ token: string; jti: string; expiresAt: number }> {
+  const jti = crypto.randomUUID();
+  const expiresAt = Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7; // 7d
+  const token = await new SignJWT({ email: payload.email, name: payload.name })
+    .setProtectedHeader({ alg: "HS256" })
+    .setSubject(payload.sub)
+    .setJti(jti)
+    .setExpirationTime(expiresAt)
+    .setIssuedAt()
+    .sign(jwtSecret());
+  return { token, jti, expiresAt };
+}
+
+export async function verifyToken(token: string): Promise<JWTPayload | null> {
+  try {
+    const { payload } = await jwtVerify(token, jwtSecret());
+    return {
+      sub: payload.sub as string,
+      email: payload.email as string,
+      name: payload.name as string,
+      jti: payload.jti as string,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Request helpers ─────────────────────────────────────────────────────────
+
+export function getTokenFromRequest(req: NextRequest): string | null {
+  return (
+    req.cookies.get(COOKIE_NAME)?.value ??
+    req.headers.get("Authorization")?.replace("Bearer ", "") ??
+    null
+  );
+}
+
+export async function getCurrentUser(
+  req: NextRequest
+): Promise<JWTPayload | null> {
+  const token = getTokenFromRequest(req);
+  if (!token) return null;
+  const payload = await verifyToken(token);
+  if (!payload) return null;
+  if (!sessionExists(payload.jti)) return null;
+  return payload;
+}
+
+// ─── Cookie helpers ──────────────────────────────────────────────────────────
+
+const IS_PROD = process.env.NODE_ENV === "production";
+
+export function buildSetCookieHeader(token: string): string {
+  const maxAge = 60 * 60 * 24 * 7; // 7 days
+  return [
+    `${COOKIE_NAME}=${token}`,
+    `HttpOnly`,
+    `SameSite=Lax`,
+    `Path=/`,
+    `Max-Age=${maxAge}`,
+    IS_PROD ? `Secure` : "",
+  ]
+    .filter(Boolean)
+    .join("; ");
+}
+
+export function buildClearCookieHeader(): string {
+  return `${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${IS_PROD ? "; Secure" : ""}`;
+}
+
+/**
+ * Same-origin path check for post-auth redirects. Rejects protocol-relative
+ * (`//evil.com`) and backslash (`/\evil.com`) forms that browsers treat as
+ * cross-origin.
+ */
+export function safeReturnTo(value: string | null | undefined): string | null {
+  if (!value || !value.startsWith("/")) return null;
+  if (value.startsWith("//") || value.startsWith("/\\")) return null;
+  return value;
+}
+
+/**
+ * True when the OAuth state's nonce matches the browser-bound nonce cookie
+ * set by the flow's start route. Binds the callback to the browser that
+ * began the flow (login CSRF defence).
+ */
+export function nonceMatches(stateNonce: string, cookieNonce: string | undefined): boolean {
+  if (!cookieNonce || cookieNonce.length !== stateNonce.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(stateNonce), Buffer.from(cookieNonce));
+}

@@ -15,9 +15,11 @@ npm run dev     # local dev server on :3000
 npm run build   # production build
 npm run start   # start production server
 npm run lint    # Next.js ESLint
+npm test        # generator snapshot tests (node test runner)
+UPDATE_SNAPSHOTS=1 npm test   # regenerate snapshots (alias: npm run test:update)
 ```
 
-No tests yet. No prisma / no DB — state is Zustand only, per-tab.
+Persistence: SQLite via `better-sqlite3` (`src/lib/db.ts`) for users, sessions, projects, teams, gallery and deploy creds. Client state is Zustand with `persist` to localStorage. CI (`.github/workflows/ci.yml`) runs lint, typecheck, tests and builds generated repos. See `ROADMAP.md` for the full feature inventory.
 
 ## Architecture in one screen
 
@@ -30,32 +32,32 @@ Zustand store  ──┐
                  │    body: {config, endpoints}
                  │    resp: application/zip
                  │
-                 └─▶ POST /api/ai/chat        → Anthropic SDK messages.stream() → SSE
-                      body: {messages, config?}
-                      resp: text/event-stream
+                 ├─▶ POST /api/ai/chat        → Anthropic SDK messages.stream() → SSE
+                 │    body: {messages, config?}
+                 │    resp: text/event-stream
+                 │
+                 ├─▶ /api/auth/*              → GitHub / Bitbucket OAuth → JWT cookie + SQLite session
+                 ├─▶ /api/projects, teams, …  → SQLite (src/lib/db.ts)
+                 └─▶ /api/{railway,render,fly,vercel}/deploy → deploy pipeline (SSE progress)
+
+src/middleware.ts verifies the JWT and redirects protected routes to /login.
 ```
 
-The client is the source of truth for `StackConfig` and `Endpoint[]`. The server is stateless — it takes the current state and emits artifacts.
+The client is the source of truth for the in-progress `StackConfig` and `Endpoint[]`; generation is stateless. Saved projects, sessions and teams live in SQLite.
 
 ## Directory map
 
 - `src/app/` — Next.js App Router. Each page is a route.
-  - `page.tsx` — Landing (marketing). Now leads with an **intent input** that routes to `/start`.
-  - `start/` — Intent-driven architect flow. Single text field → Claude proposes a complete `StackConfig` via forced tool use.
+  - `page.tsx` — Landing (marketing).
   - `dashboard/` — Workspace overview.
   - `builder/` — **Core surface.** 10 tabs (Runtime, Database, Cache, Queue, APIs, Security, Deployment, Scaling, CI/CD, Monitoring) + architecture preview + AI assistant + summary.
   - `api-builder/` — REST/gRPC endpoint editor.
-  - `autopilot/` — Connect a GitHub repo, audit it, open a PR with fixes.
   - `preview/` — Generated repository browser with Download zip CTA.
-  - `deploy/` — Provider grid + credentials + simulated deploy flow.
-  - `show/[slug]/` — **Public**, server-rendered read-only architecture page with OG image + Fork CTA.
-  - `api/architect/route.ts` — intent → streaming SSE → `ArchitectureProposal`.
-  - `api/share/route.ts` — publish a proposal; returns `{slug, url}`.
+  - `deploy/` — Provider grid + credentials. Railway / Render / Fly / Vercel deploy for real; the rest are "Coming soon".
+  - Also: `templates/`, `gallery/`, `from-repo/`, `editor/`, `git-settings/`, `settings/`, `changelog/`, `terms/`, `privacy/`, `(auth)/login`, `invite/`.
   - `api/generate/route.ts` — zip stream endpoint.
   - `api/ai/chat/route.ts` — Anthropic SSE endpoint.
-  - `api/autopilot/analyze/route.ts` — static audit of a GitHub repo via Octokit.
-  - `api/autopilot/propose/route.ts` — Claude drafts the PR file contents.
-  - `api/autopilot/open-pr/route.ts` — commits + opens PR via GitHub Git Data API.
+  - `api/auth/`, `api/projects/`, `api/teams/`, `api/gallery/`, `api/<provider>/deploy/` — auth, persistence, deploys.
 - `src/components/`
   - `ui/` — shadcn-style primitives (Button, Card, Tabs, Switch, Slider, Badge, Input, Tooltip, ScrollArea, SelectableCard, Dropdown, Toast, Separator, Kbd).
   - `layout/` — Sidebar, Topbar, WorkspaceShell.
@@ -63,22 +65,15 @@ The client is the source of truth for `StackConfig` and `Endpoint[]`. The server
   - `builder/` — ArchitecturePreview, StackSummary.
   - `shared/` — Logo, Terminal, AIAssistant, DownloadRepoButton, BrandIcon.
 - `src/lib/`
-  - `store.ts` — Zustand: `config`, `endpoints`, `workspace[s]`. Mutators: `set`, `patch`, `addEndpoint`, `removeEndpoint`, `updateEndpoint`, `addEnvVar`, `removeEnvVar`, `setWorkspace`, **`applyProposal(config)`**.
+  - `store.ts` — Zustand: `config`, `endpoints`, `workspace[s]`. Mutators: `set`, `patch`, `addEndpoint`, `removeEndpoint`, `updateEndpoint`, `addEnvVar`, `removeEnvVar`, `setWorkspace`.
   - `schema.ts` — Zod schemas for API request validation. Mirrors store types.
-  - `architect-schema.ts` — Zod for `/api/architect`'s `ArchitectureProposal` (summary + decisions[] + config + predictions).
-  - `share-store.ts` — in-memory Map for published proposals, keyed by slug. MAX 1000. Swap for KV later.
-  - `proposal-from-config.ts` — synthesize a minimal valid `ArchitectureProposal` from a manual `StackConfig` (used by /builder + /preview publish flows).
-  - `sse.ts` — `readSSE(response)` async generator for client-side consumption of `text/event-stream` responses.
   - `utils.ts` — `cn()`, `formatBytes()`, `shortId()`.
-  - `autopilot/` — GitHub repo analyzer, Claude-driven PR proposer, committer.
-    - `schema.ts` — Zod for audit, findings, PR proposal.
-    - `analyzer.ts` — `auditRepo(token, ref)`: fetches key manifests via Octokit, infers stack, returns findings + score.
-    - `proposer.ts` — Claude tool-use call that generates full file contents for selected findings.
-    - `committer.ts` — creates blob → tree → commit → ref → PR via Git Data API (one commit for many files).
+  - `db.ts` — SQLite schema + queries. `auth.ts` — JWT/session helpers. `deploy-pipeline.ts` + `railway.ts` / `render.ts` / `fly.ts` / `vercel.ts` — deploy providers.
   - `generators/` — Templated file emitters.
     - `index.ts` — `generate(config, endpoints) → GeneratedFile[]`.
     - `common.ts` — README, env, Dockerfile, docker-compose, K8s, Helm, CI, OpenAPI.
-    - `go.ts` / `typescript.ts` / `python.ts` / `others.ts` (Rust/Java/Kotlin).
+    - `go.ts` / `typescript.ts` / `python.ts` / `rust.ts` / `java.ts` / `kotlin.ts` (+ `graphql/`, `grpc/`, `auth/`, `db/`, `patterns/`).
+    - `__tests__/` — snapshot tests across language × framework × API combos.
 - `src/data/stack-options.ts` — Catalog of languages, frameworks, DBs, caches, queues, auth, deployments, monitoring, CI. Brand ids in this file must match keys in `BrandIcon`'s registry.
 
 ## State model
@@ -171,7 +166,7 @@ Generators must output **plain text** files — no binary. Use `dedent` / templa
 - Don't run `git config --global …` — keep identity changes scoped to the repo (`git config user.email "…"`).
 - Don't commit `.env*.local` or `.claude/` (both are gitignored).
 - Don't add a CSS framework beyond Tailwind. Don't add another state library. Don't add a component library on top of the current primitives.
-- Don't replace the Zustand store with Redux/Jotai/Context. Don't add persistence unless asked.
+- Don't replace the Zustand store with Redux/Jotai/Context. Don't add new persistence layers (SQLite + Zustand `persist` already exist).
 - Don't lift the AI copilot into global state — it's a panel, rendered per-page via `WorkspaceShell.right`.
 
 ## Glossary of ids (must stay consistent)
@@ -187,3 +182,105 @@ Generators must output **plain text** files — no binary. Use `dedent` / templa
 - APIs: `rest`, `grpc`, `graphql`, `trpc`.
 
 New ids must be added to **three** places: `stack-options.ts`, the matching generator, and (ideally) `BrandIcon`'s registry.
+# CLAUDE.md
+
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
+
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+
+## 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+## Rule 5 — Use the model only for judgment calls
+Use me for: classification, drafting, summarization, extraction.
+Do NOT use me for: routing, retries, deterministic transforms.
+If code can answer, code answers.
+
+## Rule 6 — Token budgets are not advisory
+Per-task: 4,000 tokens. Per-session: 30,000 tokens.
+If approaching budget, summarize and start fresh.
+Surface the breach. Do not silently overrun.
+
+## Rule 7 — Surface conflicts, don't average them
+If two patterns contradict, pick one (more recent / more tested).
+Explain why. Flag the other for cleanup.
+Don't blend conflicting patterns.
+
+## Rule 8 — Read before you write
+Before adding code, read exports, immediate callers, shared utilities.
+"Looks orthogonal" is dangerous. If unsure why code is structured a way, ask.
+
+## Rule 9 — Tests verify intent, not just behavior
+Tests must encode WHY behavior matters, not just WHAT it does.
+A test that can't fail when business logic changes is wrong.
+
+## Rule 10 — Checkpoint after every significant step
+Summarize what was done, what's verified, what's left.
+Don't continue from a state you can't describe back.
+If you lose track, stop and restate.
+
+## Rule 11 — Match the codebase's conventions, even if you disagree
+Conformance > taste inside the codebase.
+If you genuinely think a convention is harmful, surface it. Don't fork silently.
+
+## Rule 12 — Fail loud
+"Completed" is wrong if anything was skipped silently.
+"Tests pass" is wrong if any were skipped.
+Default to surfacing uncertainty, not hiding it.
+
+---
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

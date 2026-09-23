@@ -3,11 +3,21 @@ import archiver from "archiver";
 import { generateRequestSchema } from "@/lib/schema";
 import { generate } from "@/lib/generators";
 import { safeName } from "@/lib/generators/types";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { getCurrentUser } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
+  // Every UI caller (/builder, /preview) is behind login.
+  const claims = await getCurrentUser(req);
+  if (!claims) return Response.json({ error: "unauthorized" }, { status: 401 });
+
+  if (!checkRateLimit(`generate:${claims.sub}`, 20)) {
+    return Response.json({ error: "rate_limited" }, { status: 429 });
+  }
+
   let body: unknown;
   try {
     body = await req.json();
@@ -23,8 +33,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { config, endpoints } = parsed.data;
-  const files = generate(config, endpoints);
+  const { config, endpoints, entities, gitConfig, overrides } = parsed.data;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const generated = generate(config, endpoints, entities ?? [], gitConfig as any);
+  const files = overrides && Object.keys(overrides).length > 0
+    ? generated.map((f) => overrides[f.path] !== undefined ? { ...f, content: overrides[f.path] } : f)
+    : generated;
 
   const archive = archiver("zip", { zlib: { level: 9 } });
 

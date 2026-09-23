@@ -1,9 +1,12 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
+import "swagger-ui-react/swagger-ui.css";
 import {
   Code2,
   FileCode2,
+  Globe,
   Lock,
   Plus,
   Search,
@@ -11,6 +14,8 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  Wand2,
+  Loader2,
 } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -19,10 +24,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
-import { AIAssistant } from "@/components/shared/ai-assistant";
 import { useStackStore, type Endpoint } from "@/lib/store";
 import { shortId } from "@/lib/utils";
 import { toast } from "@/components/ui/toast";
+import { PATTERN_CATALOG, PATTERN_BY_CATEGORY } from "@/lib/generators/patterns/index";
+import { contractTestFiles } from "@/lib/generators/contract-tests";
+
+const SwaggerUI = dynamic(() => import("swagger-ui-react"), { ssr: false });
 
 const methodTones: Record<Endpoint["method"], string> = {
   GET: "text-emerald-300 bg-emerald-500/10 border-emerald-500/20",
@@ -40,6 +48,12 @@ export default function ApiBuilderPage() {
     config.api === "grpc" ? "grpc" : "rest"
   );
   const [filter, setFilter] = React.useState("");
+  const [view, setView] = React.useState<"editor" | "explorer">("editor");
+
+  const openApiSpec = React.useMemo(
+    () => buildOpenAPI(config.name, endpoints),
+    [config.name, endpoints]
+  );
 
   const filtered = React.useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -90,7 +104,6 @@ export default function ApiBuilderPage() {
         { label: config.name },
         { label: "API Contracts" },
       ]}
-      right={<AIAssistant />}
     >
       <div className="flex h-full">
         {/* Left rail: endpoints */}
@@ -170,11 +183,26 @@ export default function ApiBuilderPage() {
             )}
           </div>
 
-          <div className="border-t border-white/[0.06] p-3 text-[11px] text-muted-foreground">
+          <div className="border-t border-white/[0.06] p-3 space-y-2 text-[11px] text-muted-foreground">
             <div className="flex items-center justify-between">
-              <span>{endpoints.length} endpoints</span>
+              <span>{endpoints.length} endpoint{endpoints.length !== 1 ? "s" : ""}</span>
               <Badge variant="brand">OpenAPI 3.1</Badge>
             </div>
+            {endpoints.length > 0 && (() => {
+              const patternCount = endpoints.filter((e) => e.pattern).length;
+              const stubCount = endpoints.length - patternCount;
+              return (
+                <div className="flex items-center gap-1.5">
+                  <div className={`h-1.5 w-1.5 rounded-full shrink-0 ${patternCount === endpoints.length ? "bg-emerald-400" : stubCount === endpoints.length ? "bg-amber-400" : "bg-brand-400"}`} />
+                  {patternCount === 0
+                    ? <span className="text-amber-300/80">Add patterns to generate handler code</span>
+                    : stubCount === 0
+                    ? <span className="text-emerald-300/80">All {patternCount} endpoints have patterns</span>
+                    : <span>{patternCount}/{endpoints.length} have patterns · <span className="text-amber-300/70">{stubCount} stub{stubCount !== 1 ? "s" : ""}</span></span>
+                  }
+                </div>
+              );
+            })()}
           </div>
         </aside>
 
@@ -198,6 +226,20 @@ export default function ApiBuilderPage() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
+                <div className="inline-flex items-center rounded-lg border border-white/[0.06] bg-white/[0.02] p-0.5">
+                  <button
+                    onClick={() => setView("editor")}
+                    className={`rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${view === "editor" ? "bg-white/[0.08] text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                  >
+                    Editor
+                  </button>
+                  <button
+                    onClick={() => setView("explorer")}
+                    className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${view === "explorer" ? "bg-white/[0.08] text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                  >
+                    <Globe className="h-3 w-3" /> Explorer
+                  </button>
+                </div>
                 <Button variant="secondary" size="sm" onClick={downloadOpenAPI}>
                   <FileCode2 className="h-3.5 w-3.5" /> Download OpenAPI
                 </Button>
@@ -207,7 +249,9 @@ export default function ApiBuilderPage() {
               </div>
             </div>
 
-            {selected ? (
+            {view === "explorer" ? (
+              <ApiExplorer spec={openApiSpec} />
+            ) : selected ? (
               <EndpointEditor
                 endpoint={selected}
                 onUpdate={(patch) => updateEndpoint(selected.id, patch)}
@@ -282,13 +326,21 @@ function EndpointEditor({
         </div>
       </Card>
 
-      <Tabs defaultValue="schema">
+      <Tabs defaultValue="logic">
         <TabsList>
+          <TabsTrigger value="logic">
+            <Wand2 className="h-3 w-3 mr-1" /> Business Logic
+          </TabsTrigger>
           <TabsTrigger value="schema">Schema</TabsTrigger>
           <TabsTrigger value="examples">Request / Response</TabsTrigger>
           <TabsTrigger value="openapi">OpenAPI</TabsTrigger>
+          <TabsTrigger value="tests">Contract Tests</TabsTrigger>
           <TabsTrigger value="settings">Settings</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="logic">
+          <BusinessLogicPanel endpoint={endpoint} onUpdate={onUpdate} config={useStackStoreInPanel()} />
+        </TabsContent>
 
         <TabsContent value="schema">
           <div className="grid gap-4 md:grid-cols-2">
@@ -365,6 +417,10 @@ Content-Type: application/json
           />
         </TabsContent>
 
+        <TabsContent value="tests">
+          <ContractTestPreview endpoint={endpoint} />
+        </TabsContent>
+
         <TabsContent value="settings">
           <Card>
             <CardContent className="p-5 space-y-3">
@@ -389,6 +445,261 @@ Content-Type: application/json
     </div>
   );
 }
+
+function ContractTestPreview({ endpoint }: { endpoint: Endpoint }) {
+  const config = useStackStore((s) => s.config);
+  const file = React.useMemo(
+    () => contractTestFiles(config as Parameters<typeof contractTestFiles>[0], [endpoint], [])[0],
+    [config, endpoint]
+  );
+
+  if (!file) {
+    return (
+      <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-6 text-center text-xs text-muted-foreground">
+        Contract tests are not available for this language yet.
+      </div>
+    );
+  }
+
+  const ext = file.path.split(".").pop() ?? "txt";
+  const langMap: Record<string, string> = { ts: "TypeScript", go: "Go", py: "Python", rs: "Rust", java: "Java", kt: "Kotlin" };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+            {langMap[ext] ?? ext} · {file.path}
+          </span>
+        </div>
+        <button
+          onClick={() => { void navigator.clipboard.writeText(file.content); toast({ title: "Copied", kind: "success" }); }}
+          className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+        >
+          Copy
+        </button>
+      </div>
+      <div className="rounded-xl border border-white/[0.06] overflow-hidden">
+        <pre className="px-4 py-4 text-[11px] font-mono text-white/80 overflow-auto max-h-[420px] leading-relaxed whitespace-pre">
+          <code>{file.content}</code>
+        </pre>
+      </div>
+      <p className="text-[10px] text-muted-foreground">
+        This test is included in your downloaded zip under <code className="font-mono">{file.path}</code>.
+        Run it with your framework&apos;s test runner ({config.language === "go" ? "go test" : config.language === "python" ? "pytest" : config.language === "rust" ? "cargo test" : "vitest"}).
+      </p>
+    </div>
+  );
+}
+
+function useStackStoreInPanel() {
+  return useStackStore((s) => s.config);
+}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyConfig = any;
+
+function BusinessLogicPanel({
+  endpoint,
+  onUpdate,
+  config,
+}: {
+  endpoint: Endpoint;
+  onUpdate: (patch: Partial<Endpoint>) => void;
+  config: AnyConfig;
+}) {
+  const [generating, setGenerating] = React.useState(false);
+  const [preview, setPreview] = React.useState<string | null>(null);
+  const abortRef = React.useRef<AbortController | null>(null);
+  React.useEffect(() => () => abortRef.current?.abort(), []);
+
+  const selectedPattern = PATTERN_CATALOG.find((p) => p.id === endpoint.pattern);
+
+  async function generateWithAI() {
+    if (!endpoint.pattern && !endpoint.logic) {
+      toast({ title: "Add a pattern or logic description first", kind: "error" });
+      return;
+    }
+    setGenerating(true);
+    setPreview(null);
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      const res = await fetch("/api/ai/generate-logic", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          endpoint: { method: endpoint.method, path: endpoint.path, pattern: endpoint.pattern, logic: endpoint.logic, summary: endpoint.summary },
+          config,
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        toast({ title: d.error === "missing_api_key" ? "AI not configured — set ANTHROPIC_API_KEY" : "Generation failed", kind: "error" });
+        return;
+      }
+      const reader = res.body?.getReader();
+      if (!reader) return;
+      let code = "";
+      let buffer = "";
+      let streamError: string | null = null;
+      const decoder = new TextDecoder();
+      read: while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+        for (const frame of frames) {
+          let event = "message";
+          let data = "";
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("event:")) event = line.slice(6).trim();
+            else if (line.startsWith("data:")) data += line.slice(5).trim();
+          }
+          let parsed: unknown;
+          try { parsed = JSON.parse(data); } catch { continue; }
+          if (event === "error") {
+            streamError = (parsed as { error?: string })?.error ?? "Stream error";
+            break read;
+          }
+          if (event === "message" && typeof parsed === "string") code += parsed;
+        }
+        setPreview(code);
+      }
+      if (streamError) {
+        reader.cancel().catch(() => {});
+        setPreview(null);
+        toast({ title: "Generation failed", description: streamError, kind: "error" });
+        return;
+      }
+      onUpdate({ logicCode: code });
+      setPreview(null);
+      toast({ title: "Logic generated", kind: "success" });
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return;
+      toast({ title: "Network error", kind: "error" });
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      setGenerating(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Pattern selector */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Pattern</CardTitle>
+          <CardDescription>
+            Select a pattern to generate hardened, production-ready handler code.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="space-y-3 max-h-[360px] overflow-y-auto pr-1">
+            {Object.entries(PATTERN_BY_CATEGORY).map(([cat, patterns]) => (
+              <div key={cat}>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">{cat}</p>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {patterns.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => onUpdate({ pattern: endpoint.pattern === p.id ? undefined : p.id })}
+                      className={`text-left rounded-lg border px-2.5 py-2.5 text-xs transition-colors ${
+                        endpoint.pattern === p.id
+                          ? "border-brand-500/50 bg-brand-500/10 text-brand-300"
+                          : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04] text-muted-foreground"
+                      }`}
+                    >
+                      <div className="font-medium text-foreground/90 text-[11px] leading-tight">{p.name}</div>
+                      <div className="text-[10px] leading-tight mt-1 opacity-60 line-clamp-2">{p.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          {selectedPattern && (
+            <div className="flex items-center gap-2 rounded-md border border-brand-500/20 bg-brand-500/5 px-3 py-2 text-xs text-brand-300">
+              <Wand2 className="h-3 w-3 shrink-0" />
+              <span><span className="font-medium">{selectedPattern.name}</span> — {selectedPattern.desc}</span>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Logic description */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>Business Logic</CardTitle>
+              <CardDescription>
+                Describe specific logic for AI generation, or leave empty to use the pattern template.
+              </CardDescription>
+            </div>
+            <Button
+              variant="glow"
+              size="sm"
+              onClick={generateWithAI}
+              disabled={generating}
+            >
+              {generating ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5" />
+              )}
+              {generating ? "Generating…" : "Generate with AI"}
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <textarea
+            value={endpoint.logic ?? ""}
+            onChange={(e) => onUpdate({ logic: e.target.value })}
+            placeholder={`Describe the business logic for ${endpoint.method} ${endpoint.path}…\n\nExample: List active users ordered by last login. Include pagination. Filter by role if ?role= is provided.`}
+            className="w-full min-h-[100px] rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2.5 text-xs text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-brand-500/40 resize-none"
+          />
+          {preview && (
+            <div className="rounded-lg border border-white/[0.06] overflow-hidden">
+              <div className="flex items-center justify-between border-b border-white/[0.06] px-3 py-2">
+                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Generating…</span>
+                <Badge variant="outline">{config.language}</Badge>
+              </div>
+              <pre className="p-3 text-[11px] font-mono text-white/80 overflow-auto max-h-[320px] leading-relaxed">
+                <code>{preview}</code>
+              </pre>
+            </div>
+          )}
+          {!preview && endpoint.logicCode && (
+            <div className="rounded-lg border border-emerald-500/20 overflow-hidden">
+              <div className="flex items-center justify-between border-b border-emerald-500/10 px-3 py-2">
+                <span className="text-[10px] uppercase tracking-wider text-emerald-400">Handler code — injected into generated files</span>
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline">{config.language}</Badge>
+                  <button
+                    onClick={() => onUpdate({ logicCode: undefined })}
+                    className="text-[10px] text-muted-foreground hover:text-red-400 transition-colors"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <textarea
+                value={endpoint.logicCode}
+                onChange={(e) => onUpdate({ logicCode: e.target.value })}
+                spellCheck={false}
+                className="w-full p-3 text-[11px] font-mono text-white/80 bg-transparent focus:outline-none resize-none min-h-[200px] max-h-[400px]"
+              />
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 
 function SchemaCard({
   title,
@@ -492,6 +803,60 @@ function ToggleRow({
         <div className="text-xs text-muted-foreground">{desc}</div>
       </div>
       <Switch checked={v} onCheckedChange={setV} />
+    </div>
+  );
+}
+
+function ApiExplorer({ spec }: { spec: string }) {
+  const specObj = React.useMemo(() => {
+    try {
+      const lines = spec.split("\n");
+      const obj: Record<string, unknown> = {};
+      let currentPath = "";
+      let currentMethod = "";
+      const paths: Record<string, Record<string, unknown>> = {};
+      for (const line of lines) {
+        if (line.match(/^  [/]/)) {
+          currentPath = line.trim().replace(/:$/, "");
+          paths[currentPath] = {};
+        } else if (line.match(/^    (get|post|put|patch|delete):/)) {
+          currentMethod = line.trim().replace(/:$/, "");
+          if (currentPath) paths[currentPath][currentMethod] = { summary: "", responses: { "200": { description: "OK" } } };
+        } else if (line.includes("summary:") && currentPath && currentMethod) {
+          const summary = line.split("summary:")[1]?.trim().replace(/^"|"$/g, "") ?? "";
+          (paths[currentPath][currentMethod] as Record<string, unknown>).summary = summary;
+        } else if (line.includes("security:") && currentPath && currentMethod) {
+          (paths[currentPath][currentMethod] as Record<string, unknown>).security = [{ bearerAuth: [] }];
+        }
+      }
+      obj.openapi = "3.1.0";
+      obj.info = { title: spec.match(/title: (.+)/)?.[1] ?? "API", version: "0.1.0" };
+      obj.components = { securitySchemes: { bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" } } };
+      obj.paths = paths;
+      return obj;
+    } catch {
+      return { openapi: "3.1.0", info: { title: "API", version: "0.1.0" }, paths: {} };
+    }
+  }, [spec]);
+
+  return (
+    <div className="rounded-xl border border-white/[0.06] overflow-hidden [&_.swagger-ui]:text-foreground [&_.swagger-ui_.info]:text-foreground [&_.swagger-ui_.scheme-container]:bg-transparent [&_.swagger-ui_.opblock-summary-description]:text-muted-foreground [&_.swagger-ui_input]:bg-white/[0.05] [&_.swagger-ui_select]:bg-zinc-900 [&_.swagger-ui_textarea]:bg-white/[0.05] swagger-dark">
+      <div className="border-b border-white/[0.06] px-4 py-2.5 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Globe className="h-3.5 w-3.5 text-brand-300" />
+          <span className="text-xs font-medium">API Explorer</span>
+          <Badge variant="brand">Interactive</Badge>
+        </div>
+        <Badge variant="outline">OpenAPI 3.1</Badge>
+      </div>
+      <div className="bg-zinc-950 p-4 overflow-auto max-h-[720px]">
+        <SwaggerUI
+          spec={specObj}
+          defaultModelsExpandDepth={-1}
+          docExpansion="list"
+          filter
+        />
+      </div>
     </div>
   );
 }

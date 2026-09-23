@@ -2,8 +2,9 @@
 
 import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, Send, Wand2, BrainCircuit, AlertCircle } from "lucide-react";
+import { Sparkles, Send, Wand2, BrainCircuit, AlertCircle, ShieldCheck, Square } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useStackStore } from "@/lib/store";
 
@@ -13,20 +14,33 @@ type Message = {
 };
 
 const suggestions = [
-  "Recommend a stack for a real-time chat app",
+  "What are the bottlenecks in this stack at scale?",
   "Optimize cost for 100k DAU",
-  "Suggest observability setup",
+  "Suggest observability improvements",
   "What database fits event-sourced writes?",
 ];
 
 const greeting: Message = {
   role: "assistant",
   content:
-    "Hi — I can audit your stack, recommend upgrades, and explain trade-offs. Start by telling me your traffic profile or tap a suggestion below.",
+    "Hi — I can audit your stack, flag version conflicts and known issues, and explain trade-offs. Tap \"Audit stack\" for an instant review, or ask me anything.",
 };
 
+function buildAuditPrompt(config: ReturnType<typeof useStackStore.getState>["config"]): string {
+  return `Audit this stack configuration and flag specific issues:
+- Language: ${config.language} / ${config.framework}
+- Database: ${config.database}
+- Cache: ${config.cache}
+- Queue: ${config.queue}
+- Auth: ${config.auth}
+- Deployment: ${config.deployment}
+- API style: ${config.api}
+
+Check for: (1) known version conflicts or incompatibilities between these choices, (2) licensing concerns, (3) security risks in this combination, (4) operational gotchas at production scale. Be specific — name the exact issues and why they matter.`;
+}
+
 export function AIAssistant({ className }: { className?: string }) {
-  const { config } = useStackStore();
+  const { config, endpoints, entities } = useStackStore();
   const [messages, setMessages] = React.useState<Message[]>([greeting]);
   const [input, setInput] = React.useState("");
   const [thinking, setThinking] = React.useState(false);
@@ -40,6 +54,8 @@ export function AIAssistant({ className }: { className?: string }) {
       behavior: "smooth",
     });
   }, [messages, thinking]);
+
+  React.useEffect(() => () => abortRef.current?.abort(), []);
 
   async function send(text: string) {
     if (!text.trim() || thinking) return;
@@ -69,6 +85,8 @@ export function AIAssistant({ className }: { className?: string }) {
         body: JSON.stringify({
           messages: apiMessages,
           config,
+          endpoints,
+          entities,
         }),
         signal: controller.signal,
       });
@@ -90,7 +108,7 @@ export function AIAssistant({ className }: { className?: string }) {
       const decoder = new TextDecoder();
       let buffer = "";
 
-      while (true) {
+      read: while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
@@ -122,11 +140,18 @@ export function AIAssistant({ className }: { className?: string }) {
             });
           } else if (event.event === "error") {
             setError(data.message ?? "Stream error");
+            reader.cancel().catch(() => {});
+            break read;
           }
         }
       }
     } catch (err) {
-      if ((err as Error).name !== "AbortError") {
+      if ((err as Error).name === "AbortError") {
+        // Clean stop: keep partial text, drop the placeholder if nothing arrived.
+        setMessages((prev) =>
+          prev[prev.length - 1]?.content ? prev : prev.slice(0, -1)
+        );
+      } else {
         setError((err as Error).message);
         setMessages((prev) => prev.slice(0, -1));
       }
@@ -208,7 +233,14 @@ export function AIAssistant({ className }: { className?: string }) {
       </div>
 
       <div className="px-4 pb-2">
-        <div className="flex flex-wrap gap-1.5 pb-2">
+        <button
+          disabled={thinking}
+          onClick={() => send(buildAuditPrompt(config))}
+          className="mb-2 w-full flex items-center justify-center gap-1.5 rounded-lg border border-brand-500/30 bg-brand-500/10 px-3 py-1.5 text-[11px] font-medium text-brand-300 hover:bg-brand-500/15 transition-colors disabled:opacity-50"
+        >
+          <ShieldCheck className="h-3.5 w-3.5" /> Audit this stack
+        </button>
+        <div className="flex flex-wrap gap-1.5">
           {suggestions.map((s) => (
             <button
               key={s}
@@ -237,14 +269,27 @@ export function AIAssistant({ className }: { className?: string }) {
           placeholder="Ask to optimize your stack…"
           className="flex-1 bg-transparent px-1.5 py-1 text-xs placeholder:text-muted-foreground/70 focus:outline-none disabled:opacity-50"
         />
+        {thinking ? (
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            onClick={() => abortRef.current?.abort()}
+            className="h-7 w-7 rounded-md [&_svg]:size-3"
+            aria-label="Stop"
+          >
+            <Square className="fill-current" />
+          </Button>
+        ) : (
         <button
           type="submit"
-          disabled={thinking || !input.trim()}
+          disabled={!input.trim()}
           className="grid h-7 w-7 place-items-center rounded-md bg-gradient-to-br from-brand-500 to-purple-500 text-white hover:opacity-90 transition-opacity disabled:opacity-40"
           aria-label="Send"
         >
           <Send className="h-3.5 w-3.5" />
         </button>
+        )}
       </form>
     </div>
   );

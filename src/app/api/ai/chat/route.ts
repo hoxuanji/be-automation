@@ -1,6 +1,20 @@
 import { NextRequest } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { aiChatRequestSchema } from "@/lib/schema";
+import { checkRateLimit, getRateLimitKey } from "@/lib/rate-limit";
+import { getCurrentUser } from "@/lib/auth";
+import { findUserById, decryptApiKey } from "@/lib/db";
+
+async function resolveApiKey(req: NextRequest): Promise<string | null> {
+  const claims = await getCurrentUser(req);
+  if (claims) {
+    const user = findUserById(claims.sub);
+    if (user?.llm_api_key_enc) {
+      return decryptApiKey(user.llm_api_key_enc);
+    }
+  }
+  return process.env.ANTHROPIC_API_KEY ?? null;
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,12 +37,17 @@ Rules:
 - Never invent private APIs, pricing, or benchmarks you are not sure about.`;
 
 export async function POST(req: NextRequest) {
-  if (!process.env.ANTHROPIC_API_KEY) {
+  if (!checkRateLimit(getRateLimitKey(req), 60)) {
+    return Response.json({ error: "rate_limited" }, { status: 429 });
+  }
+
+  const apiKey = await resolveApiKey(req);
+  if (!apiKey) {
     return Response.json(
       {
         error: "missing_api_key",
         detail:
-          "Set ANTHROPIC_API_KEY in .env.local to enable the real assistant.",
+          "No API key available. Set ANTHROPIC_API_KEY in .env.local or add your own key in Settings.",
       },
       { status: 503 }
     );
@@ -49,21 +68,22 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { messages, config } = parsed.data;
-  const client = new Anthropic();
+  const { messages, config, endpoints, entities } = parsed.data;
+  const client = new Anthropic({ apiKey });
 
-  const systemBlocks: Anthropic.TextBlockParam[] = [
-    { type: "text", text: SYSTEM_PROMPT },
-  ];
+  // Prompt caching lives in the beta API — cast to any to avoid type mismatch
+  // while retaining the runtime behaviour (cache_control is accepted by the wire API).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const systemBlocks: any[] = [{ type: "text", text: SYSTEM_PROMPT }];
 
-  if (config) {
+  if (config || endpoints?.length || entities?.length) {
+    const ctx: Record<string, unknown> = {};
+    if (config) ctx.config = config;
+    if (endpoints?.length) ctx.endpoints = endpoints;
+    if (entities?.length) ctx.entities = entities;
     systemBlocks.push({
       type: "text",
-      text: `Current stack configuration (cached):\n\n\`\`\`json\n${JSON.stringify(
-        config,
-        null,
-        2
-      )}\n\`\`\``,
+      text: `Current stack context:\n\n\`\`\`json\n${JSON.stringify(ctx, null, 2)}\n\`\`\``,
       cache_control: { type: "ephemeral" },
     });
   }

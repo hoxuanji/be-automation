@@ -13,37 +13,186 @@ import {
   Clock,
   TrendingUp,
   Activity,
-  Bot,
+  FolderGit2,
   ArrowRight,
   FileCode2,
   Database,
   Cloud,
   Search,
+  Trash2,
+  History,
+  Users,
+  ChevronDown,
+  Loader2,
+  X,
+  ChevronRight,
+  Check,
+  Share2,
 } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { AIAssistant } from "@/components/shared/ai-assistant";
 import { toast } from "@/components/ui/toast";
-import { useStackStore } from "@/lib/store";
+import { useStackStore, type SavedProject } from "@/lib/store";
 import type { StackConfig } from "@/lib/generators/types";
+import { cn } from "@/lib/utils";
+import { ShareProjectDialog } from "@/components/builder/ShareProjectDialog";
 
-type Project = {
-  name: string;
-  stack: string;
-  env: string;
-  region: string;
-  updated: string;
-  status: string;
-};
+const ONBOARDED_KEY = "helios_onboarded";
 
-const projects: Project[] = [
-  { name: "helios-api", stack: "Go · Postgres · Redis", env: "production", region: "us-east-1", updated: "2m ago", status: "healthy" },
-  { name: "ledger-svc", stack: "Rust · CockroachDB · Kafka", env: "staging", region: "eu-west-2", updated: "1h ago", status: "healthy" },
-  { name: "notifier", stack: "TypeScript · Redis · NATS", env: "production", region: "us-west-2", updated: "yesterday", status: "degraded" },
-  { name: "search-index", stack: "Python · Postgres · OpenSearch", env: "staging", region: "us-east-1", updated: "3d ago", status: "healthy" },
-];
+const STARTER_LANGUAGES = [
+  { id: "go", label: "Go", desc: "Fast, compiled, great for high-throughput APIs.", accent: "#00ADD8" },
+  { id: "typescript", label: "TypeScript", desc: "Node.js + TypeScript for end-to-end typed APIs.", accent: "#3178C6" },
+  { id: "python", label: "Python", desc: "Async FastAPI stack with Pydantic v2 models.", accent: "#3776AB" },
+  { id: "rust", label: "Rust", desc: "Memory-safe, blazing performance.", accent: "#DEA584" },
+] as const;
+
+function OnboardingModal() {
+  const { set } = useStackStore();
+  const router = useRouter();
+  const [open, setOpen] = React.useState(false);
+  const [step, setStep] = React.useState(0);
+  const [pickedLang, setPickedLang] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    try {
+      if (!localStorage.getItem(ONBOARDED_KEY)) setOpen(true);
+    } catch {}
+  }, []);
+
+  function dismiss() {
+    try { localStorage.setItem(ONBOARDED_KEY, "1"); } catch {}
+    setOpen(false);
+  }
+
+  function finish() {
+    if (pickedLang) {
+      set("language", pickedLang as StackConfig["language"]);
+    }
+    dismiss();
+    router.push("/builder");
+  }
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+      <div className="relative w-full max-w-md rounded-2xl border border-white/[0.08] bg-[#0d0d12] shadow-2xl overflow-hidden">
+        <div className="pointer-events-none absolute -top-32 -right-32 h-64 w-64 aurora animate-aurora opacity-40" />
+
+        {/* Progress dots */}
+        <div className="relative flex items-center justify-between px-6 pt-5 pb-0">
+          <div className="flex items-center gap-2">
+            {[0, 1].map((i) => (
+              <span
+                key={i}
+                className={cn(
+                  "h-1.5 rounded-full transition-all",
+                  i === step ? "w-6 bg-brand-400" : i < step ? "w-1.5 bg-brand-400/40" : "w-1.5 bg-white/10"
+                )}
+              />
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={dismiss}
+            className="text-muted-foreground hover:text-foreground transition-colors"
+            aria-label="Skip"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="relative px-6 py-6">
+          {step === 0 && (
+            <div className="space-y-4">
+              <div className="h-12 w-12 rounded-xl bg-gradient-to-br from-brand-500/30 to-purple-500/30 border border-white/[0.08] grid place-items-center">
+                <Rocket className="h-6 w-6 text-brand-300" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold">Welcome to Helios</h2>
+                <p className="mt-1.5 text-sm text-muted-foreground">
+                  Configure your backend stack visually and download a real, buildable repository in seconds.
+                </p>
+              </div>
+              <ul className="space-y-2 text-sm text-muted-foreground">
+                {[
+                  "Pick your language, framework, and database",
+                  "Define API endpoints and entities",
+                  "Download or deploy directly to Railway",
+                ].map((item) => (
+                  <li key={item} className="flex items-start gap-2">
+                    <Check className="h-3.5 w-3.5 mt-0.5 shrink-0 text-brand-400" />
+                    {item}
+                  </li>
+                ))}
+              </ul>
+              <Button variant="glow" className="w-full" onClick={() => setStep(1)}>
+                Get started <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
+          )}
+
+          {step === 1 && (
+            <div className="space-y-4">
+              <div>
+                <h2 className="text-lg font-semibold">Pick your language</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  You can change this any time in the builder.
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {STARTER_LANGUAGES.map((lang) => (
+                  <button
+                    key={lang.id}
+                    type="button"
+                    onClick={() => setPickedLang(lang.id)}
+                    className={cn(
+                      "rounded-xl border p-3 text-left transition-all",
+                      pickedLang === lang.id
+                        ? "border-brand-500/60 bg-brand-500/10"
+                        : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]"
+                    )}
+                  >
+                    <div
+                      className="mb-2 text-xs font-semibold"
+                      style={{ color: lang.accent }}
+                    >
+                      {lang.label}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground leading-snug">{lang.desc}</div>
+                  </button>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <Button variant="secondary" className="flex-1" onClick={() => setStep(0)}>
+                  Back
+                </Button>
+                <Button
+                  variant="glow"
+                  className="flex-1"
+                  disabled={!pickedLang}
+                  onClick={finish}
+                >
+                  Open builder <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 60_000) return "just now";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
 
 type Template = {
   id: string;
@@ -130,28 +279,60 @@ const templates: Template[] = [
 ];
 
 const quickActions = [
-  { label: "Architect new", desc: "Describe, don't configure", icon: Sparkles, href: "/start" },
-  { label: "Stack Builder", desc: "Configure manually", icon: Boxes, href: "/builder" },
+  { label: "New stack", desc: "Start from scratch", icon: Boxes, href: "/builder" },
   { label: "API contract", desc: "Design endpoints", icon: FileCode2, href: "/api-builder" },
-  { label: "Autopilot PR", desc: "Audit a GitHub repo", icon: Bot, href: "/autopilot" },
+  { label: "Deploy", desc: "Railway / Render / Fly / Vercel", icon: Cloud, href: "/deploy" },
+  { label: "Import repo", desc: "Analyze existing", icon: FolderGit2, href: "/from-repo" },
 ];
 
+function PersistenceWarning() {
+  const [show, setShow] = React.useState(false);
+
+  React.useEffect(() => {
+    fetch("/api/health")
+      .then((r) => r.json())
+      .then((d: { storage?: string }) => { if (d.storage === "ephemeral") setShow(true); })
+      .catch(() => {});
+  }, []);
+
+  if (!show) return null;
+
+  return (
+    <div className="border-b border-amber-500/20 bg-amber-500/[0.06] px-6 py-3">
+      <div className="max-w-6xl mx-auto flex items-center justify-between gap-4 flex-wrap">
+        <p className="text-xs text-amber-200/80">
+          <strong className="font-medium">Storage warning:</strong> Your database is on an ephemeral filesystem and will reset on the next deploy. Mount a persistent volume or connect a managed database to keep your data.
+        </p>
+        <button onClick={() => setShow(false)} className="text-amber-400/60 hover:text-amber-300 text-sm leading-none shrink-0">✕</button>
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
+  const { savedProjects, loadSavedProjects, deleteProject, authUser } = useStackStore();
   const [filter, setFilter] = React.useState("");
-  const filtered = projects.filter(
+
+  React.useEffect(() => {
+    void loadSavedProjects();
+  }, [loadSavedProjects]);
+
+  const filtered = savedProjects.filter(
     (p) =>
       !filter.trim() ||
       p.name.toLowerCase().includes(filter.toLowerCase()) ||
-      p.stack.toLowerCase().includes(filter.toLowerCase())
+      p.config.language.toLowerCase().includes(filter.toLowerCase()) ||
+      p.config.database.toLowerCase().includes(filter.toLowerCase())
   );
 
   return (
     <WorkspaceShell
       breadcrumb={[{ label: "Dashboard" }]}
-      right={<AIAssistant />}
     >
+      <OnboardingModal />
+      <PersistenceWarning />
       <div className="mx-auto max-w-6xl p-6 md:p-8 space-y-8">
-        <HeaderBlock />
+        <HeaderBlock name={authUser?.name} projectCount={savedProjects.length} />
 
         <MetricsStrip />
 
@@ -163,24 +344,25 @@ export default function DashboardPage() {
           <div className="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-4">
             {quickActions.map((a) => {
               const Icon = a.icon;
+              const card = (
+                <div className="flex items-center gap-3">
+                  <div className="grid h-9 w-9 place-items-center rounded-lg border border-white/10 bg-white/[0.03]">
+                    <Icon className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium">{a.label}</div>
+                    <div className="text-xs text-muted-foreground">{a.desc}</div>
+                  </div>
+                  <ArrowUpRight className="ml-auto h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                </div>
+              );
               return (
                 <Link
                   key={a.label}
                   href={a.href}
                   className="group relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 hover-raise"
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="grid h-9 w-9 place-items-center rounded-lg border border-white/10 bg-white/[0.03]">
-                      <Icon className="h-4 w-4" />
-                    </div>
-                    <div>
-                      <div className="text-sm font-medium">{a.label}</div>
-                      <div className="text-xs text-muted-foreground">
-                        {a.desc}
-                      </div>
-                    </div>
-                    <ArrowUpRight className="ml-auto h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
-                  </div>
+                  {card}
                 </Link>
               );
             })}
@@ -203,19 +385,10 @@ export default function DashboardPage() {
                   placeholder="Filter projects"
                 />
               </label>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() =>
-                  toast({
-                    title: "Import a repository",
-                    description:
-                      "Paste a GitHub URL in the AI panel to audit it.",
-                    kind: "info",
-                  })
-                }
-              >
-                <GitBranch className="h-3.5 w-3.5" /> Import
+              <Button asChild variant="secondary" size="sm">
+                <Link href="/from-repo">
+                  <GitBranch className="h-3.5 w-3.5" /> Import
+                </Link>
               </Button>
               <Button asChild variant="glow" size="sm">
                 <Link href="/builder">
@@ -226,15 +399,44 @@ export default function DashboardPage() {
           </div>
 
           <div className="mt-4 grid gap-3 md:grid-cols-2">
-            {filtered.length === 0 ? (
+            {savedProjects.length === 0 ? (
+              <div className="md:col-span-2 rounded-xl border border-dashed border-white/[0.08] bg-white/[0.01] p-8 space-y-5">
+                <div className="text-center space-y-3">
+                  <div className="mx-auto h-12 w-12 rounded-xl bg-gradient-to-br from-brand-500/20 to-purple-500/20 border border-white/[0.06] grid place-items-center">
+                    <FolderGit2 className="h-6 w-6 text-brand-300" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold">No projects yet</div>
+                    <p className="text-xs text-muted-foreground mt-1 max-w-xs mx-auto">
+                      Start from a template or configure your own stack from scratch — your first repo takes under 2 minutes.
+                    </p>
+                  </div>
+                  <div className="flex items-center justify-center gap-2">
+                    <Button asChild variant="glow" size="sm">
+                      <Link href="/builder"><Plus className="h-3.5 w-3.5" /> Start from scratch</Link>
+                    </Button>
+                  </div>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2 text-center">Or pick a template</p>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {templates.map((t) => (
+                      <TemplateCard key={t.id} template={t} />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : filtered.length === 0 ? (
               <div className="md:col-span-2 rounded-xl border border-white/[0.06] bg-white/[0.02] p-8 text-center">
                 <div className="text-sm font-medium">No matches</div>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Try another search term or create a new stack.
+                  Try another search term.
                 </p>
               </div>
             ) : (
-              filtered.map((p) => <ProjectCard key={p.name} {...p} />)
+              filtered.map((p) => (
+                <SavedProjectCard key={p.id} project={p} onDelete={() => deleteProject(p.id)} />
+              ))
             )}
           </div>
         </section>
@@ -251,27 +453,32 @@ export default function DashboardPage() {
           </div>
         </section>
 
-        <ActivityFeed />
+        <SharedWithMeSection />
+
+        <TeamProjectsSection />
+
+        <RecentSaves />
       </div>
     </WorkspaceShell>
   );
 }
 
-function HeaderBlock() {
+function HeaderBlock({ name, projectCount }: { name?: string; projectCount: number }) {
   return (
     <div className="relative overflow-hidden rounded-2xl border border-white/[0.06] bg-gradient-to-b from-white/[0.04] to-transparent p-6 md:p-8">
       <div className="pointer-events-none absolute -right-20 -top-20 h-[320px] w-[420px] aurora animate-aurora opacity-60" />
       <div className="relative flex flex-col md:flex-row md:items-end md:justify-between gap-5">
         <div>
-          <p className="text-xs text-muted-foreground">Welcome back, Jee</p>
+          <p className="text-xs text-muted-foreground">
+            Welcome back{name ? `, ${name.split(" ")[0]}` : ""}
+          </p>
           <h1 className="mt-1 text-2xl md:text-3xl font-semibold tracking-tight">
             What will you ship today?
           </h1>
           <p className="mt-1.5 max-w-lg text-sm text-muted-foreground">
-            You have 3 active projects and 2 pending deployments. The AI
-            copilot suggests upgrading{" "}
-            <span className="text-foreground">helios-api</span> to Postgres 16
-            — it could cut p99 by ~14%.
+            {projectCount > 0
+              ? `You have ${projectCount} saved project${projectCount !== 1 ? "s" : ""}. Configure a stack, download the generated repo, or push directly to GitHub.`
+              : "Get started by configuring your first stack in the builder."}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -361,66 +568,98 @@ function SectionHeader({
   );
 }
 
-function ProjectCard({
-  name,
-  stack,
-  env,
-  region,
-  updated,
-  status,
-}: Project) {
-  const { patch } = useStackStore();
+function SavedProjectCard({
+  project,
+  onDelete,
+}: {
+  project: SavedProject;
+  onDelete: () => void;
+}) {
+  const { loadProject } = useStackStore();
   const router = useRouter();
+  const [shareOpen, setShareOpen] = React.useState(false);
+
   function open() {
-    patch({ name });
+    loadProject(project.id);
     toast({
-      title: "Opening project",
-      description: `${name} · ${stack}`,
-      kind: "info",
+      title: `Loaded "${project.name}"`,
+      description: `${project.config.language} · ${project.config.framework} · ${project.config.database}`,
+      kind: "success",
     });
     router.push("/builder");
   }
+
+  const stackLine = [
+    project.config.language,
+    project.config.framework,
+    project.config.database,
+    project.config.cache !== "none" ? project.config.cache : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
-    <button
-      type="button"
-      onClick={open}
-      className="group relative block w-full text-left rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 hover-raise"
-    >
+    <div className="group relative block w-full text-left rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 hover-raise">
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
+        <button type="button" onClick={open} className="min-w-0 flex-1 text-left">
           <div className="flex items-center gap-2">
             <div className="h-7 w-7 rounded-md bg-gradient-to-br from-brand-500/30 to-purple-500/30 border border-white/10 grid place-items-center">
               <Database className="h-3.5 w-3.5 text-muted-foreground" />
             </div>
-            <span className="text-sm font-medium truncate">{name}</span>
-            <Badge variant={env === "production" ? "brand" : "outline"} className="ml-1">
-              {env}
-            </Badge>
+            <span className="text-sm font-medium truncate">{project.name}</span>
+            {project.entities.length > 0 && (
+              <Badge variant="outline" className="ml-1 text-[10px]">
+                {project.entities.length} model{project.entities.length !== 1 ? "s" : ""}
+              </Badge>
+            )}
           </div>
-          <p className="mt-1.5 text-xs text-muted-foreground font-mono">
-            {stack}
-          </p>
+          <p className="mt-1.5 text-xs text-muted-foreground font-mono">{stackLine}</p>
+        </button>
+        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShareOpen(true);
+            }}
+            className="text-muted-foreground hover:text-indigo-300"
+            aria-label="Share project"
+            title="Share project"
+          >
+            <Share2 className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+              toast({ title: `Deleted "${project.name}"`, kind: "info" });
+            }}
+            className="text-muted-foreground hover:text-red-300"
+            aria-label="Delete project"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
         </div>
-        <Badge
-          variant={status === "healthy" ? "success" : "warning"}
-          className="shrink-0"
-        >
-          <span className="h-1.5 w-1.5 rounded-full bg-current" />
-          {status}
-        </Badge>
       </div>
-      <div className="mt-4 flex items-center gap-3 text-[11px] text-muted-foreground">
+      <button type="button" onClick={open} className="mt-4 w-full flex items-center gap-3 text-[11px] text-muted-foreground">
         <span className="flex items-center gap-1.5">
-          <Cloud className="h-3 w-3" /> {region}
+          <Cloud className="h-3 w-3" /> {project.config.region}
         </span>
         <span className="flex items-center gap-1.5">
-          <Clock className="h-3 w-3" /> {updated}
+          <Clock className="h-3 w-3" /> {relativeTime(project.savedAt)}
         </span>
         <span className="ml-auto flex items-center gap-1 text-muted-foreground/80 group-hover:text-brand-300 transition-colors">
           Open <ArrowRight className="h-3 w-3" />
         </span>
-      </div>
-    </button>
+      </button>
+      <ShareProjectDialog
+        projectId={project.id}
+        projectName={project.name}
+        open={shareOpen}
+        onOpenChange={setShareOpen}
+      />
+    </div>
   );
 }
 
@@ -470,50 +709,257 @@ function TemplateCard({ template }: { template: Template }) {
   );
 }
 
-function ActivityFeed() {
-  const items = [
-    { who: "Jee", what: "deployed", target: "helios-api", where: "production", when: "2 minutes ago", tone: "emerald" },
-    { who: "AI", what: "recommended", target: "Postgres 16 upgrade", where: "helios-api", when: "14 minutes ago", tone: "brand" },
-    { who: "Ana", what: "added endpoint", target: "POST /invoices", where: "ledger-svc", when: "1 hour ago", tone: "purple" },
-    { who: "CI", what: "passed", target: "148 tests", where: "notifier", when: "3 hours ago", tone: "emerald" },
-  ];
-  const toneMap: Record<string, string> = {
-    emerald: "bg-emerald-500/10 text-emerald-300 border-emerald-500/20",
-    brand: "bg-brand-500/10 text-brand-300 border-brand-500/20",
-    purple: "bg-purple-500/10 text-purple-300 border-purple-500/20",
-  };
+type Team = { id: string; name: string; role: string; memberCount: number };
+type TeamProject = { id: string; name: string; updated_at: number; user_name: string };
+
+function TeamProjectsSection() {
+  const { authUser } = useStackStore();
+  const [teams, setTeams] = React.useState<Team[]>([]);
+  const [projects, setProjects] = React.useState<Record<string, TeamProject[]>>({});
+  const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
+  const [loading, setLoading] = React.useState(false);
+  const router = useRouter();
+
+  React.useEffect(() => {
+    if (!authUser) return;
+    setLoading(true);
+    fetch("/api/teams")
+      .then((r) => r.json())
+      .then((d: { teams?: Team[] }) => {
+        const t = d.teams ?? [];
+        setTeams(t);
+        // Auto-expand first team, load its projects
+        if (t.length > 0) {
+          setExpanded({ [t[0].id]: true });
+          return fetchTeamProjects(t[0].id);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser]);
+
+  async function fetchTeamProjects(teamId: string) {
+    if (projects[teamId]) return;
+    try {
+      const r = await fetch(`/api/teams/${teamId}/projects`);
+      const d = await r.json() as { projects?: TeamProject[] };
+      setProjects((prev) => ({ ...prev, [teamId]: d.projects ?? [] }));
+    } catch {}
+  }
+
+  function toggle(teamId: string) {
+    setExpanded((prev) => {
+      const next = { ...prev, [teamId]: !prev[teamId] };
+      if (next[teamId]) void fetchTeamProjects(teamId);
+      return next;
+    });
+  }
+
+  if (!authUser || (teams.length === 0 && !loading)) return null;
+
   return (
     <section>
-      <SectionHeader title="Activity" subtitle="What happened across your workspace" />
-      <Card className="mt-4 divide-y divide-white/[0.04]">
-        {items.map((it, i) => (
-          <button
-            key={i}
-            type="button"
-            onClick={() =>
-              toast({
-                title: `${it.who} ${it.what} ${it.target}`,
-                description: `in ${it.where} · ${it.when}`,
-                kind: "info",
-              })
-            }
-            className="flex w-full items-center gap-3 p-3.5 text-left hover:bg-white/[0.02]"
-          >
-            <span
-              className={`grid h-7 w-7 place-items-center rounded-full border text-[10px] font-semibold ${toneMap[it.tone]}`}
-            >
-              {it.who.slice(0, 2).toUpperCase()}
-            </span>
-            <div className="flex-1 text-sm">
-              <span className="font-medium">{it.who}</span>{" "}
-              <span className="text-muted-foreground">{it.what}</span>{" "}
-              <span className="font-medium">{it.target}</span>{" "}
-              <span className="text-muted-foreground">in</span>{" "}
-              <span className="font-mono text-[12px]">{it.where}</span>
+      <SectionHeader
+        title="Team projects"
+        subtitle="Projects shared across your team workspaces"
+      />
+      {loading ? (
+        <div className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading teams…
+        </div>
+      ) : (
+        <div className="mt-4 space-y-3">
+          {teams.map((team) => (
+            <div key={team.id} className="rounded-xl border border-white/[0.06] bg-white/[0.02] overflow-hidden">
+              <button
+                type="button"
+                onClick={() => toggle(team.id)}
+                className="w-full flex items-center justify-between p-4 hover:bg-white/[0.02] group"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="grid h-8 w-8 place-items-center rounded-lg border border-white/10 bg-white/[0.03]">
+                    <Users className="h-4 w-4 text-muted-foreground" />
+                  </div>
+                  <div className="text-left">
+                    <div className="text-sm font-medium">{team.name}</div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {team.memberCount} member{team.memberCount !== 1 ? "s" : ""} · {team.role}
+                    </div>
+                  </div>
+                </div>
+                <ChevronDown
+                  className={cn(
+                    "h-4 w-4 text-muted-foreground transition-transform",
+                    expanded[team.id] && "rotate-180"
+                  )}
+                />
+              </button>
+              {expanded[team.id] && (
+                <div className="border-t border-white/[0.04]">
+                  {!projects[team.id] ? (
+                    <div className="flex items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
+                      <Loader2 className="h-3 w-3 animate-spin" /> Loading projects…
+                    </div>
+                  ) : projects[team.id].length === 0 ? (
+                    <div className="px-4 py-3 text-xs text-muted-foreground">
+                      No projects yet for this team.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-white/[0.04]">
+                      {projects[team.id].map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => {
+                            toast({ title: `Opening "${p.name}"`, description: `by ${p.user_name}`, kind: "info" });
+                            router.push("/builder");
+                          }}
+                          className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-white/[0.02] group"
+                        >
+                          <div className="grid h-6 w-6 place-items-center rounded-md border border-white/10 bg-white/[0.03] shrink-0">
+                            <Database className="h-3 w-3 text-muted-foreground" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <span className="text-xs font-medium truncate">{p.name}</span>
+                          </div>
+                          <div className="flex items-center gap-3 shrink-0 text-[11px] text-muted-foreground">
+                            <span>{p.user_name}</span>
+                            <span>{relativeTime(new Date(p.updated_at * 1000).toISOString())}</span>
+                            <ArrowRight className="h-3 w-3 opacity-0 group-hover:opacity-100 transition-opacity" />
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            <span className="text-[11px] text-muted-foreground">{it.when}</span>
-          </button>
-        ))}
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+type SharedProjectSummary = {
+  id: string;
+  name: string;
+  permission: "view" | "edit";
+  sharedVia: "user" | "team";
+  sharedTeamId: string | null;
+  ownerName: string;
+  savedAt: string;
+};
+
+function SharedWithMeSection() {
+  const { authUser } = useStackStore();
+  const router = useRouter();
+  const [projects, setProjects] = React.useState<SharedProjectSummary[]>([]);
+  const [loading, setLoading] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!authUser) return;
+    setLoading(true);
+    fetch("/api/shared-with-me")
+      .then((r) => r.json())
+      .then((d: { projects?: SharedProjectSummary[] }) => {
+        setProjects(d.projects ?? []);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [authUser]);
+
+  // Hide the section entirely when there's nothing to show — keeps the
+  // dashboard tidy for solo users.
+  if (!authUser || (projects.length === 0 && !loading)) return null;
+
+  return (
+    <section>
+      <SectionHeader
+        title="Shared with me"
+        subtitle="Projects others have given you access to"
+      />
+      {loading ? (
+        <div className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
+        </div>
+      ) : (
+        <div className="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+          {projects.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => router.push(`/builder?projectId=${p.id}`)}
+              className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 text-left hover-raise"
+            >
+              <div className="flex items-center gap-2">
+                <div className="h-7 w-7 rounded-md bg-gradient-to-br from-indigo-500/30 to-fuchsia-500/30 border border-white/10 grid place-items-center">
+                  <Share2 className="h-3.5 w-3.5 text-muted-foreground" />
+                </div>
+                <span className="text-sm font-medium truncate flex-1">{p.name}</span>
+                <Badge variant="outline" className="text-[10px] uppercase">
+                  {p.permission}
+                </Badge>
+              </div>
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                from {p.ownerName} · {p.sharedVia === "team" ? "via team" : "direct share"}
+              </p>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RecentSaves() {
+  const { savedProjects, loadProject } = useStackStore();
+  const router = useRouter();
+
+  const recent = [...savedProjects]
+    .sort((a, b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime())
+    .slice(0, 5);
+
+  if (recent.length === 0) return null;
+
+  return (
+    <section>
+      <SectionHeader title="Recent saves" subtitle="Last 5 projects you worked on" />
+      <Card className="mt-4 divide-y divide-white/[0.04]">
+        {recent.map((p) => {
+          const stackLine = [p.config.language, p.config.framework, p.config.database]
+            .filter(Boolean)
+            .join(" · ");
+          return (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => {
+                loadProject(p.id);
+                router.push("/builder");
+              }}
+              className="flex w-full items-center gap-3 p-3.5 text-left hover:bg-white/[0.02] group"
+            >
+              <div className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-white/10 bg-white/[0.03]">
+                <History className="h-3.5 w-3.5 text-muted-foreground" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium truncate">{p.name}</div>
+                <div className="text-[11px] text-muted-foreground font-mono truncate">{stackLine}</div>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                {p.entities.length > 0 && (
+                  <Badge variant="outline" className="text-[10px]">
+                    {p.entities.length} model{p.entities.length !== 1 ? "s" : ""}
+                  </Badge>
+                )}
+                <span className="text-[11px] text-muted-foreground">{relativeTime(p.savedAt)}</span>
+                <ArrowRight className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+              </div>
+            </button>
+          );
+        })}
       </Card>
     </section>
   );

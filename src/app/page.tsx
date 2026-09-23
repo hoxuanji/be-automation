@@ -1,12 +1,12 @@
 "use client";
 
+import * as React from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import {
   ArrowRight,
-  Boxes,
   BrainCircuit,
-  Github,
+  Globe,
   Sparkles,
   Terminal as TerminalIcon,
 } from "lucide-react";
@@ -14,13 +14,30 @@ import { Logo } from "@/components/shared/logo";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { HeroInfraPreview } from "@/components/landing/hero-infra-preview";
-import { LandingIntentInput } from "@/components/landing/landing-intent-input";
 import { FeaturesGrid } from "@/components/landing/features-grid";
 import { StackGenerationDemo } from "@/components/landing/stack-generation-demo";
 import { LogoWall } from "@/components/landing/logo-wall";
 import { CtaSection } from "@/components/landing/cta-section";
 
+const HERO_LANGUAGES = [
+  { id: "go", label: "Go", color: "#22d3ee" },
+  { id: "typescript", label: "TypeScript", color: "#60a5fa" },
+  { id: "python", label: "Python", color: "#facc15" },
+  { id: "rust", label: "Rust", color: "#fb923c" },
+  { id: "java", label: "Java", color: "#f87171" },
+  { id: "kotlin", label: "Kotlin", color: "#a78bfa" },
+];
+
+function useProjectCount() {
+  const [count, setCount] = React.useState<number | null>(null);
+  React.useEffect(() => {
+    fetch("/api/stats").then((r) => r.json()).then((d: { projectCount?: number }) => setCount(d.projectCount ?? null)).catch(() => {});
+  }, []);
+  return count;
+}
+
 export default function LandingPage() {
+  const projectCount = useProjectCount();
   return (
     <div className="relative isolate overflow-hidden">
       {/* background */}
@@ -41,7 +58,7 @@ export default function LandingPage() {
           >
             <Badge variant="brand" className="mx-auto inline-flex">
               <Sparkles className="h-3 w-3" />
-              Your AI platform engineer
+              Go · TypeScript · Python · Rust · Java · Kotlin
             </Badge>
           </motion.div>
 
@@ -51,9 +68,10 @@ export default function LandingPage() {
             transition={{ duration: 0.6, delay: 0.05 }}
             className="mt-6 text-5xl md:text-7xl font-semibold tracking-tight text-gradient"
           >
-            Describe what you&apos;re building.
+            One generator.
             <br />
-            <span className="text-gradient-brand">Ship the system.</span>
+            Every backend{" "}
+            <span className="text-gradient-brand">language.</span>
           </motion.h1>
 
           <motion.p
@@ -62,35 +80,48 @@ export default function LandingPage() {
             transition={{ duration: 0.6, delay: 0.12 }}
             className="mt-6 text-base md:text-lg text-muted-foreground max-w-2xl mx-auto"
           >
-            Helios designs the architecture, picks the stack, predicts cost
-            and latency, and generates a deployable repo. One sentence in,
-            production system out.
+            Configure your stack visually — pick your language, framework, database, queues,
+            auth, and deployment target. Download a real, buildable, production-ready
+            repository in seconds. No lock-in, no boilerplate.
           </motion.p>
 
+          {/* Language pill strip */}
           <motion.div
-            initial={{ opacity: 0, y: 14 }}
+            initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 0.2 }}
+            transition={{ duration: 0.6, delay: 0.17 }}
+            className="mt-6 flex flex-wrap items-center justify-center gap-2"
           >
-            <LandingIntentInput />
+            {HERO_LANGUAGES.map((lang) => (
+              <span
+                key={lang.id}
+                className="flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.03] px-3 py-1 text-xs text-foreground/80"
+              >
+                <span
+                  className="h-1.5 w-1.5 rounded-full shrink-0"
+                  style={{ backgroundColor: lang.color }}
+                />
+                {lang.label}
+              </span>
+            ))}
           </motion.div>
 
           <motion.div
             initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 0.28 }}
+            transition={{ duration: 0.6, delay: 0.22 }}
             className="mt-8 flex flex-wrap items-center justify-center gap-3"
           >
-            <Button asChild variant="ghost" size="sm">
+            <Button asChild variant="glow" size="xl">
               <Link href="/builder">
-                Or configure manually
-                <ArrowRight className="h-3.5 w-3.5" />
+                Start building
+                <ArrowRight className="h-4 w-4" />
               </Link>
             </Button>
-            <Button asChild variant="ghost" size="sm">
-              <Link href="/dashboard">
-                <TerminalIcon className="h-3.5 w-3.5" />
-                See dashboard
+            <Button asChild variant="secondary" size="xl">
+              <Link href="/gallery">
+                <Globe className="h-4 w-4" />
+                Browse gallery
               </Link>
             </Button>
           </motion.div>
@@ -98,16 +129,16 @@ export default function LandingPage() {
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            transition={{ duration: 0.8, delay: 0.36 }}
-            className="mt-8 flex items-center justify-center gap-6 text-xs text-muted-foreground"
+            transition={{ duration: 0.8, delay: 0.3 }}
+            className="mt-6 flex items-center justify-center gap-6 text-xs text-muted-foreground"
           >
             <span className="flex items-center gap-1.5">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
               99.99% uptime
             </span>
             <span className="flex items-center gap-1.5">
-              <Boxes className="h-3 w-3" />
-              14,209 stacks generated this month
+              <TerminalIcon className="h-3 w-3" />
+              {projectCount !== null ? `${projectCount.toLocaleString()} stacks generated` : "Stacks generated daily"}
             </span>
             <span className="hidden md:flex items-center gap-1.5">
               <BrainCircuit className="h-3 w-3" />
@@ -132,10 +163,89 @@ export default function LandingPage() {
 
       <StackGenerationDemo />
 
+      <PricingSection />
+
       <CtaSection />
 
       <SiteFooter />
     </div>
+  );
+}
+
+// ponytail: no billing exists — tiers are descriptive only, everything is free during beta.
+const PRICING_TIERS = [
+  {
+    name: "Hobby",
+    price: "Free",
+    description: "For solo developers getting started.",
+    features: ["All 6 languages", "Download as zip", "Public gallery access", "Community support"],
+    cta: "Start for free",
+    href: "/login",
+    highlight: false,
+  },
+  {
+    name: "Pro",
+    price: "Free",
+    per: "during beta",
+    description: "Early access for developers who ship regularly.",
+    features: ["Everything in Hobby", "GitHub push integration", "Deploy to Railway / Render / Fly / Vercel", "AI copilot"],
+    cta: "Join early access",
+    href: "/login",
+    highlight: true,
+  },
+  {
+    name: "Team",
+    price: "Free",
+    per: "during beta",
+    description: "Early access for teams building together.",
+    features: ["Everything in Pro", "Shared team workspaces", "Invite teammates", "SSO / SAML (coming soon)"],
+    cta: "Contact us",
+    href: "mailto:hello@helios.app",
+    highlight: false,
+  },
+];
+
+function PricingSection() {
+  return (
+    <section id="pricing" className="container py-24">
+      <div className="mx-auto max-w-2xl text-center mb-12">
+        <h2 className="text-3xl md:text-4xl font-semibold tracking-tight">Pricing</h2>
+        <p className="mt-3 text-muted-foreground">Every tier is free during the beta. Paid plans will be announced before billing starts.</p>
+      </div>
+      <div className="grid gap-6 md:grid-cols-3 max-w-5xl mx-auto">
+        {PRICING_TIERS.map((tier) => (
+          <div
+            key={tier.name}
+            className={`relative rounded-2xl border p-6 flex flex-col gap-5 ${tier.highlight ? "border-brand-500/50 bg-brand-500/[0.04]" : "border-white/[0.06] bg-white/[0.02]"}`}
+          >
+            {tier.highlight && (
+              <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full border border-brand-500/40 bg-brand-500/20 px-3 py-0.5 text-[11px] font-medium text-brand-300">
+                Early access
+              </span>
+            )}
+            <div>
+              <p className="text-sm font-medium text-muted-foreground">{tier.name}</p>
+              <div className="flex items-baseline gap-1 mt-1">
+                <span className="text-3xl font-bold">{tier.price}</span>
+                {tier.per && <span className="text-sm text-muted-foreground">{tier.per}</span>}
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">{tier.description}</p>
+            </div>
+            <ul className="space-y-2 flex-1">
+              {tier.features.map((f) => (
+                <li key={f} className="flex items-start gap-2 text-xs text-foreground/80">
+                  <span className="mt-0.5 h-3.5 w-3.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 text-emerald-400 flex items-center justify-center text-[9px] shrink-0">✓</span>
+                  {f}
+                </li>
+              ))}
+            </ul>
+            <Button asChild variant={tier.highlight ? "glow" : "secondary"} size="sm">
+              <Link href={tier.href}>{tier.cta}</Link>
+            </Button>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -148,39 +258,17 @@ function SiteHeader() {
           <nav className="hidden md:flex items-center gap-5 text-xs text-muted-foreground">
             <a href="#features" className="hover:text-foreground transition-colors">Features</a>
             <a href="#demo" className="hover:text-foreground transition-colors">Demo</a>
-            <Link href="/dashboard" className="hover:text-foreground transition-colors">Templates</Link>
-            <a
-              href="https://docs.anthropic.com/en/docs/claude-code/overview"
-              target="_blank"
-              rel="noreferrer"
-              className="hover:text-foreground transition-colors"
-            >
-              Docs
-            </a>
-            <a href="#cta" className="hover:text-foreground transition-colors">Pricing</a>
+            <Link href="/gallery" className="hover:text-foreground transition-colors">Gallery</Link>
+            <Link href="/templates" className="hover:text-foreground transition-colors">Templates</Link>
+            <a href="#pricing" className="hover:text-foreground transition-colors">Pricing</a>
           </nav>
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            asChild
-            variant="ghost"
-            size="sm"
-            className="hidden md:inline-flex"
-          >
-            <a
-              href="https://github.com/anthropics/claude-code"
-              target="_blank"
-              rel="noreferrer"
-            >
-              <Github className="h-3.5 w-3.5" />
-              Star
-            </a>
-          </Button>
           <Button asChild variant="secondary" size="sm">
-            <Link href="/dashboard">Sign in</Link>
+            <Link href="/login">Sign in</Link>
           </Button>
           <Button asChild variant="glow" size="sm">
-            <Link href="/builder">
+            <Link href="/login">
               Get started
               <ArrowRight className="h-3.5 w-3.5" />
             </Link>
@@ -200,11 +288,11 @@ function SiteFooter() {
           <span>© 2026 Helios Labs, Inc.</span>
         </div>
         <div className="flex flex-wrap items-center gap-5">
-          <Link href="/dashboard" className="hover:text-foreground">Changelog</Link>
-          <Link href="/dashboard" className="hover:text-foreground">Status</Link>
-          <Link href="/builder" className="hover:text-foreground">Security</Link>
-          <a href="#cta" className="hover:text-foreground">Terms</a>
-          <a href="#cta" className="hover:text-foreground">Privacy</a>
+          <Link href="/changelog" className="hover:text-foreground">Changelog</Link>
+          <Link href="/api/health" className="hover:text-foreground" target="_blank">Status</Link>
+          <a href="mailto:security@helios.app" className="hover:text-foreground">Security</a>
+          <Link href="/terms" className="hover:text-foreground">Terms</Link>
+          <Link href="/privacy" className="hover:text-foreground">Privacy</Link>
         </div>
       </div>
     </footer>

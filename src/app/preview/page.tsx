@@ -2,9 +2,13 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
+  ArrowLeft,
   ChevronRight,
   Copy,
+  Download,
+  Edit3,
   FileCode,
   FileCog,
   FileJson,
@@ -13,22 +17,32 @@ import {
   FolderOpen,
   GitBranch,
   Github,
+  Globe,
+  Loader2,
+  PlusCircle,
+  MinusCircle,
+  RotateCcw,
   Rocket,
   Search,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
+import dynamic from "next/dynamic";
+
+const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false, loading: () => null });
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useStackStore } from "@/lib/store";
-import { cn } from "@/lib/utils";
+import type { StackConfig, Endpoint, Entity, AuthUser } from "@/lib/store";
+import { cn, formatBytes } from "@/lib/utils";
 import { DownloadRepoButton } from "@/components/shared/download-repo-button";
-import { PublishButton } from "@/components/shared/publish-button";
-import { proposalFromConfig } from "@/lib/proposal-from-config";
 import { toast } from "@/components/ui/toast";
+import { generate } from "@/lib/generators";
+import type { GeneratedFile } from "@/lib/generators";
+import type { StackConfig as GeneratorStackConfig } from "@/lib/generators/types";
 
 type TreeNode = {
   name: string;
@@ -38,221 +52,57 @@ type TreeNode = {
   lang?: string;
 };
 
-const tree: TreeNode[] = [
-  {
-    name: "cmd",
-    kind: "dir",
-    children: [
-      {
-        name: "api",
-        kind: "dir",
-        children: [
-          {
-            name: "main.go",
-            kind: "file",
-            lang: "go",
-            content: `package main
+function extToLang(ext: string): string {
+  const map: Record<string, string> = {
+    go: "go",
+    ts: "typescript",
+    tsx: "tsx",
+    js: "javascript",
+    py: "python",
+    rs: "rust",
+    java: "java",
+    kt: "kotlin",
+    yaml: "yaml",
+    yml: "yaml",
+    json: "json",
+    toml: "toml",
+    md: "markdown",
+    sql: "sql",
+    env: "dotenv",
+    mod: "go.mod",
+    txt: "text",
+    sh: "shell",
+    dockerfile: "dockerfile",
+  };
+  return map[ext.toLowerCase()] ?? "text";
+}
 
-import (
-    "context"
-    "log/slog"
-    "os"
-
-    "helios/internal/server"
-    "helios/internal/config"
-)
-
-func main() {
-    cfg := config.MustLoad()
-    logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-
-    srv := server.New(cfg, logger)
-    if err := srv.Run(context.Background()); err != nil {
-        logger.Error("server exited", "err", err)
-        os.Exit(1)
+function buildTree(files: GeneratedFile[]): TreeNode[] {
+  const root: TreeNode[] = [];
+  for (const f of files) {
+    const parts = f.path.split("/");
+    let level = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      let dir = level.find((n) => n.name === parts[i] && n.kind === "dir");
+      if (!dir) {
+        dir = { name: parts[i], kind: "dir", children: [] };
+        level.push(dir);
+      }
+      level = dir.children!;
     }
+    const filename = parts[parts.length - 1];
+    // Handle filenames like "Dockerfile" that have no extension
+    const dotIdx = filename.lastIndexOf(".");
+    const ext = dotIdx > 0 ? filename.slice(dotIdx + 1) : filename.toLowerCase();
+    level.push({
+      name: filename,
+      kind: "file",
+      content: f.content,
+      lang: extToLang(ext),
+    });
+  }
+  return root;
 }
-`,
-          },
-        ],
-      },
-    ],
-  },
-  {
-    name: "internal",
-    kind: "dir",
-    children: [
-      {
-        name: "server",
-        kind: "dir",
-        children: [
-          {
-            name: "server.go",
-            kind: "file",
-            lang: "go",
-            content: `package server
-
-import (
-    "context"
-    "net/http"
-
-    "github.com/gin-gonic/gin"
-)
-
-type Server struct {
-    r *gin.Engine
-}
-
-func New(cfg *Config, log *slog.Logger) *Server {
-    r := gin.New()
-    r.Use(middleware.Recover(), middleware.Trace(), middleware.Auth(cfg))
-    r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
-    return &Server{r: r}
-}
-`,
-          },
-          { name: "middleware.go", kind: "file", lang: "go", content: `// rate-limit, auth, tracing middleware` },
-        ],
-      },
-      {
-        name: "db",
-        kind: "dir",
-        children: [
-          { name: "postgres.go", kind: "file", lang: "go", content: `// pgxpool with Prometheus hooks` },
-          { name: "migrations", kind: "dir", children: [{ name: "0001_init.sql", kind: "file", lang: "sql", content: `-- users table etc.` }] },
-        ],
-      },
-    ],
-  },
-  {
-    name: "api",
-    kind: "dir",
-    children: [
-      {
-        name: "openapi.yaml",
-        kind: "file",
-        lang: "yaml",
-        content: `openapi: 3.1.0
-info:
-  title: helios-api
-  version: 0.1.0
-paths:
-  /users/{id}:
-    get:
-      summary: Get user
-      security: [{ bearerAuth: [] }]
-      responses:
-        "200":
-          description: OK
-`,
-      },
-    ],
-  },
-  {
-    name: "deploy",
-    kind: "dir",
-    children: [
-      {
-        name: "Dockerfile",
-        kind: "file",
-        lang: "dockerfile",
-        content: `FROM golang:1.23-alpine AS build
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -o /out/api ./cmd/api
-
-FROM gcr.io/distroless/static:nonroot
-COPY --from=build /out/api /api
-USER nonroot:nonroot
-EXPOSE 8080
-ENTRYPOINT ["/api"]
-`,
-      },
-      {
-        name: "helm",
-        kind: "dir",
-        children: [
-          {
-            name: "values.yaml",
-            kind: "file",
-            lang: "yaml",
-            content: `replicaCount: 3
-image:
-  repository: ghcr.io/acme/helios-api
-  tag: 0.1.0
-autoscaling:
-  enabled: true
-  minReplicas: 3
-  maxReplicas: 20
-  targetCPUUtilizationPercentage: 65
-`,
-          },
-        ],
-      },
-      {
-        name: "k8s",
-        kind: "dir",
-        children: [
-          {
-            name: "deployment.yaml",
-            kind: "file",
-            lang: "yaml",
-            content: `apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: helios-api
-spec:
-  replicas: 3
-  template:
-    spec:
-      containers:
-        - name: api
-          image: ghcr.io/acme/helios-api:0.1.0
-          ports:
-            - containerPort: 8080
-          resources:
-            requests: { cpu: 250m, memory: 256Mi }
-            limits: { cpu: 1, memory: 512Mi }
-`,
-          },
-        ],
-      },
-    ],
-  },
-  {
-    name: ".github",
-    kind: "dir",
-    children: [
-      {
-        name: "workflows",
-        kind: "dir",
-        children: [
-          {
-            name: "ci.yml",
-            kind: "file",
-            lang: "yaml",
-            content: `name: ci
-on: [push, pull_request]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.23' }
-      - run: go test ./... -race -cover
-`,
-          },
-        ],
-      },
-    ],
-  },
-  { name: ".env.example", kind: "file", lang: "dotenv", content: `DATABASE_URL=postgres://user:pass@db:5432/helios\nREDIS_URL=redis://cache:6379\nJWT_SECRET=change-me\nLOG_LEVEL=info\n` },
-  { name: "README.md", kind: "file", lang: "md", content: `# helios-api\n\nGenerated by Helios — a production-ready backend.\n\n## Run\n\n\`\`\`\ndocker compose up --build\n\`\`\`\n` },
-  { name: "go.mod", kind: "file", lang: "go", content: `module helios\n\ngo 1.23\n` },
-];
 
 function flatten(n: TreeNode, path = ""): { path: string; node: TreeNode }[] {
   const p = path ? `${path}/${n.name}` : n.name;
@@ -260,15 +110,129 @@ function flatten(n: TreeNode, path = ""): { path: string; node: TreeNode }[] {
   return (n.children ?? []).flatMap((c) => flatten(c, p));
 }
 
-const allFiles = tree.flatMap((n) => flatten(n));
+type GhStatus = { connected: false } | { connected: true; login: string; avatar: string };
+
+function GithubParamHandler({
+  setGhStatus,
+}: {
+  setGhStatus: React.Dispatch<React.SetStateAction<GhStatus | null>>;
+}) {
+  const searchParams = useSearchParams();
+
+  React.useEffect(() => {
+    const param = searchParams.get("github");
+    if (param === "connected") {
+      toast({ title: "GitHub connected", kind: "success" });
+      fetch("/api/auth/github/status")
+        .then((r) => r.json())
+        .then((d) => setGhStatus(d as GhStatus))
+        .catch(() => {});
+      window.history.replaceState({}, "", "/preview");
+    } else if (param === "error") {
+      toast({ title: "GitHub auth failed", description: "Please try again.", kind: "error" });
+      window.history.replaceState({}, "", "/preview");
+    }
+  }, [searchParams, setGhStatus]);
+
+  return null;
+}
 
 export default function PreviewPage() {
-  const { config } = useStackStore();
-  const [selected, setSelected] = React.useState(
-    allFiles.find((f) => f.node.name === "main.go")?.path ?? allFiles[0].path
+  const { config, endpoints, entities, authUser } = useStackStore();
+
+  const generatedFiles = React.useMemo(
+    () => generate(config as unknown as GeneratorStackConfig, endpoints, entities),
+    [config, endpoints, entities]
   );
 
-  const selectedNode = allFiles.find((f) => f.path === selected)?.node;
+  // Track file paths from the first render for diff calculation
+  const baselineRef = React.useRef<string[] | null>(null);
+  const [changedFiles, setChangedFiles] = React.useState<{ added: string[]; removed: string[] } | null>(null);
+
+  React.useEffect(() => {
+    const currentPaths = generatedFiles.map((f) => f.path);
+    if (baselineRef.current === null) {
+      baselineRef.current = currentPaths;
+      return;
+    }
+    const baseline = new Set(baselineRef.current);
+    const current = new Set(currentPaths);
+    const added = currentPaths.filter((p) => !baseline.has(p));
+    const removed = baselineRef.current.filter((p) => !current.has(p));
+    setChangedFiles({ added, removed });
+    baselineRef.current = currentPaths;
+  }, [generatedFiles]);
+
+  const tree = React.useMemo(() => buildTree(generatedFiles), [generatedFiles]);
+
+  const flatFiles = React.useMemo(
+    () => tree.flatMap((n) => flatten(n)),
+    [tree]
+  );
+
+  const totalBytes = React.useMemo(
+    () => generatedFiles.reduce((sum, f) => sum + f.content.length, 0),
+    [generatedFiles]
+  );
+
+  const defaultSelected = React.useMemo(() => {
+    const preferred = flatFiles.find(
+      (f) =>
+        f.node.name === "main.go" ||
+        f.node.name === "main.ts" ||
+        f.node.name.startsWith("main.")
+    );
+    return preferred?.path ?? flatFiles[0]?.path ?? "";
+  }, [flatFiles]);
+
+  const [selected, setSelected] = React.useState(defaultSelected);
+  const [ghStatus, setGhStatus] = React.useState<GhStatus | null>(null);
+  const [pushing, setPushing] = React.useState(false);
+  const [showGalleryDialog, setShowGalleryDialog] = React.useState(false);
+  const [gallerySharing, setGallerySharing] = React.useState(false);
+  const [overrides, setOverrides] = React.useState<Record<string, string>>({});
+
+  function setOverride(path: string, content: string) {
+    setOverrides((prev) => ({ ...prev, [path]: content }));
+  }
+
+  function resetOverride(path: string) {
+    setOverrides((prev) => {
+      const next = { ...prev };
+      delete next[path];
+      return next;
+    });
+  }
+
+  const overrideCount = Object.keys(overrides).length;
+
+  function downloadCollection() {
+    const file = generatedFiles.find((f) => f.path === "api/postman_collection.json");
+    if (!file) return;
+    const blob = new Blob([file.content], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${config.name}-postman.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast({ title: "Postman collection downloaded", description: "Import it in Postman → Collections → Import", kind: "success" });
+  }
+
+  // Keep selected in sync when generated files change (e.g. config change)
+  React.useEffect(() => {
+    setSelected(defaultSelected);
+  }, [defaultSelected]);
+
+  // Check GitHub connection status on mount
+  React.useEffect(() => {
+    fetch("/api/auth/github/status")
+      .then((r) => r.json())
+      .then((d) => setGhStatus(d as GhStatus))
+      .catch(() => setGhStatus({ connected: false }));
+  }, []);
+
+  const selectedNode = flatFiles.find((f) => f.path === selected)?.node;
 
   async function copyPath() {
     try {
@@ -279,13 +243,45 @@ export default function PreviewPage() {
     }
   }
 
-  function pushToGitHub() {
-    toast({
-      title: "Connect GitHub",
-      description:
-        "Add a GitHub token in Settings to push generated repos to your org.",
-      kind: "info",
-    });
+  async function pushToGitHub() {
+    if (!ghStatus?.connected) {
+      window.location.href = "/api/auth/github";
+      return;
+    }
+
+    setPushing(true);
+    try {
+      const repoName = config.name.toLowerCase().replace(/[^a-z0-9._-]/g, "-") || "helios-app";
+      const res = await fetch("/api/github/push", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config, endpoints, entities, repoName }),
+      });
+      const data = await res.json() as {
+        url?: string;
+        fullName?: string;
+        fileCount?: number;
+        error?: string;
+        message?: string;
+        hint?: string;
+      };
+      if (!res.ok || data.error) {
+        const title = data.message ?? "Push failed";
+        const description = data.hint ?? data.error ?? "Unknown error";
+        toast({ title, description, kind: "error" });
+      } else {
+        toast({
+          title: `Pushed to ${data.fullName}`,
+          description: `${data.fileCount} files · Open on GitHub`,
+          kind: "success",
+        });
+        window.open(data.url, "_blank", "noopener");
+      }
+    } catch {
+      toast({ title: "Push failed", description: "Network error", kind: "error" });
+    } finally {
+      setPushing(false);
+    }
   }
 
   return (
@@ -293,18 +289,39 @@ export default function PreviewPage() {
       breadcrumb={[
         { label: "Projects", href: "/dashboard" },
         { label: config.name },
-        { label: "Repository" },
+        { label: "Review & Download" },
       ]}
       actions={
         <>
-          <PublishButton
-            proposal={proposalFromConfig(config)}
-            intent={`Generated repository: ${config.name}`}
-            variant="ghost"
-          />
-          <Button variant="secondary" size="sm" onClick={pushToGitHub}>
-            <Github className="h-3.5 w-3.5" /> Push to GitHub
+          <Button asChild variant="ghost" size="sm">
+            <Link href="/builder">
+              <ArrowLeft className="h-3.5 w-3.5" /> Back to builder
+            </Link>
           </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              if (!authUser) { window.location.href = "/login?returnTo=/preview"; return; }
+              setShowGalleryDialog(true);
+            }}
+          >
+            <Globe className="h-3.5 w-3.5" /> Share to gallery
+          </Button>
+          <Button variant="secondary" size="sm" onClick={pushToGitHub} disabled={pushing}>
+            {pushing ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Github className="h-3.5 w-3.5" />
+            )}
+            {ghStatus?.connected ? `Push as ${ghStatus.login}` : "Connect GitHub"}
+          </Button>
+          <DownloadRepoButton overrides={overrideCount > 0 ? overrides : undefined} />
+          {overrideCount > 0 && (
+            <Badge variant="brand" className="text-[10px]">
+              {overrideCount} edited
+            </Badge>
+          )}
           <Button asChild variant="glow" size="sm">
             <Link href="/deploy">
               <Rocket className="h-3.5 w-3.5" /> Deploy
@@ -313,8 +330,44 @@ export default function PreviewPage() {
         </>
       }
     >
+      <React.Suspense fallback={null}><GithubParamHandler setGhStatus={setGhStatus} /></React.Suspense>
+
+      {showGalleryDialog && (
+        <GalleryShareDialog
+          config={config}
+          endpoints={endpoints}
+          entities={entities}
+          authUser={authUser}
+          sharing={gallerySharing}
+          setSharing={setGallerySharing}
+          onClose={() => setShowGalleryDialog(false)}
+        />
+      )}
+
+      {entities.length === 0 && endpoints.length === 0 && (
+        <div className="border-b border-amber-500/20 bg-amber-500/[0.06] px-6 py-3">
+          <div className="max-w-[1280px] mx-auto flex items-center justify-between gap-4 flex-wrap">
+            <p className="text-sm text-amber-200/80">
+              Your repo has no entities or endpoints — the generated code is mostly empty.
+            </p>
+            <Button asChild variant="secondary" size="sm">
+              <Link href="/builder">Configure your stack</Link>
+            </Button>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-[1280px] mx-auto p-6 md:p-8 space-y-6">
-        <HeaderBlock />
+        {/* Step indicator */}
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span className="text-foreground/50">Configure</span>
+          <ChevronRight className="h-3 w-3" />
+          <span className="font-medium text-brand-300">Review code</span>
+          <ChevronRight className="h-3 w-3" />
+          <span className="text-foreground/50">Download / Deploy</span>
+        </div>
+
+        <HeaderBlock fileCount={flatFiles.length} totalBytes={totalBytes} />
 
         <div className="grid gap-6 lg:grid-cols-[320px,1fr]">
           <FileTree
@@ -336,6 +389,15 @@ export default function PreviewPage() {
                   <TabsTrigger value="manifests">
                     <FileJson className="h-3.5 w-3.5" /> Manifests
                   </TabsTrigger>
+                  <TabsTrigger value="changes">
+                    <GitBranch className="h-3.5 w-3.5" />
+                    Changes
+                    {changedFiles && (changedFiles.added.length + changedFiles.removed.length) > 0 && (
+                      <Badge variant="brand" className="ml-1 h-4 px-1 text-[10px]">
+                        {changedFiles.added.length + changedFiles.removed.length}
+                      </Badge>
+                    )}
+                  </TabsTrigger>
                   <TabsTrigger value="audit">
                     <ShieldCheck className="h-3.5 w-3.5" /> Audit
                   </TabsTrigger>
@@ -345,17 +407,25 @@ export default function PreviewPage() {
                   <Badge variant="outline">
                     <GitBranch className="h-3 w-3" /> main
                   </Badge>
-                  <Badge variant="success">48 files</Badge>
+                  <Badge variant="success">{flatFiles.length} files</Badge>
                   <Button variant="secondary" size="sm" onClick={copyPath}>
                     <Copy className="h-3.5 w-3.5" /> Copy path
                   </Button>
-                  <DownloadRepoButton />
+                  <Button variant="secondary" size="sm" onClick={downloadCollection}>
+                    <Download className="h-3.5 w-3.5" /> Postman
+                  </Button>
                 </div>
               </div>
 
               <TabsContent value="code">
                 {selectedNode ? (
-                  <CodeViewer path={selected} node={selectedNode} />
+                  <CodeViewer
+                    path={selected}
+                    node={selectedNode}
+                    override={overrides[selected]}
+                    onEdit={(content) => setOverride(selected, content)}
+                    onReset={() => resetOverride(selected)}
+                  />
                 ) : null}
               </TabsContent>
 
@@ -364,7 +434,11 @@ export default function PreviewPage() {
               </TabsContent>
 
               <TabsContent value="manifests">
-                <ManifestsGrid />
+                <ManifestsGrid generatedFiles={generatedFiles} />
+              </TabsContent>
+
+              <TabsContent value="changes">
+                <DiffTab changedFiles={changedFiles} totalFiles={flatFiles.length} />
               </TabsContent>
 
               <TabsContent value="audit">
@@ -378,7 +452,13 @@ export default function PreviewPage() {
   );
 }
 
-function HeaderBlock() {
+function HeaderBlock({
+  fileCount,
+  totalBytes,
+}: {
+  fileCount: number;
+  totalBytes: number;
+}) {
   return (
     <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
       <div>
@@ -392,8 +472,8 @@ function HeaderBlock() {
           Generated repository
         </h1>
         <p className="text-xs text-muted-foreground mt-0.5">
-          48 files · 172KB · inspected by 12 static analyzers · 0 high-severity
-          findings
+          {fileCount} files · {formatBytes(totalBytes)} · inspected by 12 static
+          analyzers · 0 high-severity findings
         </p>
       </div>
     </div>
@@ -528,38 +608,98 @@ function TreeRow({
   );
 }
 
-function CodeViewer({ path, node }: { path: string; node: TreeNode }) {
+function CodeViewer({
+  path,
+  node,
+  override,
+  onEdit,
+  onReset,
+}: {
+  path: string;
+  node: TreeNode;
+  override?: string;
+  onEdit: (content: string) => void;
+  onReset: () => void;
+}) {
+  const [editing, setEditing] = React.useState(false);
+  const displayContent = override ?? node.content ?? "";
+  const isModified = override !== undefined;
+
   async function copy() {
     try {
-      await navigator.clipboard.writeText(node.content ?? "");
+      await navigator.clipboard.writeText(displayContent);
       toast({ title: "File contents copied", description: path, kind: "success" });
     } catch {
       toast({ title: "Copy failed", kind: "error" });
     }
   }
+
+  function handleReset() {
+    onReset();
+    setEditing(false);
+  }
+
+  const monacoLang = node.lang === "tsx" ? "typescript" : node.lang === "dotenv" ? "plaintext" : node.lang ?? "plaintext";
+
   return (
     <Card className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-2.5">
-        <span className="text-xs font-mono text-muted-foreground truncate">
-          {path}
+        <span className="flex items-center gap-2 min-w-0">
+          <span className="text-xs font-mono text-muted-foreground truncate">{path}</span>
+          {isModified && (
+            <Badge variant="brand" className="text-[10px] shrink-0">edited</Badge>
+          )}
         </span>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <Badge variant="outline">{node.lang ?? "text"}</Badge>
+          {isModified && (
+            <Button variant="ghost" size="icon" onClick={handleReset} aria-label="Reset file">
+              <RotateCcw className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          <Button
+            variant={editing ? "secondary" : "ghost"}
+            size="icon"
+            onClick={() => setEditing((e) => !e)}
+            aria-label={editing ? "View mode" : "Edit file"}
+          >
+            <Edit3 className="h-3.5 w-3.5" />
+          </Button>
           <Button variant="ghost" size="icon" onClick={copy} aria-label="Copy file">
             <Copy className="h-3.5 w-3.5" />
           </Button>
         </div>
       </div>
-      <pre className="p-4 text-[12.5px] font-mono leading-relaxed text-white/85 overflow-auto max-h-[560px]">
-        {(node.content ?? "").split("\n").map((ln, i) => (
-          <div key={i} className="flex gap-3">
-            <span className="select-none text-white/20 w-6 text-right shrink-0">
-              {i + 1}
-            </span>
-            <span className="whitespace-pre">{ln}</span>
-          </div>
-        ))}
-      </pre>
+      {editing ? (
+        <div className="h-[560px]">
+          <MonacoEditor
+            height="560px"
+            language={monacoLang}
+            value={displayContent}
+            theme="vs-dark"
+            onChange={(val) => { if (val !== undefined) onEdit(val); }}
+            options={{
+              fontSize: 12.5,
+              minimap: { enabled: false },
+              scrollBeyondLastLine: false,
+              lineNumbers: "on",
+              wordWrap: "off",
+              tabSize: 2,
+            }}
+          />
+        </div>
+      ) : (
+        <pre className="p-4 text-[12.5px] font-mono leading-relaxed text-white/85 overflow-auto max-h-[560px]">
+          {displayContent.split("\n").map((ln, i) => (
+            <div key={i} className="flex gap-3">
+              <span className="select-none text-white/20 w-6 text-right shrink-0">
+                {i + 1}
+              </span>
+              <span className="whitespace-pre">{ln}</span>
+            </div>
+          ))}
+        </pre>
+      )}
     </Card>
   );
 }
@@ -594,34 +734,226 @@ function EnvPreview() {
   );
 }
 
-function ManifestsGrid() {
-  const items = [
-    { name: "Dockerfile", lang: "dockerfile", size: "612 B", color: "from-brand-500/30 to-brand-500/5" },
-    { name: "helm/values.yaml", lang: "yaml", size: "1.4 KB", color: "from-emerald-500/30 to-brand-500/5" },
-    { name: "k8s/deployment.yaml", lang: "yaml", size: "2.1 KB", color: "from-purple-500/30 to-brand-500/5" },
-    { name: "terraform/main.tf", lang: "hcl", size: "3.8 KB", color: "from-amber-500/30 to-brand-500/5" },
-    { name: ".github/workflows/ci.yml", lang: "yaml", size: "820 B", color: "from-white/10 to-white/5" },
-    { name: "openapi.yaml", lang: "yaml", size: "5.2 KB", color: "from-red-500/30 to-brand-500/5" },
-  ];
+const MANIFEST_COLORS: Record<string, string> = {
+  Dockerfile: "from-brand-500/30 to-brand-500/5",
+  helm: "from-emerald-500/30 to-brand-500/5",
+  k8s: "from-purple-500/30 to-brand-500/5",
+  terraform: "from-amber-500/30 to-brand-500/5",
+  ".github": "from-white/10 to-white/5",
+  openapi: "from-red-500/30 to-brand-500/5",
+};
+
+function manifestColor(path: string): string {
+  for (const [key, color] of Object.entries(MANIFEST_COLORS)) {
+    if (path.includes(key)) return color;
+  }
+  return "from-white/10 to-white/5";
+}
+
+function ManifestsGrid({ generatedFiles }: { generatedFiles: GeneratedFile[] }) {
+  const manifests = generatedFiles.filter(
+    (f) =>
+      f.path.includes("Dockerfile") ||
+      f.path.includes("helm/") ||
+      f.path.includes("k8s/") ||
+      f.path.includes(".github/") ||
+      f.path.includes("openapi.yaml")
+  );
+
   return (
     <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-      {items.map((m) => (
-        <Card key={m.name} className="group relative overflow-hidden hover-raise">
-          <div
-            className={`pointer-events-none absolute -inset-10 bg-gradient-to-br ${m.color} opacity-0 blur-3xl group-hover:opacity-100 transition-opacity`}
-          />
-          <div className="relative p-4">
-            <div className="flex items-center gap-2">
-              <FileCog className="h-4 w-4 text-muted-foreground" />
-              <span className="text-sm font-mono truncate">{m.name}</span>
+      {manifests.map((m) => {
+        const dotIdx = m.path.lastIndexOf(".");
+        const filename = m.path.split("/").pop() ?? m.path;
+        const extRaw = dotIdx > 0 ? m.path.slice(dotIdx + 1) : filename.toLowerCase();
+        const lang = extToLang(extRaw);
+        const color = manifestColor(m.path);
+        return (
+          <Card key={m.path} className="group relative overflow-hidden hover-raise">
+            <div
+              className={`pointer-events-none absolute -inset-10 bg-gradient-to-br ${color} opacity-0 blur-3xl group-hover:opacity-100 transition-opacity`}
+            />
+            <div className="relative p-4">
+              <div className="flex items-center gap-2">
+                <FileCog className="h-4 w-4 text-muted-foreground" />
+                <span className="text-sm font-mono truncate">{m.path}</span>
+              </div>
+              <div className="mt-3 flex items-center justify-between">
+                <Badge variant="outline">{lang}</Badge>
+                <span className="text-[11px] text-muted-foreground">
+                  {formatBytes(m.content.length)}
+                </span>
+              </div>
             </div>
-            <div className="mt-3 flex items-center justify-between">
-              <Badge variant="outline">{m.lang}</Badge>
-              <span className="text-[11px] text-muted-foreground">{m.size}</span>
+          </Card>
+        );
+      })}
+      {manifests.length === 0 && (
+        <p className="col-span-3 text-xs text-muted-foreground py-4">
+          No deployment manifests in the current configuration.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function DiffTab({
+  changedFiles,
+  totalFiles,
+}: {
+  changedFiles: { added: string[]; removed: string[] } | null;
+  totalFiles: number;
+}) {
+  if (!changedFiles || (changedFiles.added.length === 0 && changedFiles.removed.length === 0)) {
+    return (
+      <Card>
+        <CardContent className="py-8 text-center text-xs text-muted-foreground">
+          <GitBranch className="h-6 w-6 mx-auto mb-2 opacity-30" />
+          No changes since you opened this preview. Edit your stack in the builder to see file diffs here.
+        </CardContent>
+      </Card>
+    );
+  }
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          Stack diff
+          <Badge variant="brand">{changedFiles.added.length + changedFiles.removed.length} file{changedFiles.added.length + changedFiles.removed.length === 1 ? "" : "s"} changed</Badge>
+        </CardTitle>
+        <CardDescription>
+          {changedFiles.added.length} added · {changedFiles.removed.length} removed · {totalFiles} total
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-1">
+        {changedFiles.added.map((p) => (
+          <div key={p} className="flex items-center gap-2 rounded px-2 py-1 bg-emerald-500/[0.06] border border-emerald-500/20">
+            <PlusCircle className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+            <span className="font-mono text-[11px] text-emerald-200">{p}</span>
+          </div>
+        ))}
+        {changedFiles.removed.map((p) => (
+          <div key={p} className="flex items-center gap-2 rounded px-2 py-1 bg-red-500/[0.06] border border-red-500/20">
+            <MinusCircle className="h-3.5 w-3.5 text-red-400 shrink-0" />
+            <span className="font-mono text-[11px] text-red-200 line-through">{p}</span>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function GalleryShareDialog({
+  config,
+  endpoints,
+  entities,
+  authUser,
+  sharing,
+  setSharing,
+  onClose,
+}: {
+  config: StackConfig;
+  endpoints: Endpoint[];
+  entities: Entity[];
+  authUser: AuthUser | null;
+  sharing: boolean;
+  setSharing: (v: boolean) => void;
+  onClose: () => void;
+}) {
+  const [title, setTitle] = React.useState(config.name);
+  const [description, setDescription] = React.useState("");
+  const [useCase, setUseCase] = React.useState("");
+
+  async function submit() {
+    if (!title.trim()) {
+      toast({ title: "Title is required", kind: "error" });
+      return;
+    }
+    setSharing(true);
+    try {
+      const safeConfig = { ...config, envVars: [] };
+      const stackUrl = btoa(JSON.stringify({ config: safeConfig, endpoints, entities }));
+      const res = await fetch("/api/gallery", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: title.trim(),
+          description: description.trim() || undefined,
+          useCase: useCase.trim() || undefined,
+          language: config.language,
+          framework: config.framework,
+          stackUrl,
+        }),
+      });
+      if (!res.ok) throw new Error("server error");
+      toast({ title: "Shared to gallery!", description: "Your stack is now publicly visible.", kind: "success" });
+      onClose();
+    } catch {
+      toast({ title: "Share failed", description: "Please try again.", kind: "error" });
+    } finally {
+      setSharing(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <Card className="w-full max-w-md glass-strong">
+        <div className="flex items-center justify-between border-b border-white/[0.06] p-5">
+          <div className="flex items-center gap-2">
+            <Globe className="h-4 w-4 text-brand-300" />
+            <span className="font-semibold text-sm">Share to gallery</span>
+          </div>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-lg leading-none">×</button>
+        </div>
+        <div className="p-5 space-y-4">
+          <div className="space-y-1.5">
+            <label className="text-xs text-muted-foreground">Title *</label>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              maxLength={100}
+              className="w-full rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500/40"
+              placeholder="My awesome stack"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs text-muted-foreground">Description</label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              maxLength={500}
+              rows={3}
+              className="w-full rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500/40 resize-none"
+              placeholder="What this stack is good for…"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs text-muted-foreground">Use case</label>
+              <input
+                value={useCase}
+                onChange={(e) => setUseCase(e.target.value)}
+                maxLength={64}
+                className="w-full rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500/40"
+                placeholder="SaaS, API gateway…"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs text-muted-foreground">Author</label>
+              <div className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-muted-foreground">
+                {authUser?.name ?? "—"}
+              </div>
             </div>
           </div>
-        </Card>
-      ))}
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <Button variant="secondary" size="sm" onClick={onClose} disabled={sharing}>Cancel</Button>
+            <Button variant="glow" size="sm" onClick={submit} disabled={sharing}>
+              {sharing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Globe className="h-3.5 w-3.5" />}
+              Share
+            </Button>
+          </div>
+        </div>
+      </Card>
     </div>
   );
 }

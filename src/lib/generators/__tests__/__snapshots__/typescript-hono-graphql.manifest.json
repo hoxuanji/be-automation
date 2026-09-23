@@ -1,0 +1,177 @@
+[
+  {
+    "path": ".editorconfig",
+    "lines": 10,
+    "size": 147
+  },
+  {
+    "path": ".env.example",
+    "lines": 43,
+    "size": 2284
+  },
+  {
+    "path": ".github/workflows/ci.yml",
+    "lines": 69,
+    "size": 1835
+  },
+  {
+    "path": ".gitignore",
+    "lines": 31,
+    "size": 288
+  },
+  {
+    "path": "api/openapi.yaml",
+    "lines": 56,
+    "size": 1222
+  },
+  {
+    "path": "api/postman_collection.json",
+    "lines": 166,
+    "size": 4124
+  },
+  {
+    "path": "DEPLOY.md",
+    "lines": 79,
+    "size": 2387
+  },
+  {
+    "path": "deploy/helm/Chart.yaml",
+    "lines": 21,
+    "size": 519
+  },
+  {
+    "path": "deploy/helm/templates/deployment.yaml",
+    "lines": 28,
+    "size": 702
+  },
+  {
+    "path": "deploy/helm/templates/hpa.yaml",
+    "lines": 21,
+    "size": 546
+  },
+  {
+    "path": "deploy/helm/templates/service.yaml",
+    "lines": 12,
+    "size": 220
+  },
+  {
+    "path": "deploy/helm/values.yaml",
+    "lines": 64,
+    "size": 1268
+  },
+  {
+    "path": "deploy/k8s/deployment.yaml",
+    "lines": 63,
+    "size": 2039
+  },
+  {
+    "path": "deploy/k8s/hpa.yaml",
+    "lines": 19,
+    "size": 350
+  },
+  {
+    "path": "deploy/k8s/Makefile",
+    "lines": 37,
+    "size": 1466
+  },
+  {
+    "path": "deploy/k8s/pdb.yaml",
+    "lines": 10,
+    "size": 150
+  },
+  {
+    "path": "deploy/k8s/secrets.example.env",
+    "lines": 22,
+    "size": 490
+  },
+  {
+    "path": "deploy/k8s/service.yaml",
+    "lines": 13,
+    "size": 174
+  },
+  {
+    "path": "docker-compose.yml",
+    "lines": 60,
+    "size": 1439
+  },
+  {
+    "path": "Dockerfile",
+    "lines": 25,
+    "size": 613
+  },
+  {
+    "path": "graphql/schema.graphql",
+    "lines": 83,
+    "size": 1576
+  },
+  {
+    "path": "package.json",
+    "lines": 24,
+    "size": 527
+  },
+  {
+    "path": "prisma/seed.ts",
+    "lines": 27,
+    "size": 700
+  },
+  {
+    "path": "QUICKSTART.md",
+    "lines": 107,
+    "size": 2604
+  },
+  {
+    "path": "README.md",
+    "lines": 65,
+    "size": 2169
+  },
+  {
+    "path": "sdk/test-app_client.py",
+    "lines": 65,
+    "size": 2338
+  },
+  {
+    "path": "sdk/test-app-client.ts",
+    "lines": 76,
+    "size": 2175
+  },
+  {
+    "path": "src/main.ts",
+    "lines": 26,
+    "size": 756
+  },
+  {
+    "path": "src/resolvers.ts",
+    "lines": 26,
+    "size": 805
+  },
+  {
+    "path": "src/resolvers/post.ts",
+    "lines": 46,
+    "size": 1429
+  },
+  {
+    "path": "src/resolvers/user.ts",
+    "lines": 47,
+    "size": 1454
+  },
+  {
+    "path": "src/scalars.ts",
+    "lines": 51,
+    "size": 1544
+  },
+  {
+    "path": "src/schema.ts",
+    "lines": 12,
+    "size": 518
+  },
+  {
+    "path": "tests/api.contract.test.ts",
+    "lines": 61,
+    "size": 1623
+  },
+  {
+    "path": "tsconfig.json",
+    "lines": 16,
+    "size": 321
+  }
+]
