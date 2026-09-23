@@ -293,6 +293,20 @@ describe("Generator invariants", () => {
     assert.ok(!files.some((f) => f.path === "docker-compose.yml"), "should not have docker-compose.yml when docker=false");
   });
 
+  // The Python SDK ships in every repo with endpoints; a syntax error there broke the
+  // python smoke build, and a hyphenated filename makes it unimportable.
+  it("Python client SDK is importable and has no duplicate `self`", () => {
+    const config = { ...BASE_CONFIG, name: "my-app", language: "python" as const, framework: "fastapi", api: "rest" as const };
+    const endpoints = [
+      { id: "1", method: "GET" as const, path: "/health", summary: "Health", auth: false },
+      { id: "2", method: "POST" as const, path: "/users/:id", summary: "Update", auth: true },
+    ];
+    const sdk = generate(config, endpoints).find((f) => f.path.startsWith("sdk/") && f.path.endsWith(".py"));
+    assert.ok(sdk, "should emit a Python SDK");
+    assert.match(sdk.path, /^sdk\/[A-Za-z_][A-Za-z0-9_]*\.py$/, "SDK filename must be a valid Python module name");
+    assert.ok(!/\bself,\s*self\b/.test(sdk.content), "SDK methods must not declare `self` twice");
+  });
+
   it("generates with empty endpoints", () => {
     const config = { ...BASE_CONFIG, language: "typescript" as const, framework: "express", api: "rest" as const };
     const files = generate(config, []);
