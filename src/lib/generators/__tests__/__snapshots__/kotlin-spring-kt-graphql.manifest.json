@@ -31,8 +31,8 @@
   },
   {
     "path": "build.gradle.kts",
-    "lines": 39,
-    "size": 1729
+    "lines": 41,
+    "size": 1880
   },
   {
     "path": "DEPLOY.md",
@@ -196,12 +196,12 @@
   },
   {
     "path": "src/test/kotlin/dev/helios/test_app/PostControllerTest.kt",
-    "lines": 35,
-    "size": 1126
+    "lines": 44,
+    "size": 1601
   },
   {
     "path": "src/test/kotlin/dev/helios/test_app/UserControllerTest.kt",
-    "lines": 35,
-    "size": 1126
+    "lines": 44,
+    "size": 1601
   }
 ]

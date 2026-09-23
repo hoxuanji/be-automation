@@ -543,6 +543,45 @@ describe("Stack-option wiring", () => {
     assert.match(api, /auth\.FromContext/);
   });
 
+  it("Ktor tests load the application module (otherwise every route 404s)", () => {
+    const ktor = gen({ language: "kotlin", framework: "ktor" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const app = ktor.get("src/main/kotlin/Application.kt")!;
+    assert.match(app, /fun Application\.module\(\)[\s\S]*routing \{/);
+    assert.match(app, /embeddedServer\(Netty, .*module = Application::module\)/);
+    const test = ktor.get("src/test/kotlin/UserRouteTest.kt")!;
+    assert.equal(test.match(/application \{ module\(\) \}/g)?.length, test.match(/testApplication \{/g)?.length);
+  });
+
+  it("Spring tests authenticate with jwt() when routes are protected, and not otherwise", () => {
+    const cases: [string, string, string, string][] = [
+      ["java", "spring", "pom.xml", "src/test/java/dev/helios/app/UserControllerTest.java"],
+      ["kotlin", "spring-kt", "build.gradle.kts", "src/test/kotlin/dev/helios/test_app/UserControllerTest.kt"],
+    ];
+    for (const [language, framework, build, testPath] of cases) {
+      const secured = gen({ language, framework, auth: "clerk" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const test = secured.get(testPath)!;
+      // Every request must carry a JWT, or anyRequest().authenticated() answers 401.
+      assert.equal(test.match(/\.with\(jwt\(\)\)/g)?.length, test.match(/mvc\.perform/g)?.length, framework);
+      assert.ok(test.includes("JwtDecoder"), `${framework}: decoder must be mocked (no live JWKS in tests)`);
+      assert.ok(secured.get(build)!.includes("spring-security-test"), framework);
+      const open = gen({ language, framework, auth: "none" }, SAMPLE_ENDPOINTS.map((e) => ({ ...e, auth: false })), SAMPLE_ENTITIES);
+      assert.ok(!open.get(testPath)!.includes("jwt()"), `${framework}: no security on classpath without auth`);
+    }
+  });
+
+  it("Rust number fields decode the DOUBLE columns the migrations create", () => {
+    const ents = [{ id: "e", name: "Item", fields: [
+      { id: "1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "2", name: "price", type: "number" as const, required: true, unique: false },
+    ] }];
+    const rust = gen({ language: "rust", framework: "axum" }, SAMPLE_ENDPOINTS, ents);
+    const migration = rust.files.find((f) => f.path.includes("migrations/") && f.content.includes("price"))!;
+    assert.match(migration.content, /price DOUBLE PRECISION/);
+    const model = rust.files.find((f) => f.path.endsWith(".rs") && /pub price: /.test(f.content))!;
+    assert.match(model.content, /pub price: f64/);
+    assert.ok(!rust.files.some((f) => /price: (Option<)?i64/.test(f.content)), "i64 cannot decode DOUBLE PRECISION");
+  });
+
   it("Go migrate command matches the database driver and handles config errors", () => {
     const main = (database: string) => gen({ database }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("cmd/migrate/main.go")!;
     assert.match(main("postgres"), /migrate\/v4\/database\/postgres"/);

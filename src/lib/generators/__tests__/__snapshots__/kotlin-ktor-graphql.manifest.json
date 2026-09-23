@@ -136,8 +136,8 @@
   },
   {
     "path": "src/main/kotlin/Application.kt",
-    "lines": 27,
-    "size": 820
+    "lines": 31,
+    "size": 941
   },
   {
     "path": "src/main/kotlin/Auth.kt",
@@ -181,12 +181,12 @@
   },
   {
     "path": "src/test/kotlin/PostRouteTest.kt",
-    "lines": 23,
-    "size": 647
+    "lines": 25,
+    "size": 713
   },
   {
     "path": "src/test/kotlin/UserRouteTest.kt",
-    "lines": 23,
-    "size": 683
+    "lines": 25,
+    "size": 749
   }
 ]
