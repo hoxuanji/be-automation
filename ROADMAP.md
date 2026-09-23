@@ -314,7 +314,7 @@ Test in order. Each section is a discrete flow. Use a fresh account unless noted
 
 | # | Feature | Status | Notes |
 |---|---------|--------|-------|
-| 9 | **GraphQL code generation** | ✅ Done | Schema-first SDL generator at `src/lib/generators/graphql/schema.ts` emits `graphql/schema.graphql`. Per-language servers: Go (gqlgen + Makefile target), TypeScript (graphql-yoga with Express/NestJS/Fastify/Hono adapters, custom DateTime + JSON scalars), Python (Strawberry mounted on FastAPI). Rust/Java/Kotlin fall back to REST with a banner in the README. Snapshot tests cover the full language × framework × graphql matrix (621 tests / 53 suites all green). |
+| 9 | **GraphQL code generation** | ✅ Done | Schema-first SDL generator at `src/lib/generators/graphql/schema.ts` emits `graphql/schema.graphql`. Per-language servers: Go (gqlgen + Makefile target), TypeScript (graphql-yoga with Express/NestJS/Fastify/Hono adapters, custom DateTime + JSON scalars), Python (Strawberry mounted on FastAPI). Rust/Java/Kotlin fall back to REST with a banner in the README. Snapshot tests cover the full language × framework × graphql matrix (snapshot suite all green). |
 | 10 | **tRPC code generation** | ✅ Done | Full tRPC v11 generator for TypeScript. Emits `src/trpc.ts`, `src/router.ts`, `src/server.ts`, `src/client.ts`, `src/types.ts`. One procedure per endpoint (GET → query, mutations → mutation). Entity CRUD procedures included when entities are defined. |
 | 11 | **Java / Kotlin generators** | ✅ Done | All four framework variants (Spring, Quarkus, Ktor, Spring-Kt) emit per-entity entity class, repository (where idiomatic), controller/resource, and a smoke test file. Java Spring uses MockMvc; Quarkus uses `@QuarkusTest` + REST-assured; Kotlin Ktor uses Ktor's test client; Kotlin Spring-Kt uses MockMvc. Spring Security OAuth2 + Flyway + HikariCP + logstash-logback-encoder + non-root multi-stage Dockerfile. New Java Spring template added. CI smoke-build matrix covers all four variants. |
 | 12 | **Team project sharing** | ✅ Done | `project_shares` table (per-project explicit shares — principal is user OR team, permission is view OR edit). Single-source-of-truth helper `src/lib/permissions.ts` (`getProjectAccess`); all project routes go through it. New routes: `POST/GET /api/projects/:id/shares`, `DELETE /api/projects/:id/shares/:shareId`, `GET /api/shared-with-me`. UI: `ShareProjectDialog` on each owned dashboard card + "Shared with me" section showing inherited projects with permission badges. |
@@ -329,6 +329,17 @@ Test in order. Each section is a discrete flow. Use a fresh account unless noted
 
 ---
 
+### P3 — Audit follow-up (Sept 2026)
+
+| # | Feature | Status | Notes |
+|---|---------|--------|-------|
+| 21 | **Security hardening** | ✅ Done | Next.js 15.5.26 (middleware bypass CVE). OAuth state bound to an httpOnly nonce cookie; `safeReturnTo()` blocks `//` / `/\` redirects. Team project listing only returns rows the caller can access. Logout clears provider tokens. Session required on `/api/github/*`, `/api/generate`, `*/verify`, `ai/generate-logic`. Invites enforce the invited email. Rate-limit key uses `x-real-ip` / last XFF hop. Deploy routes no longer return raw errors. |
+| 22 | **Builder options generate real code** | ✅ Done | rateLimit, tracing (OTel/OTLP), audit, monitoring and Redis cache are wired for Go, all four TS frameworks and Python, including gRPC / GraphQL / tRPC modes. Per-database drivers (MySQL/PlanetScale, MongoDB, pure-Go SQLite). JWKS auth for Rust, Quarkus, Ktor. GitLab CI / CircleCI / Argo CD, ECS / Cloud Run / Container Apps output. Generated READMEs only claim what's generated. |
+| 23 | **CI actually compiles generated repos** | ✅ Done | `smoke-build` runs 36 combos via `scripts/smoke-generate.mjs`: a minimal profile per framework plus a `full` profile (all flags, Clerk auth, k8s/Helm, an entity, all 18 endpoint patterns), MySQL/MongoDB and self-issued-auth variants, and gRPC/GraphQL/tRPC with the same codegen users run (`buf`, `gqlgen`, `grpc_tools`). Go also runs `go vet` + `gofmt -l`; Python fails on pyflakes undefined names. Compiler errors surface as annotations. Lockfile resolves from the public npm registry. |
+| 24 | **Remaining gaps** | ⏳ Open | gRPC interceptors cover unary calls only. tRPC is Express-only. Litestar/Django ignore endpoint list. TS auth patterns sign with `JWT_SECRET` even when a JWKS provider is configured. Generated Ktor tests don't init the DB and need `AUTH_*` env when auth is on. 6 prod npm vulns remain (postcss inside Next → needs Next 16; js-yaml via swagger-ui-react; dompurify pinned by monaco-editor). Pricing has no billing (copy says "free during beta"). |
+
+---
+
 ## 4. Architecture Notes for Agents
 
 ### Key files
@@ -336,7 +347,7 @@ Test in order. Each section is a discrete flow. Use a fresh account unless noted
 - `src/lib/generators/index.ts` — `generate(config, endpoints, entities) → GeneratedFile[]`. Entry point for all code generation.
 - `src/lib/generators/common.ts` — Files shared across all languages (README, QUICKSTART, Dockerfile, docker-compose, K8s, Helm, CI, OpenAPI). Surfaces gRPC/GraphQL "unsupported language" banners.
 - `src/lib/generators/graphql/` — Schema-first GraphQL: `schema.ts` emits the SDL; `typescript.ts`, `go.ts`, and `python.ts` emit the matching server bindings. `isGraphqlSupported(language)` lives in `types.ts` next to `isGrpcSupported`.
-- `src/lib/generators/__tests__/generate.test.ts` — 621 snapshot tests across language × framework × api combos. Run with `npm test`; regenerate with `UPDATE_SNAPSHOTS=1 npm test`.
+- `src/lib/generators/__tests__/generate.test.ts` — snapshot + intent tests across language × framework × api combos (648 as of Sept 2026). Run with `npm test`; regenerate with `UPDATE_SNAPSHOTS=1 npm test`.
 - `src/lib/deploy-pipeline.ts` — Async generators for all four deploy providers. `runDeployPipeline` (Railway), `runRenderDeployPipeline`, `runFlyDeployPipeline`, `runVercelDeployPipeline` all follow the same push-then-provision pattern.
 - `src/lib/railway.ts`, `src/lib/render.ts`, `src/lib/fly.ts`, `src/lib/vercel.ts` — Typed provider API clients with retry/backoff and structured error classes.
 - `src/lib/db.ts` — All SQLite DB access. No ORM — raw `better-sqlite3`. Includes `project_shares` helpers (`createProjectShare`, `listProjectShares`, `deleteProjectShare`, `getProjectAccessRow`, `listSharedWithUser`) and raw project getters/setters used after permission checks (`getProjectByIdRaw`, `updateProjectRaw`).
