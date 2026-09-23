@@ -14,25 +14,30 @@ export function goFiles(
   // gRPC mode swaps the HTTP framework bootstrap for a pure gRPC server.
   // Keep the Dockerfile + shared helpers; replace the cmd / internal/server
   // output with the gRPC tree.
+  const module = `github.com/your-username/${safeName(config.name)}`;
+  // grpc/graphql trees also get cmd/migrate from db/migrations.ts (SQL + entities).
+  const migrate = entities.length > 0 && !/mongo|dynamo|redis/i.test(config.database) ? ["github.com/golang-migrate/migrate/v4"] : [];
+
   if (config.api === "grpc") {
     const files: GeneratedFile[] = [];
     files.push({ path: "Dockerfile", content: goDockerfile() });
     files.push({ path: "internal/config/config.go", content: goConfig() });
     files.push(...goGrpcFiles(config, entities));
+    // `make proto` output (gen/go, not in the zip) imports protobuf.
+    files.push({ path: "go.mod", content: goMod(module, files, [...migrate, "google.golang.org/protobuf"]) });
     return files;
   }
 
-  // GraphQL replaces the HTTP server with a gqlgen-driven /graphql route.
-  // Same structure as gRPC: keep the language-shared files, swap the entry.
+  // GraphQL: the REST server (router, middleware, observability) with no
+  // routes of its own, plus gqlgen mounted on that same router.
   if (config.api === "graphql" && isGraphqlSupported(config.language)) {
-    const files: GeneratedFile[] = [];
-    files.push({ path: "Dockerfile", content: goDockerfile() });
-    files.push({ path: "internal/config/config.go", content: goConfig() });
-    files.push(...goGraphqlFiles(config, entities));
+    const rest = goFiles({ ...config, api: "rest" }, [], []).filter((f) => f.path !== "go.mod");
+    const files = goGraphqlFiles(config, entities, rest);
+    // gqlgen's generated code (graph/generated.go, not in the zip) imports gqlparser.
+    files.push({ path: "go.mod", content: goMod(module, files, [...migrate, "github.com/vektah/gqlparser/v2"]) });
     return files;
   }
 
-  const module = `github.com/your-username/${safeName(config.name)}`;
   const fw = (["gin", "fiber", "echo", "chi"].includes(config.framework) ? config.framework : "gin") as GoFw;
   const files: GeneratedFile[] = [];
   const authMode = goAuthMode(config, endpoints);
@@ -129,7 +134,7 @@ export function goFiles(
   return files;
 }
 
-type GoFw = "gin" | "fiber" | "echo" | "chi";
+export type GoFw = "gin" | "fiber" | "echo" | "chi";
 
 // How authRequired verifies bearer tokens (see patterns/go.ts patternBody):
 //   jwks  — external provider configured: verify provider tokens via JWKS.
@@ -164,7 +169,7 @@ export function goDbKind(database: string): GoDbKind {
   return "none";
 }
 
-const fwImport: Record<GoFw, string> = {
+export const fwImport: Record<GoFw, string> = {
   gin: "github.com/gin-gonic/gin",
   fiber: "github.com/gofiber/fiber/v2",
   echo: "github.com/labstack/echo/v4",
@@ -174,7 +179,7 @@ const fwImport: Record<GoFw, string> = {
 // Builds a Go import block from the packages the code actually references
 // (`name.` selector). `pkgs` maps the local package name to its import path;
 // an alias is emitted when the name differs from the path's last element.
-function goImports(code: string, std: [string, string][], ext: [string, string][]): string {
+export function goImports(code: string, std: [string, string][], ext: [string, string][]): string {
   const pick = (list: [string, string][]) =>
     list
       .filter(([name]) => new RegExp(`\\b${name}\\.`).test(code))
@@ -210,7 +215,7 @@ ${goImports(code, [], [
 ${code}`;
 }
 
-function goSentryInit(fw: GoFw): string {
+export function goSentryInit(fw: GoFw): string {
   const mw: Record<GoFw, string> = {
     gin: `func SentryMiddleware() gin.HandlerFunc {\n\treturn sentrygin.New(sentrygin.Options{Repanic: true})\n}`,
     fiber: `func SentryMiddleware() fiber.Handler {\n\treturn sentryfiber.New(sentryfiber.Options{Repanic: true})\n}`,
@@ -253,7 +258,7 @@ ${goImports(code, [["context", "context"], ["slog", "log/slog"], ["http", "net/h
 ${code}`;
 }
 
-function goDatadogInit(fw: GoFw): string {
+export function goDatadogInit(fw: GoFw): string {
   const mw: Record<GoFw, [string, string, string]> = {
     gin: ["gintrace", "gopkg.in/DataDog/dd-trace-go.v1/contrib/gin-gonic/gin", `func DatadogMiddleware(service string) gin.HandlerFunc {\n\treturn gintrace.Middleware(service)\n}`],
     fiber: ["fibertrace", "gopkg.in/DataDog/dd-trace-go.v1/contrib/gofiber/fiber.v2", `func DatadogMiddleware(service string) fiber.Handler {\n\treturn fibertrace.Middleware(fibertrace.WithServiceName(service))\n}`],
@@ -286,7 +291,7 @@ ${goImports(code, [["context", "context"], ["slog", "log/slog"], ["http", "net/h
 ${code}`;
 }
 
-function goTracing(fw: GoFw): string {
+export function goTracing(fw: GoFw): string {
   const mw: Record<GoFw, string> = {
     gin: `// Middleware starts a server span per request (otelgin).
 func Middleware(service string) gin.HandlerFunc {\n\treturn otelgin.Middleware(service)\n}`,
@@ -375,6 +380,40 @@ ${goImports(code, [["context", "context"], ["errors", "errors"], ["http", "net/h
 ${code}`;
 }
 
+// Per-IP token bucket shared by the HTTP rate-limit middleware and the gRPC
+// interceptor (grpc/go.ts). Needs "sync" and golang.org/x/time/rate.
+export const GO_IP_LIMITER = `// ponytail: per-instance, in-memory token bucket keyed by client IP. With N
+// replicas a client effectively gets N x the budget and state resets on
+// restart — move the buckets to Redis (e.g. github.com/go-redis/redis_rate)
+// when you need one global limit.
+const (
+\trateLimitRPS   = 10 // sustained requests per second per client IP
+\trateLimitBurst = 20 // short bursts allowed above the sustained rate
+\t// ponytail: the table is dropped wholesale when full; an LRU would keep hot clients.
+\tmaxTrackedIPs = 100_000
+)
+
+type ipLimiter struct {
+\tmu      sync.Mutex
+\tclients map[string]*rate.Limiter
+}
+
+func newIPLimiter() *ipLimiter { return &ipLimiter{clients: map[string]*rate.Limiter{}} }
+
+func (l *ipLimiter) allow(ip string) bool {
+\tl.mu.Lock()
+\tdefer l.mu.Unlock()
+\tlim, ok := l.clients[ip]
+\tif !ok {
+\t\tif len(l.clients) >= maxTrackedIPs {
+\t\t\tclear(l.clients)
+\t\t}
+\t\tlim = rate.NewLimiter(rateLimitRPS, rateLimitBurst)
+\t\tl.clients[ip] = lim
+\t}
+\treturn lim.Allow()
+}`;
+
 function goRateLimit(fw: GoFw): string {
   const mw: Record<GoFw, string> = {
     gin: `func rateLimit() gin.HandlerFunc {
@@ -428,37 +467,7 @@ function goRateLimit(fw: GoFw): string {
 \t}
 }`,
   };
-  const code = `// ponytail: per-instance, in-memory token bucket keyed by client IP. With N
-// replicas a client effectively gets N x the budget and state resets on
-// restart — move the buckets to Redis (e.g. github.com/go-redis/redis_rate)
-// when you need one global limit.
-const (
-\trateLimitRPS   = 10 // sustained requests per second per client IP
-\trateLimitBurst = 20 // short bursts allowed above the sustained rate
-\t// ponytail: the table is dropped wholesale when full; an LRU would keep hot clients.
-\tmaxTrackedIPs = 100_000
-)
-
-type ipLimiter struct {
-\tmu      sync.Mutex
-\tclients map[string]*rate.Limiter
-}
-
-func newIPLimiter() *ipLimiter { return &ipLimiter{clients: map[string]*rate.Limiter{}} }
-
-func (l *ipLimiter) allow(ip string) bool {
-\tl.mu.Lock()
-\tdefer l.mu.Unlock()
-\tlim, ok := l.clients[ip]
-\tif !ok {
-\t\tif len(l.clients) >= maxTrackedIPs {
-\t\t\tclear(l.clients)
-\t\t}
-\t\tlim = rate.NewLimiter(rateLimitRPS, rateLimitBurst)
-\t\tl.clients[ip] = lim
-\t}
-\treturn lim.Allow()
-}
+  const code = `${GO_IP_LIMITER}
 
 ${mw[fw]}
 `;
@@ -472,8 +481,8 @@ ${goImports(code, [["net", "net"], ["http", "net/http"], ["sync", "sync"]], [
 ${code}`;
 }
 
-function goRateLimitTest(): string {
-  return `package server
+export function goRateLimitTest(pkg = "server"): string {
+  return `package ${pkg}
 
 import "testing"
 
@@ -1715,6 +1724,7 @@ ${mysql ? `\tdsn, err := MySQLDSN(dsn)
 // Module → version for everything the Go generator can import. go.mod lists
 // exactly the modules the emitted code imports (see goMod).
 const GO_MODULE_VERSIONS: [string, string][] = [
+  ["github.com/99designs/gqlgen", "v0.17.55"],
   ["github.com/caarlos0/env/v11", "v11.2.2"],
   ["github.com/gin-gonic/gin", "v1.10.0"],
   ["github.com/go-chi/chi/v5", "v5.1.0"],
@@ -1729,9 +1739,11 @@ const GO_MODULE_VERSIONS: [string, string][] = [
   ["github.com/lestrrat-go/jwx/v2", "v2.1.1"],
   ["github.com/prometheus/client_golang", "v1.20.4"],
   ["github.com/redis/go-redis/v9", "v9.7.0"],
+  ["github.com/vektah/gqlparser/v2", "v2.5.20"],
   ["go.mongodb.org/mongo-driver", "v1.17.1"],
   ["go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin", "v0.56.0"],
   ["go.opentelemetry.io/contrib/instrumentation/github.com/labstack/echo/otelecho", "v0.56.0"],
+  ["go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc", "v0.56.0"],
   ["go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp", "v0.56.0"],
   ["go.opentelemetry.io/otel", "v1.31.0"],
   ["go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp", "v1.31.0"],
@@ -1739,6 +1751,8 @@ const GO_MODULE_VERSIONS: [string, string][] = [
   ["go.opentelemetry.io/otel/trace", "v1.31.0"],
   ["golang.org/x/crypto", "v0.27.0"],
   ["golang.org/x/time", "v0.7.0"],
+  ["google.golang.org/grpc", "v1.67.1"],
+  ["google.golang.org/protobuf", "v1.35.1"],
   ["gopkg.in/DataDog/dd-trace-go.v1", "v1.69.0"],
   ["gorm.io/driver/mysql", "v1.5.7"],
   ["gorm.io/driver/postgres", "v1.5.11"],
@@ -1747,7 +1761,7 @@ const GO_MODULE_VERSIONS: [string, string][] = [
 ];
 const GO_MODULES_BY_LENGTH = [...GO_MODULE_VERSIONS].sort((a, b) => b[0].length - a[0].length);
 
-function goMod(module: string, files: GeneratedFile[], extraImports: string[] = []): string {
+export function goMod(module: string, files: GeneratedFile[], extraImports: string[] = []): string {
   const imports = [...extraImports];
   const importLine = /^\s*(?:import\s+)?(?:[\w.]+\s+)?"([a-z0-9.-]+\.[a-z]{2,}\/[^"\s]+)"\s*$/gm;
   for (const f of files) {
@@ -1930,7 +1944,7 @@ func main() {
 `;
 }
 
-function goConfig(withMongo = false) {
+export function goConfig(withMongo = false) {
   return `package config
 
 import env "github.com/caarlos0/env/v11"

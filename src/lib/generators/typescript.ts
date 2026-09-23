@@ -1,7 +1,7 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { safeName, toKebab, toCamel } from "./types";
 import { tsGrpcFiles } from "./grpc/typescript";
-import { tsGraphqlFiles } from "./graphql/typescript";
+import { mountOnTsRest, tsGraphqlFiles } from "./graphql/typescript";
 import { isGraphqlSupported } from "./types";
 import { needsAuth } from "./auth/providers";
 import { tsPatternRoute, tsPatternImports, usesPrisma, hasRedisCache } from "./patterns/typescript";
@@ -33,10 +33,12 @@ export function typescriptFiles(
     return tRPCFiles(config, endpoints, entities);
   }
 
-  // GraphQL: emit a graphql-yoga server keyed off the framework. Same
-  // schema-first dispatch as gRPC — the SDL was already added in index.ts.
+  // GraphQL: graphql-yoga mounted on the REST server for the chosen framework
+  // (built with no routes), so its middleware and observability apply.
+  // NestJS uses the Express base — see tsGraphqlMount.
   if (config.api === "graphql" && isGraphqlSupported(config.language)) {
-    return tsGraphqlFiles(config, entities);
+    const framework = config.framework === "nestjs" ? "express" : config.framework;
+    return tsGraphqlFiles(config, entities, typescriptFiles({ ...config, api: "rest", framework }, [], []));
   }
 
   // gRPC mode replaces the framework-specific HTTP bootstrap with a @grpc/grpc-js
@@ -47,7 +49,13 @@ export function typescriptFiles(
     if (usesPrisma(config, entities)) {
       files.push(...prismaFiles(config, entities));
     }
-    files.push(...tsGrpcFiles(config, entities));
+    // Same instrumentation as the REST main.ts; tsGrpcFiles adds the interceptors.
+    const obsDeps = Object.fromEntries(
+      Object.entries(JSON.parse(pkgJson(safeName(config.name), config, false, false, endpoints)).dependencies as Record<string, string>)
+        .filter(([k]) => /^(@opentelemetry\/|prom-client$|@sentry\/node$|dd-trace$)/.test(k))
+    );
+    files.push(...tsGrpcFiles(config, entities, { preamble: tsInstrumentPreamble(config), deps: obsDeps }));
+    if (config.tracing) files.push({ path: "src/tracing.ts", content: tracingFile(safeName(config.name)) });
     return files;
   }
 
@@ -1600,8 +1608,6 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
 function tRPCFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
-  const name = safeName(config.name);
-
   const procedures = endpoints.map((e) => {
     const key = handlerName(e);
     const isQuery = e.method === "GET";
@@ -1626,35 +1632,16 @@ function tRPCFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[
     return `export type ${en.name} = {\n${fields}\n};`;
   }).join("\n\n");
 
+  // tRPC is served by the Express REST server (built with no routes), so the
+  // REST middleware and observability sit in front of /trpc.
+  const rest = typescriptFiles({ ...config, api: "rest", framework: "express" }, [], []);
   return [
-    {
-      path: "package.json",
-      content: JSON.stringify({
-        name,
-        version: "0.1.0",
-        private: true,
-        scripts: {
-          dev: "tsx watch src/server.ts",
-          start: "node dist/server.js",
-          build: "tsc -p tsconfig.json",
-          test: "vitest run",
-        },
-        dependencies: {
-          "@trpc/server": "^11.0.0",
-          express: "^4.21.0",
-          zod: "^3.24.1",
-          "pino-http": "^10.3.0",
-        },
-        devDependencies: {
-          "@types/express": "^4.17.21",
-          "@types/node": "^22.10.5",
-          tsx: "^4.19.0",
-          typescript: "^5.7.2",
-          vitest: "^2.0.0",
-        },
-      }, null, 2) + "\n",
-    },
-    { path: "tsconfig.json", content: tsconfig() },
+    ...mountOnTsRest(rest, {
+      imports: `import * as trpcExpress from "@trpc/server/adapters/express";\nimport { appRouter } from "./router";`,
+      mount: `app.use("/trpc", trpcExpress.createExpressMiddleware({ router: appRouter }));`,
+      // src/client.ts imports @trpc/client.
+      deps: { "@trpc/server": "^11.0.0", "@trpc/client": "^11.0.0" },
+    }),
     {
       path: "src/trpc.ts",
       content: `import { initTRPC } from "@trpc/server";
@@ -1683,27 +1670,6 @@ ${entityProcedures}
 });
 
 export type AppRouter = typeof appRouter;
-`,
-    },
-    {
-      path: "src/server.ts",
-      content: `import express from "express";
-import pinoHttp from "pino-http";
-import * as trpcExpress from "@trpc/server/adapters/express";
-import { appRouter } from "./router";
-
-const app = express();
-app.use(pinoHttp());
-app.use(
-  "/trpc",
-  trpcExpress.createExpressMiddleware({ router: appRouter })
-);
-app.get("/health", (_, res) => res.json({ ok: true }));
-
-const port = Number(process.env.PORT ?? 8080);
-app.listen(port, () =>
-  console.log(JSON.stringify({ level: "info", msg: "listening", port }))
-);
 `,
     },
     {
