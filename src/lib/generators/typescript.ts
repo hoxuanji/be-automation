@@ -56,7 +56,7 @@ export function typescriptFiles(
   const anyProtected = endpoints.some((e) => e.auth);
   const withAuth = needsAuth(config, anyProtected);
 
-  files.push({ path: "package.json", content: pkgJson(name, config, usesPrisma(config, entities), withAuth) });
+  files.push({ path: "package.json", content: pkgJson(name, config, usesPrisma(config, entities), withAuth, endpoints) });
   files.push({ path: "tsconfig.json", content: tsconfig() });
   files.push({ path: "Dockerfile", content: tsDockerfile() });
   files.push({ path: "vitest.config.ts", content: vitestConfig() });
@@ -129,12 +129,13 @@ function tsInstrumentPreamble(c: StackConfig): string {
   ].filter(Boolean).map((l) => l + "\n").join("");
 }
 
-// Pattern handlers inline in main.ts need these clients.
+// Pattern handlers (inline in main.ts, or in the Nest AppController) need these clients + libs.
 function tsPatternClientImports(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): string {
   const patterns = endpoints.map((e) => e.pattern ?? "");
   const needsDb = usesPrisma(config, entities) && patterns.some((p) => /^(crud_|paginated_search|cache_read|health_check)/.test(p));
   const needsCache = hasRedis(config) && patterns.some((p) => p === "cache_read" || p === "health_check");
-  return `${needsDb ? `import { prisma } from "./db";\n` : ""}${needsCache ? `import { redis } from "./cache";\n` : ""}`;
+  const { needsBcrypt, needsJwt, needsCrypto } = tsPatternImports(endpoints);
+  return `${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${needsCrypto ? 'import crypto from "node:crypto";\n' : ""}${needsDb ? `import { prisma } from "./db";\n` : ""}${needsCache ? `import { redis } from "./cache";\n` : ""}`;
 }
 
 function entityCrudFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
@@ -629,8 +630,9 @@ function prismaType(t: FieldType): string {
   }
 }
 
-function pkgJson(name: string, config: StackConfig, withPrisma = false, withAuth = false) {
+function pkgJson(name: string, config: StackConfig, withPrisma: boolean, withAuth: boolean, endpoints: Endpoint[]) {
   const framework = config.framework;
+  const { needsBcrypt, needsJwt } = tsPatternImports(endpoints);
   const deps: Record<string, Record<string, string>> = {
     nestjs: {
       "@nestjs/common": "^10.4.0",
@@ -669,6 +671,8 @@ function pkgJson(name: string, config: StackConfig, withPrisma = false, withAuth
     ...(hasSentry(config) ? { "@sentry/node": "^8.42.0" } : {}),
     ...(hasDatadog(config) ? { "dd-trace": "^5.23.0" } : {}),
     ...(hasRedis(config) ? { ioredis: "^5.4.1" } : {}),
+    ...(needsBcrypt ? { bcrypt: "^5.1.1" } : {}),
+    ...(needsJwt ? { jsonwebtoken: "^9.0.2" } : {}),
     ...(config.tracing
       ? {
           "@opentelemetry/sdk-node": "^0.57.0",
@@ -714,6 +718,10 @@ function pkgJson(name: string, config: StackConfig, withPrisma = false, withAuth
           supertest: "^7.0.0",
           "@types/supertest": "^6.0.0",
           ...(framework === "express" ? { "@types/express": "^4.17.21", "@types/cors": "^2.8.17" } : {}),
+          // Nest pattern handlers take the underlying Express req/res.
+          ...(framework === "nestjs" && endpoints.some((e) => e.pattern) ? { "@types/express": "^4.17.21" } : {}),
+          ...(needsBcrypt ? { "@types/bcrypt": "^5.0.2" } : {}),
+          ...(needsJwt ? { "@types/jsonwebtoken": "^9.0.7" } : {}),
           ...(framework === "nestjs" ? { "@nestjs/testing": "^10.0.0" } : {}),
           ...(withPrisma ? { prisma: "^5.22.0" } : {}),
         },
@@ -1075,22 +1083,31 @@ describe("${pascal} routes", () => {
 }
 
 function nestjsFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
+  const anyProtected = endpoints.some((e) => e.auth);
+  const withAuth = needsAuth(config, anyProtected);
+  const hasPatterns = endpoints.some((e) => e.pattern);
+  // Pattern handlers reuse the Express bodies verbatim via @Req()/@Res()
+  // (Nest runs on platform-express), so both frameworks behave identically.
+  const guarded = (e: Endpoint) => e.pattern && e.auth && withAuth;
   const routes = endpoints
-    .map(
-      (e) => `  @${capMethod(e.method)}(${JSON.stringify(nestPath(e.path))})
+    .map((e) =>
+      e.pattern
+        ? `  @${capMethod(e.method)}(${JSON.stringify(nestPath(e.path))})
+${guarded(e) ? "  @UseGuards(JwtAuthGuard)\n" : ""}  async ${handlerName(e)}(@Req() req: Request, @Res() res: Response) {
+${tsPatternRoute(e, "nestjs", config, entities).replace(/^(?=.)/gm, "  ")}
+  }`
+        : `  @${capMethod(e.method)}(${JSON.stringify(nestPath(e.path))})
   ${handlerName(e)}() {
     return { ok: true, op: "${e.method} ${e.path}" };
   }`
     )
     .join("\n\n");
+  const nestCommon = ["Controller", "Get", "Post", "Put", "Patch", "Delete", ...(hasProm(config) ? ["Header"] : []), ...(hasPatterns ? ["Req", "Res"] : []), ...(endpoints.some(guarded) ? ["UseGuards"] : [])];
 
   const entityModuleImports = entities
     .map((e) => `import { ${e.name}Module } from "./modules/${toKebab(e.name)}/${toKebab(e.name)}.module";`)
     .join("\n");
   const entityModuleList = entities.map((e) => `${e.name}Module`).join(", ");
-
-  const anyProtected = endpoints.some((e) => e.auth);
-  const withAuth = needsAuth(config, anyProtected);
 
   return [
     {
@@ -1143,8 +1160,8 @@ export class AppModule {}
     },
     {
       path: "src/app.controller.ts",
-      content: `import { Controller, Get, Post, Put, Patch, Delete${hasProm(config) ? ", Header" : ""} } from "@nestjs/common";
-${hasProm(config) ? `import { register } from "prom-client";\n` : ""}
+      content: `import { ${nestCommon.join(", ")} } from "@nestjs/common";
+${hasPatterns ? `import type { Request, Response } from "express";\n` : ""}${endpoints.some(guarded) ? `import { JwtAuthGuard } from "./auth/jwt.guard";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}${hasProm(config) ? `import { register } from "prom-client";\n` : ""}
 @Controller()
 export class AppController {
   @Get("/health")
@@ -1242,7 +1259,6 @@ export class JwtAuthGuard implements CanActivate {
 }
 
 function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
-  const { needsBcrypt, needsJwt } = tsPatternImports(endpoints);
   const routes = endpoints
     .map((e) =>
       e.pattern
@@ -1265,7 +1281,7 @@ function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
 import helmet from "helmet";
 import cors from "cors";
 import pinoHttp from "pino-http";
-${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}${config.audit ? `import { auditLogger } from "./middleware/audit";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}import { authRequired } from "./middleware/auth";
+${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}${config.audit ? `import { auditLogger } from "./middleware/audit";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}import { authRequired } from "./middleware/auth";
 ${entityImports ? entityImports + "\n" : ""}
 // Comma-separated list of origins in ALLOWED_ORIGINS, e.g.
 // "https://app.example.com,https://admin.example.com". Omit to keep CORS

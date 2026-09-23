@@ -9,7 +9,7 @@ function inferTableName(path: string): string {
   return parts[parts.length - 1] || "items";
 }
 
-type TsFw = "express" | "fastify" | "hono" | "nestjs";
+type TsFw = "express" | "fastify" | "hono";
 
 // ── framework adapter ─────────────────────────────────────────────────────────
 
@@ -56,7 +56,7 @@ function tsCtx(fw: TsFw): TsFwCtx {
     logErr: (msg, err) => `request.log.error({ err: ${err} }, ${JSON.stringify(msg)});`,
   };
 
-  if (fw === "hono") return {
+  return {
     queryStr: (k, d = "") => `c.req.query(${JSON.stringify(k)}) || ${JSON.stringify(d)}`,
     queryInt: (k, d) => `parseInt(c.req.query(${JSON.stringify(k)}) || ${JSON.stringify(String(d))}, 10) || ${d}`,
     pathParam: (n) => `c.req.param(${JSON.stringify(n)})`,
@@ -68,21 +68,6 @@ function tsCtx(fw: TsFw): TsFwCtx {
     bindBody: "",
     getCtxUser: () => `c.get("sub") as string`,
     logErr: (msg, err) => `console.error(${JSON.stringify(msg)}, ${err});`,
-  };
-
-  // nestjs — return method body (caller wraps in class method)
-  return {
-    queryStr: (k, d = "") => `query[${JSON.stringify(k)}] || ${JSON.stringify(d)}`,
-    queryInt: (k, d) => `parseInt(query[${JSON.stringify(k)}] || ${JSON.stringify(String(d))}, 10) || ${d}`,
-    pathParam: (n) => `params[${JSON.stringify(n)}]`,
-    sendJSON: (s, e) => `return ${e};`,
-    sendCreated: (e) => `return ${e};`,
-    sendNoContent: () => `return;`,
-    sendErr: (s, m) => `throw new HttpException(${JSON.stringify(m)}, ${s});`,
-    getBody: "body",
-    bindBody: "",
-    getCtxUser: () => `req.user?.sub`,
-    logErr: (msg, err) => `this.logger?.error(${JSON.stringify(msg)}, ${err});`,
   };
 }
 
@@ -241,7 +226,7 @@ function authLogin(fw: TsFw): string {
   try {
     // 1. Fetch user by email
     // const user = await prisma.user.findUnique({ where: { email } });
-    const user: { id: string; passwordHash: string } | null = null; // replace
+    const user = null as { id: string; passwordHash: string } | null; // replace (the cast keeps TS from narrowing to never)
     if (!user) {
       // Constant-time compare to prevent timing-based user enumeration
       await bcrypt.compare(password, "$2b$12$invalidhashforenumprotect");
@@ -503,10 +488,13 @@ function expressPath(p: string) {
 
 export function tsPatternRoute(
   e: Endpoint,
-  fw: TsFw,
+  target: TsFw | "nestjs",
   config: StackConfig,
   entities: Entity[]
 ): string {
+  // Nest runs on platform-express and its pattern methods take @Req()/@Res(),
+  // so they share the Express handler bodies.
+  const fw: TsFw = target === "nestjs" ? "express" : target;
   const table = inferTableName(e.path);
   const pattern = e.pattern as PatternId | undefined;
   const m = resolveModel(table, config, entities);
@@ -539,24 +527,24 @@ export function tsPatternRoute(
   const method = e.method.toLowerCase();
   const auth = e.auth ? "authRequired, " : "";
 
+  if (target === "nestjs") return body; // caller wraps in decorator + method
   if (fw === "express") {
     return `app.${method}(${JSON.stringify(path)}, ${auth}async (req, res) => {\n${body}\n});`;
   }
   if (fw === "fastify") {
     return `app.${method}(${JSON.stringify(path)}, async (request, reply) => {\n${body}\n});`;
   }
-  if (fw === "hono") {
-    return `app.${method}(${JSON.stringify(path)}, async (c) => {\n${body}\n});`;
-  }
-  // nestjs — body only, caller wraps in decorator+method
-  return body;
+  return `app.${method}(${JSON.stringify(path)}, async (c) => {\n${body}\n});`;
 }
 
 /** Extra imports needed in main.ts when auth or bcrypt patterns are present. */
-export function tsPatternImports(endpoints: Endpoint[]): { needsBcrypt: boolean; needsJwt: boolean } {
+export function tsPatternImports(endpoints: Endpoint[]): { needsBcrypt: boolean; needsJwt: boolean; needsCrypto: boolean } {
   const patterns = endpoints.map((e) => e.pattern ?? "");
   return {
     needsBcrypt: patterns.some((p) => ["auth_login", "auth_register", "auth_change_password"].includes(p)),
-    needsJwt: patterns.some((p) => (p as string).startsWith("auth_")),
+    // Only login/register/refresh sign or verify tokens themselves.
+    needsJwt: patterns.some((p) => ["auth_login", "auth_register", "auth_refresh"].includes(p)),
+    // crypto.createHmac (webhook) is node:crypto-only; the global is WebCrypto.
+    needsCrypto: patterns.includes("webhook_receive"),
   };
 }
