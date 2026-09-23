@@ -1,6 +1,15 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { toPascal, toSnake, toKebab, toCamel } from "./types";
 import { needsAuth } from "./auth/providers";
+import { springPath, methodAnnotation, handlerMethodName } from "./java";
+
+const isMysql = (db: string) => /mysql|planetscale/.test(db);
+
+// Endpoint stubs are emitted only when no entity CRUD routes own the paths
+// (same rule as Spring Java); /health is always served by the template.
+function stubEndpoints(endpoints: Endpoint[], entities: Entity[]): Endpoint[] {
+  return entities.length === 0 ? endpoints.filter((e) => e.path !== "/health") : [];
+}
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
@@ -24,12 +33,21 @@ function ktorFiles(
 ): GeneratedFile[] {
   const safe = safeName(config.name);
   const files: GeneratedFile[] = [];
+  const withAuth = needsAuth(config, endpoints.some((e) => e.auth));
+  const mysql = isMysql(config.database);
+  const metrics = config.monitoring === "grafana";
 
-  files.push({ path: "build.gradle.kts", content: ktorBuildGradle(safe) });
+  files.push({ path: "build.gradle.kts", content: ktorBuildGradle(safe, withAuth, mysql, metrics) });
   files.push({ path: "settings.gradle.kts", content: `rootProject.name = "${safe}"\n` });
   files.push({ path: "Dockerfile", content: ktorDockerfile() });
-  files.push({ path: "src/main/kotlin/Application.kt", content: ktorApplication(entities) });
-  files.push({ path: "src/main/kotlin/Database.kt", content: ktorDatabase(safe, entities) });
+  files.push({
+    path: "src/main/kotlin/Application.kt",
+    content: ktorApplication(entities, stubEndpoints(endpoints, entities), withAuth, metrics),
+  });
+  files.push({ path: "src/main/kotlin/Database.kt", content: ktorDatabase(safe, entities, mysql) });
+  if (withAuth) {
+    files.push({ path: "src/main/kotlin/Auth.kt", content: ktorAuth() });
+  }
 
   for (const entity of entities) {
     files.push({
@@ -38,7 +56,7 @@ function ktorFiles(
     });
     files.push({
       path: `src/main/kotlin/routes/${toSnake(entity.name)}Routes.kt`,
-      content: ktorRoutes(entity),
+      content: ktorRoutes(entity, mysql),
     });
     files.push({
       path: `src/test/kotlin/${toPascal(entity.name)}RouteTest.kt`,
@@ -46,16 +64,25 @@ function ktorFiles(
     });
   }
 
-  // suppress unused-variable warnings for endpoints — they inform the health route comment
-  void endpoints;
-
   return files;
 }
 
 // ─── build.gradle.kts ────────────────────────────────────────────────────────
 
-function ktorBuildGradle(safeName: string): string {
+function ktorBuildGradle(safeName: string, withAuth = false, mysql = false, metrics = false): string {
   void safeName;
+  const authDeps = withAuth
+    ? `    // JWT verification against the provider's JWKS (see Auth.kt).
+    implementation("io.ktor:ktor-server-auth:\$ktor_version")
+    implementation("io.ktor:ktor-server-auth-jwt:\$ktor_version")
+`
+    : "";
+  const metricsDeps = metrics
+    ? `    // Prometheus metrics at /metrics.
+    implementation("io.ktor:ktor-server-metrics-micrometer:\$ktor_version")
+    implementation("io.micrometer:micrometer-registry-prometheus:1.12.5")
+`
+    : "";
   return `plugins {
     kotlin("jvm") version "2.0.21"
     kotlin("plugin.serialization") version "2.0.21"
@@ -81,10 +108,10 @@ dependencies {
     implementation("org.jetbrains.exposed:exposed-dao:\$exposed_version")
     implementation("org.jetbrains.exposed:exposed-jdbc:\$exposed_version")
     implementation("org.jetbrains.exposed:exposed-java-time:\$exposed_version")
-    implementation("org.postgresql:postgresql:42.7.4")
+    implementation("${mysql ? "com.mysql:mysql-connector-j:8.4.0" : "org.postgresql:postgresql:42.7.4"}")
     implementation("com.zaxxer:HikariCP:5.1.0")
     implementation("ch.qos.logback:logback-classic:1.5.8")
-    testImplementation("io.ktor:ktor-server-test-host:\$ktor_version")
+${authDeps}${metricsDeps}    testImplementation("io.ktor:ktor-server-test-host:\$ktor_version")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.0.21")
 }
 `;
@@ -113,14 +140,38 @@ ENTRYPOINT ["java", "-jar", "app.jar"]
 
 // ─── Application.kt ──────────────────────────────────────────────────────────
 
-function ktorApplication(entities: Entity[]): string {
-  const routeCalls = entities
-    .map((e) => `            ${toCamel(e.name)}Routes()`)
-    .join("\n");
+function ktorApplication(entities: Entity[], stubs: Endpoint[], withAuth: boolean, metrics: boolean): string {
+  const stub = (e: Endpoint, indent: string) => {
+    const fn = ["get", "post", "put", "patch", "delete"].includes(e.method.toLowerCase()) ? e.method.toLowerCase() : "get";
+    return `${indent}${fn}(${JSON.stringify(springPath(e.path))}) { call.respond(mapOf("op" to "${e.method} ${e.path}")) }`;
+  };
+  const entityCalls = (indent: string) => entities.map((e) => `${indent}${toCamel(e.name)}Routes()`);
 
-  const routeCallsBlock = routeCalls
-    ? `\n${routeCalls}`
-    : "";
+  const lines: string[] = [];
+  lines.push(...stubs.filter((e) => !(withAuth && e.auth)).map((e) => stub(e, "            ")));
+  if (withAuth) {
+    const inner = [
+      ...stubs.filter((e) => e.auth).map((e) => stub(e, "                ")),
+      ...entityCalls("                "),
+    ];
+    if (inner.length > 0) {
+      lines.push(`            authenticate("auth-jwt") {\n${inner.join("\n")}\n            }`);
+    }
+  } else {
+    lines.push(...entityCalls("            "));
+  }
+  if (metrics) {
+    lines.push(`            get("/metrics") { call.respond(appMicrometerRegistry.scrape()) }`);
+  }
+  const routeCallsBlock = lines.length > 0 ? `\n${lines.join("\n")}` : "";
+  const imports = [
+    withAuth ? "import io.ktor.server.auth.*" : "",
+    metrics ? "import io.ktor.server.metrics.micrometer.*\nimport io.micrometer.prometheus.PrometheusConfig\nimport io.micrometer.prometheus.PrometheusMeterRegistry" : "",
+  ].filter(Boolean).map((l) => l + "\n").join("");
+  const installs = [
+    withAuth ? "        configureAuth()" : "",
+    metrics ? "        install(MicrometerMetrics) { registry = appMicrometerRegistry }" : "",
+  ].filter(Boolean).map((l) => l + "\n").join("");
 
   return `import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
@@ -129,15 +180,15 @@ import io.ktor.server.netty.*
 import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.routing.*
 import io.ktor.server.response.*
-import kotlinx.serialization.json.Json
-
+${imports}import kotlinx.serialization.json.Json
+${metrics ? "\nval appMicrometerRegistry = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)\n" : ""}
 fun main() {
     initDatabase()
     embeddedServer(Netty, port = System.getenv("PORT")?.toIntOrNull() ?: 8080) {
         install(ContentNegotiation) {
             json(Json { ignoreUnknownKeys = true; coerceInputValues = true })
         }
-        routing {
+${installs}        routing {
             get("/health") { call.respond(mapOf("ok" to true)) }${routeCallsBlock}
         }
     }.start(wait = true)
@@ -147,7 +198,7 @@ fun main() {
 
 // ─── Database.kt ─────────────────────────────────────────────────────────────
 
-function ktorDatabase(appName: string, entities: Entity[]): string {
+function ktorDatabase(appName: string, entities: Entity[], mysql = false): string {
   const tableList = entities.map((e) => toPascal(e.name) + "s").join(", ");
   const schemaArg = tableList ? tableList : "/* no tables */";
 
@@ -158,12 +209,12 @@ import org.jetbrains.exposed.sql.SchemaUtils
 import org.jetbrains.exposed.sql.transactions.transaction
 
 /**
- * Connect to Postgres with retry-on-startup. Kubernetes pods often boot
+ * Connect to the database with retry-on-startup. Kubernetes pods often boot
  * before the DB accepts connections; HikariCP would otherwise fail fast
  * and crash the app, triggering a pod restart loop.
  */
 fun initDatabase() {
-    val url = System.getenv("DATABASE_URL") ?: "jdbc:postgresql://localhost:5432/${appName}"
+    val url = System.getenv("DATABASE_URL") ?: "${mysql ? `jdbc:mysql://localhost:3306/${appName}` : `jdbc:postgresql://localhost:5432/${appName}`}"
     val config = HikariConfig().apply {
         jdbcUrl = url
         maximumPoolSize = 20
@@ -192,6 +243,43 @@ fun initDatabase() {
         }
     }
     throw IllegalStateException("db: could not connect after retries", lastErr)
+}
+`;
+}
+
+// ─── Auth.kt ─────────────────────────────────────────────────────────────────
+
+function ktorAuth(): string {
+  return `import com.auth0.jwk.JwkProviderBuilder
+import io.ktor.server.application.*
+import io.ktor.server.auth.*
+import io.ktor.server.auth.jwt.*
+import java.net.URI
+import java.util.concurrent.TimeUnit
+
+/**
+ * Verifies Bearer JWTs against the provider's JWKS (AUTH_JWKS_URL): signature,
+ * exp, iss (AUTH_ISSUER) and — when set — aud (AUTH_AUDIENCE). Protected
+ * routes sit inside \`authenticate("auth-jwt") { ... }\`.
+ */
+fun Application.configureAuth() {
+    val issuer = requireNotNull(System.getenv("AUTH_ISSUER")) { "AUTH_ISSUER must be set" }
+    val jwksUrl = requireNotNull(System.getenv("AUTH_JWKS_URL")) { "AUTH_JWKS_URL must be set" }
+    val audience = System.getenv("AUTH_AUDIENCE")?.takeIf { it.isNotBlank() }
+    val jwkProvider = JwkProviderBuilder(URI(jwksUrl).toURL())
+        .cached(10, 24, TimeUnit.HOURS)
+        .rateLimited(10, 1, TimeUnit.MINUTES)
+        .build()
+
+    install(Authentication) {
+        jwt("auth-jwt") {
+            verifier(jwkProvider, issuer) {
+                acceptLeeway(3)
+                if (audience != null) withAudience(audience)
+            }
+            validate { credential -> JWTPrincipal(credential.payload) }
+        }
+    }
 }
 `;
 }
@@ -343,7 +431,7 @@ ${rowExtractLines},
 
 // ─── routes/{snake}Routes.kt ──────────────────────────────────────────────────
 
-function ktorRoutes(entity: Entity): string {
+function ktorRoutes(entity: Entity, mysql = false): string {
   const pascal = toPascal(entity.name);
   const camelFn = toCamel(entity.name);
   const kebab = toKebab(entity.name);
@@ -403,9 +491,9 @@ fun Route.${camelFn}Routes() {
         post {
             val body = call.receive<Create${pascal}>()
             val item = transaction {
-                ${tableObj}.insertReturning {
+                ${tableObj}.${mysql ? "insert" : "insertReturning"} {
 ${insertBlock}
-                }.single().to${pascal}()
+                }${mysql ? ".resultedValues!!" : ""}.single().to${pascal}() // MySQL has no RETURNING
             }
             call.respond(HttpStatusCode.Created, item)
         }
@@ -501,8 +589,10 @@ function springKtFiles(
   const files: GeneratedFile[] = [];
   const anyProtected = endpoints.some((e) => e.auth);
   const withAuth = needsAuth(config, anyProtected);
+  const mysql = isMysql(config.database);
+  const metrics = config.monitoring === "grafana";
 
-  files.push({ path: "build.gradle.kts", content: springKtBuildGradle(safe, withAuth) });
+  files.push({ path: "build.gradle.kts", content: springKtBuildGradle(safe, withAuth, mysql, metrics) });
   files.push({ path: "settings.gradle.kts", content: `rootProject.name = "${safe}"\n` });
   files.push({ path: "Dockerfile", content: springKtDockerfile() });
   files.push({
@@ -530,7 +620,7 @@ function springKtFiles(
   // that wires the OAuth2 resource server when auth is enabled.
   files.push({
     path: "src/main/resources/application.properties",
-    content: springKtAppProperties(safe, withAuth),
+    content: springKtAppProperties(safe, withAuth, mysql, metrics),
   });
 
   if (withAuth) {
@@ -565,8 +655,13 @@ function springKtFiles(
     });
   }
 
-  // suppress unused-variable warning for endpoints
-  void endpoints;
+  const stubs = stubEndpoints(endpoints, entities);
+  if (stubs.length > 0) {
+    files.push({
+      path: `src/main/kotlin/${pkgPath(pkg)}/ApiController.kt`,
+      content: springKtApiController(pkg, stubs),
+    });
+  }
 
   return files;
 }
@@ -575,7 +670,13 @@ function pkgPath(pkg: string): string {
   return pkg.replace(/\./g, "/");
 }
 
-function springKtBuildGradle(appName: string, withAuth = false): string {
+function springKtBuildGradle(appName: string, withAuth = false, mysql = false, metrics = false): string {
+  const metricsDeps = metrics
+    ? `    // Prometheus metrics at /actuator/prometheus.
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
+    implementation("io.micrometer:micrometer-registry-prometheus")
+`
+    : "";
   void appName;
   const authDeps = withAuth
     ? `    // OAuth2 Resource Server — validates inbound JWTs against the configured
@@ -602,10 +703,10 @@ dependencies {
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     // Flyway auto-runs migrations from src/main/resources/db/migration/ on startup.
     implementation("org.flywaydb:flyway-core")
-    implementation("org.flywaydb:flyway-database-postgresql")
+    implementation("org.flywaydb:${mysql ? "flyway-mysql" : "flyway-database-postgresql"}")
     // JSON logging — logstash-logback-encoder hooks into Spring's Logback.
     implementation("net.logstash.logback:logstash-logback-encoder:8.0")
-${authDeps}    runtimeOnly("org.postgresql:postgresql:42.7.4")
+${authDeps}${metricsDeps}    runtimeOnly("${mysql ? "com.mysql:mysql-connector-j" : "org.postgresql:postgresql:42.7.4"}")
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("com.h2database:h2")
 }
@@ -621,7 +722,13 @@ tasks.withType<Test> { useJUnitPlatform() }
 `;
 }
 
-function springKtAppProperties(appName: string, withAuth = false): string {
+function springKtAppProperties(appName: string, withAuth = false, mysql = false, metrics = false): string {
+  const metricsProps = metrics
+    ? `
+# Prometheus scrape endpoint: /actuator/prometheus
+management.endpoints.web.exposure.include=health,prometheus
+`
+    : "";
   const authProps = withAuth
     ? `
 # ─── OAuth2 Resource Server ──────────────────────────────────────────────────
@@ -631,9 +738,11 @@ auth.expected-audience=\${AUTH_AUDIENCE:}
 `
     : "";
   return `spring.application.name=${appName}
-spring.datasource.url=\${DATABASE_URL:jdbc:postgresql://localhost:5432/${appName}}
-spring.datasource.driver-class-name=org.postgresql.Driver
-spring.jpa.hibernate.ddl-auto=validate
+spring.datasource.url=\${DATABASE_URL:${mysql ? `jdbc:mysql://localhost:3306/${appName}` : `jdbc:postgresql://localhost:5432/${appName}`}}
+spring.datasource.driver-class-name=${mysql ? "com.mysql.cj.jdbc.Driver" : "org.postgresql.Driver"}
+spring.jpa.hibernate.ddl-auto=validate${mysql ? `
+# Migrations store UUIDs as CHAR(36); Hibernate defaults to BINARY(16) on MySQL.
+spring.jpa.properties.hibernate.type.preferred_uuid_jdbc_type=CHAR` : ""}
 spring.jpa.show-sql=false
 
 spring.datasource.hikari.maximum-pool-size=20
@@ -642,8 +751,25 @@ spring.datasource.hikari.connection-timeout=10000
 
 spring.flyway.enabled=true
 spring.flyway.baseline-on-migrate=true
-${authProps}
+${authProps}${metricsProps}
 server.port=\${PORT:8080}
+`;
+}
+
+function springKtApiController(pkg: string, endpoints: Endpoint[]): string {
+  const methods = endpoints.map((e) =>
+    `    @${methodAnnotation(e.method)}(${JSON.stringify(springPath(e.path))})
+    fun ${handlerMethodName(e)}(): Map<String, Any> = mapOf("ok" to true, "op" to "${e.method} ${e.path}")`
+  ).join("\n\n");
+  return `package ${pkg}
+
+import org.springframework.web.bind.annotation.*
+
+@RestController
+class ApiController {
+
+${methods}
+}
 `;
 }
 

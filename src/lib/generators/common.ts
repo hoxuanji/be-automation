@@ -16,6 +16,42 @@ const languageMeta: Record<
   kotlin: { runCommand: "./gradlew run", testCommand: "./gradlew test", devCommand: "./gradlew run", installCommand: "./gradlew dependencies" },
 };
 
+// Languages whose generators wire tracing (OTLP), rate limiting and the
+// selected monitoring SDK into the app. Rust/Java/Kotlin only get what their
+// own generators emit (Prometheus metrics for `grafana`), so the README must
+// not claim more for them.
+const hasAppObservability = (l: StackConfig["language"]) => l === "go" || l === "typescript" || l === "python";
+
+const isRedisLike = (cache: string) => cache === "redis" || cache === "upstash" || cache === "dragonfly";
+const isJvm = (l: StackConfig["language"]) => l === "java" || l === "kotlin";
+
+// Where Prometheus should scrape each framework's metrics endpoint.
+function metricsPath(config: StackConfig): string {
+  if (config.framework === "spring" || config.framework === "spring-kt") return "/actuator/prometheus";
+  if (config.framework === "quarkus") return "/q/metrics";
+  return "/metrics";
+}
+
+// DATABASE_URL in the shape each runtime's driver expects. JVM stacks need a
+// JDBC URL (credentials as query params); everyone else takes the native URL.
+// `host` lets docker-compose point at the service name instead of localhost.
+function databaseUrl(config: StackConfig, host = "localhost"): string | null {
+  const db = safeName(config.name);
+  const jvm = isJvm(config.language);
+  if (/postgres|neon|supabase/.test(config.database)) {
+    return jvm ? `jdbc:postgresql://${host}:5432/${db}?user=app&password=app` : `postgres://app:app@${host}:5432/${db}`;
+  }
+  if (config.database === "cockroach") {
+    return jvm
+      ? `jdbc:postgresql://${host}:26257/${db}?user=root&sslmode=disable`
+      : `postgres://root@${host}:26257/${db}?sslmode=disable`;
+  }
+  if (config.database === "mysql" || config.database === "planetscale") {
+    return jvm ? `jdbc:mysql://${host}:3306/${db}?user=app&password=app` : `mysql://app:app@${host}:3306/${db}`;
+  }
+  return null;
+}
+
 const langEmoji: Record<StackConfig["language"], string> = {
   go: "Go",
   typescript: "TypeScript",
@@ -78,12 +114,27 @@ export function commonFiles(
         content: k8sPDB(config),
       });
     }
-    if (config.autoscale) {
+    // `vertical` scaling right-sizes pods via a VPA instead of adding replicas;
+    // HPA + VPA both acting on CPU fight each other, so emit one or the other.
+    if (config.autoscale && config.scaling === "vertical") {
+      files.push({
+        path: "deploy/k8s/vpa.yaml",
+        content: k8sVPA(config),
+      });
+    } else if (config.autoscale) {
       files.push({
         path: "deploy/k8s/hpa.yaml",
         content: k8sHPA(config),
       });
     }
+  }
+
+  if (config.deployment === "aws") {
+    files.push({ path: "deploy/aws/task-definition.json", content: ecsTaskDefinition(config) });
+  } else if (config.deployment === "gcp") {
+    files.push({ path: "deploy/gcp/service.yaml", content: cloudRunService(config) });
+  } else if (config.deployment === "azure") {
+    files.push({ path: "deploy/azure/containerapp.yaml", content: azureContainerApp(config) });
   }
 
   if (config.helm) {
@@ -103,15 +154,27 @@ export function commonFiles(
       path: "deploy/helm/templates/service.yaml",
       content: helmServiceTemplate(),
     });
+    files.push({
+      path: "deploy/helm/templates/hpa.yaml",
+      content: helmHpaTemplate(),
+    });
   }
 
   if (gitConfig) {
     files.push(...gitWorkflowFiles(config, gitConfig));
-  } else {
+  } else if (config.cicd !== "gitlab-ci" && config.cicd !== "circleci") {
     files.push({
       path: ".github/workflows/ci.yml",
       content: ciWorkflow(config),
     });
+  }
+  if (config.cicd === "gitlab-ci") {
+    files.push({ path: ".gitlab-ci.yml", content: gitlabCi(config) });
+  } else if (config.cicd === "circleci") {
+    files.push({ path: ".circleci/config.yml", content: circleCi(config) });
+  } else if (config.cicd === "argo" && (config.kubernetes || config.helm)) {
+    // Argo CD is CD only — GitHub Actions (above) still builds + pushes the image.
+    files.push({ path: "deploy/argocd/application.yaml", content: argoApplication(config) });
   }
 
   files.push({
@@ -124,13 +187,13 @@ export function commonFiles(
     content: postmanCollection(config, endpoints),
   });
 
-  if (config.monitoring === "prometheus") {
-    files.push({ path: "deploy/prometheus.yml", content: prometheusConfig(name) });
+  if (config.monitoring === "grafana") {
+    files.push({ path: "deploy/prometheus.yml", content: prometheusConfig(name, metricsPath(config)) });
+    files.push({ path: "deploy/grafana/datasource.yml", content: grafanaDatasource() });
   }
 
-  if (config.monitoring === "grafana") {
-    files.push({ path: "deploy/prometheus.yml", content: prometheusConfig(name) });
-    files.push({ path: "deploy/grafana/datasource.yml", content: grafanaDatasource() });
+  if (config.monitoring === "otel") {
+    files.push({ path: "deploy/otel-collector.yaml", content: otelCollectorConfig() });
   }
 
   if (config.monitoring === "datadog") {
@@ -253,14 +316,73 @@ ${apiSection}
 
 Target: **${config.deployment}** · Region: \`${config.region}\` · Baseline replicas: ${config.replicas}${config.autoscale ? " (autoscaling enabled)" : ""}.
 
-- Dockerfile and docker-compose at the repo root
-- Kubernetes manifests under \`deploy/k8s/\`${config.helm ? "\n- Helm chart under `deploy/helm/`" : ""}
-- CI wired for ${config.cicd} at \`.github/workflows/ci.yml\`
+${deployBullets(config).join("\n")}
 
 ${authReadmeSection(config)}## Observability
 
-${config.monitoring} is wired in with sensible defaults.${config.tracing ? " OpenTelemetry traces are exported via OTLP." : ""}${config.audit ? " Audit logs are emitted for every mutating request." : ""}
+${observabilityClaims(config).join("\n")}
 `;
+}
+
+function deployBullets(config: StackConfig): string[] {
+  const b: string[] = [];
+  if (config.docker) b.push("- Dockerfile and docker-compose at the repo root");
+  if (config.kubernetes) b.push("- Kubernetes manifests under `deploy/k8s/`");
+  if (config.helm) b.push("- Helm chart under `deploy/helm/`");
+  if (config.deployment === "aws") b.push("- ECS Fargate task definition at `deploy/aws/task-definition.json`");
+  if (config.deployment === "gcp") b.push("- Cloud Run service at `deploy/gcp/service.yaml`");
+  if (config.deployment === "azure") b.push("- Azure Container App at `deploy/azure/containerapp.yaml`");
+  b.push(`- CI: ${ciLocation(config)}`);
+  if (config.cicd === "argo" && (config.kubernetes || config.helm)) b.push("- Argo CD Application at `deploy/argocd/application.yaml`");
+  return b;
+}
+
+function ciLocation(config: StackConfig): string {
+  if (config.cicd === "gitlab-ci") return "GitLab CI at `.gitlab-ci.yml` (test + image push to the GitLab registry)";
+  if (config.cicd === "circleci") return "CircleCI at `.circleci/config.yml`";
+  return "GitHub Actions under `.github/workflows/`";
+}
+
+// Only claim what the generated code actually does. Go/TS/Python wire the
+// monitoring SDK, OTLP tracing and rate limiting themselves; Rust/Java/Kotlin
+// only expose Prometheus metrics (for `grafana`).
+function observabilityClaims(config: StackConfig): string[] {
+  const lang = config.language;
+  const full = hasAppObservability(lang);
+  const out: string[] = [];
+  switch (config.monitoring) {
+    case "grafana":
+      out.push(`- Prometheus metrics at \`${metricsPath(config)}\`; \`deploy/prometheus.yml\` + a Grafana datasource are included${config.docker ? " and run via docker compose (Grafana on :3000)" : ""}.`);
+      break;
+    case "datadog":
+      out.push(full
+        ? "- Datadog tracer initialised at startup; agent setup in `SETUP_MONITORING.md`."
+        : "- Datadog: agent config and setup steps in `SETUP_MONITORING.md` — the tracer is not wired into the code yet.");
+      break;
+    case "sentry":
+      out.push(full
+        ? "- Sentry SDK initialised from `SENTRY_DSN`."
+        : "- Sentry: setup steps in `SETUP_MONITORING.md` — the SDK is not wired into the code yet.");
+      break;
+    case "newrelic":
+      out.push("- New Relic: `deploy/newrelic.yml` is provided; attach the New Relic agent for your runtime to use it.");
+      break;
+    case "otel":
+      out.push(`- OpenTelemetry Collector config at \`deploy/otel-collector.yaml\`${config.docker ? " (runs in docker compose, OTLP on :4317/:4318)" : ""}.`);
+      break;
+  }
+  if (config.tracing) {
+    out.push(full
+      ? "- OpenTelemetry traces are exported via OTLP to `OTEL_EXPORTER_OTLP_ENDPOINT`."
+      : `- Tracing: not generated for ${langEmoji[lang]} yet.`);
+  }
+  if (config.rateLimit) {
+    out.push(full ? "- Per-client rate limiting is enabled." : `- Rate limiting: not generated for ${langEmoji[lang]} yet.`);
+  }
+  if (config.audit && (lang === "go" || lang === "typescript")) {
+    out.push("- Audit logs are emitted for every mutating request.");
+  }
+  return out.length > 0 ? out : ["- No monitoring provider selected."];
 }
 
 function authReadmeSection(config: StackConfig): string {
@@ -283,9 +405,15 @@ function authReadmeSection(config: StackConfig): string {
         ? `Generated in \`src/auth/jwt.guard.ts\`. Apply via \`@UseGuards(JwtAuthGuard)\` on controllers or globally in \`main.ts\`.`
         : `Generated in \`src/middleware/auth.ts\`. Apply via \`app.use(authRequired)\` or per-route as a middleware argument.`,
     python: `Generated in \`app/auth.py\`. Add \`claims: dict = Depends(auth_required)\` to any FastAPI route handler.`,
-    rust: `Rust stacks currently ship without a generated JWT middleware — use a crate like \`axum-jwks\` or \`oauth2\` and gate routes with it.`,
-    java: `Spring Security with \`spring-boot-starter-oauth2-resource-server\` is configured in \`SecurityConfig.java\`. Everything except \`/health\` requires a valid JWT.`,
-    kotlin: `Spring Security with \`spring-boot-starter-oauth2-resource-server\` is configured in \`SecurityConfig.kt\`. Everything except \`/health\` requires a valid JWT.`,
+    rust: `Generated in \`src/auth.rs\` (jsonwebtoken + JWKS fetched from \`AUTH_JWKS_URL\`). Routes tagged \`auth: true\` and all entity CRUD routes require a valid Bearer token.`,
+    java:
+      config.framework === "quarkus"
+        ? `SmallRye JWT (\`quarkus-smallrye-jwt\`) verifies tokens against \`AUTH_JWKS_URL\` (RS256). Resources and routes tagged \`auth: true\` carry \`@Authenticated\`.`
+        : `Spring Security with \`spring-boot-starter-oauth2-resource-server\` is configured in \`SecurityConfig.java\`. Everything except \`/health\` requires a valid JWT.`,
+    kotlin:
+      config.framework === "ktor"
+        ? `Generated in \`src/main/kotlin/Auth.kt\` (\`ktor-server-auth-jwt\` with a cached JWKS provider). Routes tagged \`auth: true\` and all entity routes sit inside \`authenticate("auth-jwt")\`.`
+        : `Spring Security with \`spring-boot-starter-oauth2-resource-server\` is configured in \`SecurityConfig.kt\`. Everything except \`/health\` requires a valid JWT.`,
   };
 
   return `## Authentication
@@ -333,28 +461,7 @@ function quickstart(config: StackConfig): string {
     kotlin: `./gradlew flywayMigrate`,
   };
 
-  const dbDependencies: string[] = [];
-  if (/postgres|neon|supabase|cockroach/.test(config.database)) {
-    dbDependencies.push("db");
-  } else if (config.database === "mysql" || config.database === "planetscale") {
-    dbDependencies.push("db");
-  } else if (config.database === "mongodb") {
-    dbDependencies.push("db");
-  }
-
-  if (config.cache === "redis" || config.cache === "upstash" || config.cache === "dragonfly") {
-    dbDependencies.push("cache");
-  } else if (config.cache === "memcached") {
-    dbDependencies.push("cache");
-  }
-
-  if (config.queue === "rabbitmq") {
-    dbDependencies.push("rabbit");
-  } else if (config.queue === "kafka") {
-    dbDependencies.push("kafka");
-  } else if (config.queue === "nats") {
-    dbDependencies.push("nats");
-  }
+  const dbDependencies = composeServices(config).filter((s) => s.gate !== null).map((s) => s.name);
 
   const step3Docker = config.docker && dbDependencies.length > 0
     ? `\`\`\`bash
@@ -470,30 +577,35 @@ ${config.language === "typescript"
 function buildEnvVarDocs(config: StackConfig): string {
   const lines: string[] = [];
 
-  if (/postgres|neon|supabase/.test(config.database)) {
-    lines.push(`| \`DATABASE_URL\` | \`postgres://user:pass@localhost:5432/${safeName(config.name)}\` | Connection string for your PostgreSQL database |`);
-  } else if (config.database === "cockroach") {
-    lines.push(`| \`DATABASE_URL\` | \`postgres://root@localhost:26257/${safeName(config.name)}?sslmode=disable\` | CockroachDB connection string |`);
-  } else if (config.database === "mysql" || config.database === "planetscale") {
-    lines.push(`| \`DATABASE_URL\` | \`mysql://user:pass@localhost:3306/${safeName(config.name)}\` | MySQL connection string |`);
+  const dbUrl = databaseUrl(config);
+  if (dbUrl) {
+    lines.push(`| \`DATABASE_URL\` | \`${dbUrl}\` | ${config.database} connection string${isJvm(config.language) ? " (JDBC format)" : ""} |`);
+  } else if (config.database === "dynamodb") {
+    lines.push(`| \`AWS_ENDPOINT_URL_DYNAMODB\` | \`http://localhost:8000\` | DynamoDB Local endpoint — remove in production to use real AWS |`);
   } else if (config.database === "mongodb") {
     lines.push(`| \`MONGODB_URI\` | \`mongodb://localhost:27017/${safeName(config.name)}\` | MongoDB connection URI |`);
   } else if (config.database === "sqlite") {
     lines.push(`| \`DATABASE_URL\` | \`file:./app.db\` | Path to the SQLite file |`);
   }
 
-  if (config.cache === "redis" || config.cache === "upstash") {
+  if (isRedisLike(config.cache) || config.queue === "bullmq") {
     lines.push(`| \`REDIS_URL\` | \`redis://localhost:6379\` | Redis connection URL. For Upstash, get from the Upstash console |`);
   } else if (config.cache === "memcached") {
     lines.push(`| \`MEMCACHED_URL\` | \`localhost:11211\` | Memcached server address |`);
   }
 
   if (config.queue === "rabbitmq") {
-    lines.push(`| \`RABBITMQ_URL\` | \`amqp://guest:guest@localhost:5672\` | RabbitMQ AMQP connection URL |`);
+    lines.push(`| \`RABBITMQ_URL\` | \`amqp://app:app@localhost:5672\` | RabbitMQ AMQP connection URL |`);
   } else if (config.queue === "kafka" || config.queue === "redpanda") {
     lines.push(`| \`KAFKA_BROKERS\` | \`localhost:9092\` | Comma-separated list of Kafka broker addresses |`);
   } else if (config.queue === "nats") {
     lines.push(`| \`NATS_URL\` | \`nats://localhost:4222\` | NATS server URL |`);
+  } else if (config.queue === "sqs") {
+    lines.push(`| \`AWS_ENDPOINT_URL_SQS\` | \`http://localhost:9324\` | ElasticMQ (local SQS) endpoint — remove in production |`);
+  }
+
+  if (config.tracing && hasAppObservability(config.language)) {
+    lines.push(`| \`OTEL_EXPORTER_OTLP_ENDPOINT\` | \`http://localhost:4318\` | OTLP/HTTP endpoint that receives traces |`);
   }
 
   const authSpec = authProviderSpec(config);
@@ -805,21 +917,26 @@ aws apprunner create-service \\
 
 ### 3b. Deploy via ECS Fargate (more control)
 
-1. Create an ECS cluster: \`aws ecs create-cluster --cluster-name ${name}\`
-2. Register a task definition pointing to your image.
-3. Create a service with desired count \`${config.replicas}\`.
+The task definition lives at \`deploy/aws/task-definition.json\`. Secrets are read from SSM Parameter Store
+under \`/${name}/<VAR>\`:
 
-Refer to the [ECS Fargate docs](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/getting-started-fargate.html) for the full task definition JSON.
+\`\`\`bash
+export AWS_ACCOUNT_ID=$ACCOUNT
+${envVarList.filter((v) => v !== "APP_NAME" && v !== "PORT").map((v) => `aws ssm put-parameter --region ${config.region} --type SecureString --name /${name}/${v} --value "<value>"`).join("\n")}
 
-### 4. Set environment variables
+aws logs create-log-group --region ${config.region} --log-group-name /ecs/${name}
+envsubst < deploy/aws/task-definition.json > /tmp/task-definition.json
+aws ecs register-task-definition --region ${config.region} --cli-input-json file:///tmp/task-definition.json
 
-Use AWS Secrets Manager or Parameter Store, then reference them in your task definition's \`secrets\` / \`environment\` blocks:
-
-${envVarList.map((v) => `- \`${v}\``).join("\n")}
+aws ecs create-cluster --region ${config.region} --cluster-name ${name}
+aws ecs create-service --region ${config.region} --cluster ${name} --service-name ${name} \\
+  --task-definition ${name} --desired-count ${config.replicas} --launch-type FARGATE \\
+  --network-configuration "awsvpcConfiguration={subnets=[subnet-XXXX],securityGroups=[sg-XXXX],assignPublicIp=ENABLED}"
+\`\`\`
 
 ## Notes
 
-- Attach the \`AmazonECR_ReadOnly\` policy to your task execution role.
+- \`ecsTaskExecutionRole\` needs \`AmazonECSTaskExecutionRolePolicy\` plus \`ssm:GetParameters\` on \`arn:aws:ssm:${config.region}:$AWS_ACCOUNT_ID:parameter/${name}/*\`.
 - Use an Application Load Balancer in front of Fargate for HTTPS termination.
 `;
 
@@ -859,16 +976,19 @@ docker tag ${name}:latest $REGISTRY/${name}:latest
 docker push $REGISTRY/${name}:latest
 \`\`\`
 
-### 4. Deploy to Cloud Run
+### 4. Create secrets and deploy to Cloud Run
+
+The service is defined in \`deploy/gcp/service.yaml\` (min ${minInstances(config)} / max ${maxInstances(config)} instances). Each secret env var reads
+the \`latest\` version of a Secret Manager secret:
 
 \`\`\`bash
-gcloud run deploy ${name} \\
-  --image $REGISTRY/${name}:latest \\
-  --platform managed \\
-  --region ${config.region} \\
-  --allow-unauthenticated \\
-  --min-instances ${config.replicas} \\
-  --set-env-vars="${envVarList.map((v) => `${v}=<value>`).join(",")}"
+${envVarList.filter((v) => v !== "APP_NAME" && v !== "PORT").map((v) => `printf '%s' "<value>" | gcloud secrets create ${secretName(name, v)} --data-file=-`).join("\n")}
+
+export GCP_PROJECT_ID=$PROJECT
+envsubst < deploy/gcp/service.yaml > /tmp/service.yaml
+gcloud run services replace /tmp/service.yaml --region ${config.region}
+gcloud run services add-iam-policy-binding ${name} --region ${config.region} \\
+  --member=allUsers --role=roles/run.invoker
 \`\`\`
 
 ### 5. Verify
@@ -879,8 +999,7 @@ gcloud run services describe ${name} --region ${config.region} --format "value(s
 
 ## Notes
 
-- Use Secret Manager for secrets: \`gcloud secrets create MY_SECRET --data-file=-\`
-- Reference secrets in Cloud Run: \`--set-secrets=MY_SECRET=MY_SECRET:latest\`
+- The Cloud Run service account needs \`roles/secretmanager.secretAccessor\` on the secrets above.
 `;
 
     case "azure":
@@ -897,16 +1016,16 @@ gcloud run services describe ${name} --region ${config.region} --format "value(s
 
 \`\`\`bash
 az group create --name ${name}-rg --location ${config.region}
-az acr create --resource-group ${name}-rg --name ${name}registry --sku Basic
+az acr create --resource-group ${name}-rg --name ${acrName(name)} --sku Basic --admin-enabled true
 \`\`\`
 
 ### 2. Build and push the image
 
 \`\`\`bash
-az acr login --name ${name}registry
+az acr login --name ${acrName(name)}
 docker build -t ${name}:latest .
-docker tag ${name}:latest ${name}registry.azurecr.io/${name}:latest
-docker push ${name}registry.azurecr.io/${name}:latest
+docker tag ${name}:latest ${acrName(name)}.azurecr.io/${name}:latest
+docker push ${acrName(name)}.azurecr.io/${name}:latest
 \`\`\`
 
 ### 3. Create a Container Apps environment
@@ -920,23 +1039,15 @@ az containerapp env create \\
 
 ### 4. Deploy the Container App
 
-\`\`\`bash
-az containerapp create \\
-  --name ${name} \\
-  --resource-group ${name}-rg \\
-  --environment ${name}-env \\
-  --image ${name}registry.azurecr.io/${name}:latest \\
-  --target-port 8080 \\
-  --ingress external \\
-  --min-replicas ${config.replicas} \\
-  --registry-server ${name}registry.azurecr.io
-\`\`\`
-
-### 5. Set environment variables
+\`deploy/azure/containerapp.yaml\` declares ingress, secrets and scale (min ${minInstances(config)} / max ${maxInstances(config)} replicas).
+Secret values are substituted from your shell environment, so they never land in git:
 
 \`\`\`bash
-az containerapp update --name ${name} --resource-group ${name}-rg \\
-  --set-env-vars ${envVarList.map((v) => `${v}=secretref:${v.toLowerCase()}`).join(" ")}
+set -a; . ./.env; set +a
+export AZURE_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+export ACR_PASSWORD=$(az acr credential show --name ${acrName(name)} --query "passwords[0].value" -o tsv)
+envsubst < deploy/azure/containerapp.yaml > /tmp/containerapp.yaml
+az containerapp create --name ${name} --resource-group ${name}-rg --yaml /tmp/containerapp.yaml
 \`\`\`
 
 ## Notes
@@ -1051,7 +1162,7 @@ function buildDeployEnvVarList(config: StackConfig): string[] {
     vars.push("DATABASE_URL");
   }
 
-  if (config.cache === "redis" || config.cache === "upstash") {
+  if (isRedisLike(config.cache) || config.queue === "bullmq") {
     vars.push("REDIS_URL");
   } else if (config.cache === "memcached") {
     vars.push("MEMCACHED_URL");
@@ -1063,6 +1174,10 @@ function buildDeployEnvVarList(config: StackConfig): string[] {
     vars.push("KAFKA_BROKERS");
   } else if (config.queue === "nats") {
     vars.push("NATS_URL");
+  }
+
+  if (config.tracing && hasAppObservability(config.language)) {
+    vars.push("OTEL_EXPORTER_OTLP_ENDPOINT");
   }
 
   const authSpec = authProviderSpec(config);
@@ -1104,16 +1219,18 @@ function envExample(config: StackConfig) {
         : "your local Postgres or any managed provider (Neon, Supabase, Railway)";
     lines.push(`# ─── Database (${config.database}) ───────────────────────────────────────────────────`);
     lines.push(`# DATABASE_URL — Required. PostgreSQL connection string.`);
-    lines.push(`# Format: postgres://user:password@host:5432/dbname?sslmode=require`);
+    lines.push(isJvm(config.language)
+      ? `# Format (JDBC): jdbc:postgresql://host:5432/dbname?user=u&password=p&sslmode=require`
+      : `# Format: postgres://user:password@host:5432/dbname?sslmode=require`);
     lines.push(`# Get it from: ${where}`);
-    lines.push(`DATABASE_URL=postgres://user:pass@localhost:5432/${safeName(config.name)}`);
+    lines.push(`DATABASE_URL=${databaseUrl(config)}`);
     lines.push(``);
   } else if (config.database === "cockroach") {
     lines.push(`# ─── Database (CockroachDB) ────────────────────────────────────────────────────`);
     lines.push(`# DATABASE_URL — Required. CockroachDB connection string.`);
     lines.push(`# Format: postgres://root@host:26257/dbname?sslmode=disable (local) or with certs (cloud)`);
     lines.push(`# Get it from: cockroachlabs.com → your cluster → Connect`);
-    lines.push(`DATABASE_URL=postgres://root@localhost:26257/${safeName(config.name)}?sslmode=disable`);
+    lines.push(`DATABASE_URL=${databaseUrl(config)}`);
     lines.push(``);
   } else if (config.database === "mysql" || config.database === "planetscale") {
     const where = config.database === "planetscale"
@@ -1121,9 +1238,11 @@ function envExample(config: StackConfig) {
       : "your local MySQL or a managed provider (PlanetScale, Railway)";
     lines.push(`# ─── Database (${config.database}) ───────────────────────────────────────────────────`);
     lines.push(`# DATABASE_URL — Required. MySQL connection string.`);
-    lines.push(`# Format: mysql://user:password@host:3306/dbname`);
+    lines.push(isJvm(config.language)
+      ? `# Format (JDBC): jdbc:mysql://host:3306/dbname?user=u&password=p`
+      : `# Format: mysql://user:password@host:3306/dbname`);
     lines.push(`# Get it from: ${where}`);
-    lines.push(`DATABASE_URL=mysql://user:pass@localhost:3306/${safeName(config.name)}`);
+    lines.push(`DATABASE_URL=${databaseUrl(config)}`);
     lines.push(``);
   } else if (config.database === "mongodb") {
     lines.push(`# ─── Database (MongoDB) ────────────────────────────────────────────────────────`);
@@ -1138,13 +1257,28 @@ function envExample(config: StackConfig) {
     lines.push(`# Note: SQLite is local-only; use Postgres/MySQL for production deployments.`);
     lines.push(`DATABASE_URL=file:./app.db`);
     lines.push(``);
+  } else if (config.database === "dynamodb") {
+    lines.push(`# ─── Database (DynamoDB) ───────────────────────────────────────────────────────`);
+    lines.push(`# Local development runs DynamoDB Local (docker compose up dynamodb). The AWS SDKs`);
+    lines.push(`# read AWS_ENDPOINT_URL_DYNAMODB automatically — delete it in production.`);
+    lines.push(`AWS_ENDPOINT_URL_DYNAMODB=http://localhost:8000`);
+    lines.push(``);
   }
 
-  if (config.cache === "redis" || config.cache === "upstash") {
+  if (config.database === "dynamodb" || config.queue === "sqs") {
+    lines.push(`# ─── AWS ───────────────────────────────────────────────────────────────────────`);
+    lines.push(`# Local emulators accept any credentials. Use real IAM credentials (or a role) in production.`);
+    lines.push(`AWS_REGION=${config.region}`);
+    lines.push(`AWS_ACCESS_KEY_ID=local`);
+    lines.push(`AWS_SECRET_ACCESS_KEY=local`);
+    lines.push(``);
+  }
+
+  if (isRedisLike(config.cache) || config.queue === "bullmq") {
     const where = config.cache === "upstash"
       ? "upstash.com → your database → REST API → REDIS_URL"
       : "your local Redis (brew install redis) or Upstash/Railway";
-    lines.push(`# ─── Cache (${config.cache}) ─────────────────────────────────────────────────────────`);
+    lines.push(`# ─── ${isRedisLike(config.cache) ? `Cache (${config.cache})` : "Redis (BullMQ)"} ─────────────────────────────────────────────────────────`);
     lines.push(`# REDIS_URL — Required. Redis connection string.`);
     lines.push(`# Format: redis://:password@host:6379 (or rediss:// for TLS)`);
     lines.push(`# Get it from: ${where}`);
@@ -1162,7 +1296,7 @@ function envExample(config: StackConfig) {
     lines.push(`# RABBITMQ_URL — Required. AMQP connection string.`);
     lines.push(`# Format: amqp://user:password@host:5672/vhost`);
     lines.push(`# Get it from: cloudamqp.com or run locally via docker compose up rabbit`);
-    lines.push(`RABBITMQ_URL=amqp://guest:guest@localhost:5672`);
+    lines.push(`RABBITMQ_URL=amqp://app:app@localhost:5672`);
     lines.push(``);
   } else if (config.queue === "kafka" || config.queue === "redpanda") {
     const label = config.queue === "redpanda" ? "Redpanda" : "Kafka";
@@ -1176,6 +1310,19 @@ function envExample(config: StackConfig) {
     lines.push(`# NATS_URL — Required. NATS server URL.`);
     lines.push(`# Get it from: ngs.synadia.com or run locally: docker run nats`);
     lines.push(`NATS_URL=nats://localhost:4222`);
+    lines.push(``);
+  } else if (config.queue === "sqs") {
+    lines.push(`# ─── Queue (SQS) ───────────────────────────────────────────────────────────────`);
+    lines.push(`# Local development runs ElasticMQ (docker compose up sqs). The AWS SDKs read`);
+    lines.push(`# AWS_ENDPOINT_URL_SQS automatically — delete it in production.`);
+    lines.push(`AWS_ENDPOINT_URL_SQS=http://localhost:9324`);
+    lines.push(``);
+  }
+
+  if (config.tracing && hasAppObservability(config.language)) {
+    lines.push(`# ─── Tracing (OpenTelemetry) ───────────────────────────────────────────────────`);
+    lines.push(`# OTEL_EXPORTER_OTLP_ENDPOINT — OTLP/HTTP collector base URL (traces go to /v1/traces).`);
+    lines.push(`OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`);
     lines.push(``);
   }
 
@@ -1259,47 +1406,45 @@ npm-debug.log*
   return base + langMap[language];
 }
 
-function dockerCompose(config: StackConfig) {
-  // Build `depends_on` with healthcheck gating so the API container blocks
-  // on `service_healthy` instead of `service_started`. This prevents the
-  // common "app starts before Postgres is ready, crashes, restarts" loop.
-  const deps: string[] = [];
-  if (config.database) deps.push(`      db:\n        condition: service_healthy`);
-  if (config.cache) deps.push(`      cache:\n        condition: service_healthy`);
-  if (config.queue === "rabbitmq") deps.push(`      rabbit:\n        condition: service_healthy`);
-  if (config.queue === "kafka") deps.push(`      kafka:\n        condition: service_started`);
-  if (config.queue === "nats") deps.push(`      nats:\n        condition: service_started`);
-  const dependsOn = deps.length > 0 ? `\n    depends_on:\n${deps.join("\n")}` : "";
+type ComposeService = {
+  name: string;
+  // true → api waits for `service_healthy`; false → `service_started`.
+  // null → api doesn't depend on it (observability sidecars).
+  gate: boolean | null;
+  body: string;
+  // Overrides for the api container: .env points at localhost for host-side
+  // runs, but inside compose each dependency is reachable by service name.
+  apiEnv?: Record<string, string>;
+};
 
-  const services: string[] = [
-    `  api:
-    build: .
-    ports:
-      - "8080:8080"
-    env_file: [.env]${dependsOn}
-    restart: unless-stopped`,
-  ];
+function healthcheck(test: string): string {
+  return `    healthcheck:
+      test: ${test}
+      interval: 5s
+      timeout: 3s
+      retries: 10`;
+}
 
+// Every dependency service implied by the stack. Deriving `depends_on` from
+// this list keeps the two in sync — a dependency can't be referenced without
+// a matching service.
+function composeServices(config: StackConfig): ComposeService[] {
+  const out: ComposeService[] = [];
   const dbName = safeName(config.name);
+  const dbUrl = databaseUrl(config, "db");
+  const dbEnv = dbUrl ? { DATABASE_URL: dbUrl } : undefined;
 
   if (/postgres|supabase|neon/.test(config.database)) {
-    services.push(`  db:
-    image: postgres:16-alpine
+    out.push({ name: "db", gate: true, apiEnv: dbEnv, body: `    image: postgres:16-alpine
     environment:
       POSTGRES_USER: \${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: \${POSTGRES_PASSWORD:-app}
       POSTGRES_DB: \${POSTGRES_DB:-${dbName}}
     ports: ["5432:5432"]
     volumes: [db-data:/var/lib/postgresql/data]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \${POSTGRES_USER:-app} -d \${POSTGRES_DB:-${dbName}}"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped`);
+${healthcheck(`["CMD-SHELL", "pg_isready -U \${POSTGRES_USER:-app} -d \${POSTGRES_DB:-${dbName}}"]`)}` });
   } else if (config.database === "mysql" || config.database === "planetscale") {
-    services.push(`  db:
-    image: mysql:8
+    out.push({ name: "db", gate: true, apiEnv: dbEnv, body: `    image: mysql:8
     environment:
       MYSQL_ROOT_PASSWORD: \${MYSQL_ROOT_PASSWORD:-app}
       MYSQL_DATABASE: \${MYSQL_DATABASE:-${dbName}}
@@ -1307,95 +1452,117 @@ function dockerCompose(config: StackConfig) {
       MYSQL_PASSWORD: \${MYSQL_PASSWORD:-app}
     ports: ["3306:3306"]
     volumes: [db-data:/var/lib/mysql]
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p\${MYSQL_ROOT_PASSWORD:-app}"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped`);
+${healthcheck(`["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p\${MYSQL_ROOT_PASSWORD:-app}"]`)}` });
   } else if (config.database === "mongodb") {
-    services.push(`  db:
-    image: mongo:7
+    out.push({ name: "db", gate: true, apiEnv: { MONGODB_URI: `mongodb://app:app@db:27017/${dbName}?authSource=admin` }, body: `    image: mongo:7
     environment:
       MONGO_INITDB_ROOT_USERNAME: \${MONGO_USER:-app}
       MONGO_INITDB_ROOT_PASSWORD: \${MONGO_PASSWORD:-app}
     ports: ["27017:27017"]
     volumes: [db-data:/data/db]
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped`);
+${healthcheck(`["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]`)}` });
   } else if (config.database === "cockroach") {
-    services.push(`  db:
-    image: cockroachdb/cockroach:latest-v24.3
+    out.push({ name: "db", gate: true, apiEnv: dbEnv, body: `    image: cockroachdb/cockroach:latest-v24.3
     command: start-single-node --insecure
     ports: ["26257:26257", "8081:8080"]
     volumes: [db-data:/cockroach/cockroach-data]
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health?ready=1 || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped`);
+${healthcheck(`["CMD-SHELL", "curl -fsS http://localhost:8080/health?ready=1 || exit 1"]`)}` });
+  } else if (config.database === "dynamodb") {
+    out.push({ name: "dynamodb", gate: false, apiEnv: { AWS_ENDPOINT_URL_DYNAMODB: "http://dynamodb:8000" }, body: `    image: amazon/dynamodb-local:latest
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+    ports: ["8000:8000"]` });
   }
 
+  const redisEnv = { REDIS_URL: "redis://cache:6379" };
   if (config.cache === "redis" || config.cache === "upstash") {
-    services.push(`  cache:
-    image: redis:7-alpine
+    out.push({ name: "cache", gate: true, apiEnv: redisEnv, body: `    image: redis:7-alpine
     ports: ["6379:6379"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped`);
-  } else if (config.cache === "memcached") {
-    services.push(`  cache:
-    image: memcached:1.6-alpine
-    ports: ["11211:11211"]
-    healthcheck:
-      test: ["CMD-SHELL", "echo stats | nc -w 1 localhost 11211 | grep -q uptime"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped`);
+${healthcheck(`["CMD", "redis-cli", "ping"]`)}` });
   } else if (config.cache === "dragonfly") {
-    services.push(`  cache:
-    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    out.push({ name: "cache", gate: true, apiEnv: redisEnv, body: `    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
     ports: ["6379:6379"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped`);
+${healthcheck(`["CMD", "redis-cli", "ping"]`)}` });
+  } else if (config.cache === "memcached") {
+    out.push({ name: "cache", gate: true, apiEnv: { MEMCACHED_URL: "cache:11211" }, body: `    image: memcached:1.6-alpine
+    ports: ["11211:11211"]
+${healthcheck(`["CMD-SHELL", "echo stats | nc -w 1 localhost 11211 | grep -q uptime"]`)}` });
   }
 
   if (config.queue === "rabbitmq") {
-    services.push(`  rabbit:
-    image: rabbitmq:3-management
+    // The default guest user is loopback-only, so it can't be used across
+    // containers (or through the published port) — create an app user.
+    out.push({ name: "rabbit", gate: true, apiEnv: { RABBITMQ_URL: "amqp://app:app@rabbit:5672" }, body: `    image: rabbitmq:3-management
+    environment:
+      RABBITMQ_DEFAULT_USER: app
+      RABBITMQ_DEFAULT_PASS: app
     ports: ["5672:5672", "15672:15672"]
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped`);
+${healthcheck(`["CMD", "rabbitmq-diagnostics", "-q", "ping"]`)}` });
   } else if (config.queue === "kafka") {
-    services.push(`  kafka:
-    image: redpandadata/redpanda:latest
-    command: redpanda start --overprovisioned --smp 1 --memory 512M --reserve-memory 0M --node-id 0 --check=false
-    ports: ["9092:9092"]
-    restart: unless-stopped`);
+    // Two listeners: kafka:29092 for containers, localhost:9092 for the host.
+    out.push({ name: "kafka", gate: false, apiEnv: { KAFKA_BROKERS: "kafka:29092" }, body: `    image: redpandadata/redpanda:latest
+    command: redpanda start --overprovisioned --smp 1 --memory 512M --reserve-memory 0M --node-id 0 --check=false --kafka-addr internal://0.0.0.0:29092,external://0.0.0.0:9092 --advertise-kafka-addr internal://kafka:29092,external://localhost:9092
+    ports: ["9092:9092"]` });
   } else if (config.queue === "nats") {
-    services.push(`  nats:
-    image: nats:2-alpine
+    out.push({ name: "nats", gate: false, apiEnv: { NATS_URL: "nats://nats:4222" }, body: `    image: nats:2-alpine
     command: ["-js"]
-    ports: ["4222:4222"]
-    restart: unless-stopped`);
+    ports: ["4222:4222"]` });
+  } else if (config.queue === "sqs") {
+    out.push({ name: "sqs", gate: false, apiEnv: { AWS_ENDPOINT_URL_SQS: "http://sqs:9324" }, body: `    image: softwaremill/elasticmq-native:latest
+    ports: ["9324:9324", "9325:9325"]` });
+  } else if (config.queue === "bullmq" && !isRedisLike(config.cache)) {
+    // BullMQ is Redis-backed; reuse the cache when it already speaks Redis.
+    out.push({ name: "redis", gate: true, apiEnv: { REDIS_URL: "redis://redis:6379" }, body: `    image: redis:7-alpine
+    ports: ["6379:6379"]
+${healthcheck(`["CMD", "redis-cli", "ping"]`)}` });
   }
+
+  if (config.monitoring === "grafana") {
+    out.push({ name: "prometheus", gate: null, body: `    image: prom/prometheus:v2.54.1
+    volumes: ["./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]` });
+    out.push({ name: "grafana", gate: null, body: `    image: grafana/grafana:11.2.0
+    volumes: ["./deploy/grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro"]
+    ports: ["3000:3000"]` });
+  } else if (config.monitoring === "otel") {
+    out.push({
+      name: "otel-collector",
+      gate: null,
+      apiEnv: config.tracing ? { OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318" } : undefined,
+      body: `    image: otel/opentelemetry-collector-contrib:0.111.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes: ["./deploy/otel-collector.yaml:/etc/otelcol/config.yaml:ro"]
+    ports: ["4317:4317", "4318:4318"]`,
+    });
+  }
+
+  return out;
+}
+
+function dockerCompose(config: StackConfig) {
+  const deps = composeServices(config);
+  // Healthcheck gating (`service_healthy`) keeps the API from starting before
+  // its database is ready — avoids the "crash, restart" loop on first boot.
+  const dependsOn = deps
+    .filter((s) => s.gate !== null)
+    .map((s) => `      ${s.name}:\n        condition: ${s.gate ? "service_healthy" : "service_started"}`);
+
+  const apiEnv: Record<string, string> = Object.assign({}, ...deps.map((s) => s.apiEnv ?? {}));
+  if (config.database === "dynamodb" || config.queue === "sqs") {
+    // Local emulators accept any credentials; the AWS SDKs just need them set.
+    Object.assign(apiEnv, { AWS_REGION: config.region, AWS_ACCESS_KEY_ID: "local", AWS_SECRET_ACCESS_KEY: "local" });
+  }
+  const envBlock = Object.keys(apiEnv).length > 0
+    ? `\n    environment:\n${Object.entries(apiEnv).map(([k, v]) => `      ${k}: "${v}"`).join("\n")}`
+    : "";
+
+  const api = `  api:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file: [.env]${envBlock}${dependsOn.length > 0 ? `\n    depends_on:\n${dependsOn.join("\n")}` : ""}
+    restart: unless-stopped`;
+
+  const services = [api, ...deps.map((s) => `  ${s.name}:\n${s.body}\n    restart: unless-stopped`)];
 
   return `services:
 ${services.join("\n\n")}
@@ -1635,6 +1802,7 @@ apply:
 	kubectl apply -f $(CURDIR)/deployment.yaml --namespace $(NAMESPACE)
 	kubectl apply -f $(CURDIR)/service.yaml --namespace $(NAMESPACE)
 	@test ! -f $(CURDIR)/hpa.yaml || kubectl apply -f $(CURDIR)/hpa.yaml --namespace $(NAMESPACE)
+	@test ! -f $(CURDIR)/vpa.yaml || kubectl apply -f $(CURDIR)/vpa.yaml --namespace $(NAMESPACE)
 
 rollout:
 	kubectl rollout status deployment/$(NAMESPACE) --namespace $(NAMESPACE)
@@ -1803,8 +1971,9 @@ service:
   type: ClusterIP
   port: 80
 
+# \`vertical\` scaling uses a VPA (deploy/k8s/vpa.yaml) instead of an HPA.
 autoscaling:
-  enabled: ${config.autoscale}
+  enabled: ${config.autoscale && config.scaling !== "vertical"}
   minReplicas: ${config.replicas}
   maxReplicas: ${Math.max(config.replicas * 4, 10)}
   targetCPUUtilizationPercentage: 65
@@ -1825,7 +1994,9 @@ kind: Deployment
 metadata:
   name: {{ .Release.Name }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       app: {{ .Release.Name }}
@@ -1841,6 +2012,30 @@ spec:
             - containerPort: 8080
           resources:
 {{ toYaml .Values.resources | indent 12 }}
+`;
+}
+
+function helmHpaTemplate() {
+  return `{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .Release.Name }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
 `;
 }
 
@@ -2098,9 +2293,9 @@ ${securityJob}`
           java-version: '21'
           cache: 'maven'
       - name: Test
-        run: ./mvnw -B test
+        run: mvn -B test
       - name: Build
-        run: ./mvnw -B package -DskipTests
+        run: mvn -B package -DskipTests
 ${dockerBuildPush}
 
   deploy:
@@ -2127,10 +2322,13 @@ ${securityJob}`
           distribution: 'temurin'
           java-version: '21'
           cache: 'gradle'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10'
       - name: Test
-        run: ./gradlew test
+        run: gradle test
       - name: Build
-        run: ./gradlew build -x test
+        run: gradle build -x test
 ${dockerBuildPush}
 
   deploy:
@@ -2145,7 +2343,7 @@ ${securityJob}`
   );
 }
 
-function prometheusConfig(name: string) {
+function prometheusConfig(name: string, path: string) {
   return `global:
   scrape_interval: 15s
 
@@ -2153,7 +2351,7 @@ scrape_configs:
   - job_name: '${name}'
     static_configs:
       - targets: ['api:8080']
-    metrics_path: '/metrics'
+    metrics_path: '${path}'
 `;
 }
 
@@ -2463,4 +2661,342 @@ function postmanCollection(config: StackConfig, endpoints: Endpoint[]): string {
   };
 
   return JSON.stringify(collection, null, 2) + "\n";
+}
+
+// ─── Scaling helpers ─────────────────────────────────────────────────────────
+
+// `serverless` scales to zero on platforms that support it; everything else
+// keeps the configured baseline warm.
+function minInstances(config: StackConfig): number {
+  return config.scaling === "serverless" ? 0 : config.replicas;
+}
+
+function maxInstances(config: StackConfig): number {
+  return config.autoscale ? Math.max(config.replicas * 4, 10) : Math.max(config.replicas, 1);
+}
+
+// Non-secret runtime vars; everything else from buildDeployEnvVarList is
+// treated as a secret on the cloud targets.
+const PLAIN_ENV = new Set(["APP_NAME", "PORT"]);
+
+function k8sVPA(config: StackConfig) {
+  const name = safeName(config.name);
+  const p = k8sProfile(config);
+  return `# Requires the Vertical Pod Autoscaler controller:
+#   https://github.com/kubernetes/autoscaler/tree/master/vertical-pod-autoscaler
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: ${name}
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ${name}
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: api
+        minAllowed: { cpu: ${p.requests.cpu}, memory: ${p.requests.memory} }
+        maxAllowed: { cpu: ${p.limits.cpu}, memory: ${p.limits.memory} }
+`;
+}
+
+// ─── Cloud IaC ───────────────────────────────────────────────────────────────
+
+function ecsTaskDefinition(config: StackConfig): string {
+  const name = safeName(config.name);
+  const jvm = isJvm(config.language);
+  const vars = buildDeployEnvVarList(config);
+  const def = {
+    family: name,
+    networkMode: "awsvpc",
+    requiresCompatibilities: ["FARGATE"],
+    cpu: jvm ? "1024" : "512",
+    memory: jvm ? "2048" : "1024",
+    runtimePlatform: { cpuArchitecture: "X86_64", operatingSystemFamily: "LINUX" },
+    executionRoleArn: "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
+    containerDefinitions: [
+      {
+        name: "api",
+        image: `\${AWS_ACCOUNT_ID}.dkr.ecr.${config.region}.amazonaws.com/${name}:latest`,
+        essential: true,
+        portMappings: [{ containerPort: 8080, protocol: "tcp" }],
+        environment: [
+          { name: "APP_NAME", value: config.name },
+          { name: "PORT", value: "8080" },
+        ],
+        // SSM Parameter Store SecureStrings — see DEPLOY.md for the put-parameter loop.
+        secrets: vars
+          .filter((v) => !PLAIN_ENV.has(v))
+          .map((v) => ({
+            name: v,
+            valueFrom: `arn:aws:ssm:${config.region}:\${AWS_ACCOUNT_ID}:parameter/${name}/${v}`,
+          })),
+        logConfiguration: {
+          logDriver: "awslogs",
+          options: {
+            "awslogs-group": `/ecs/${name}`,
+            "awslogs-region": config.region,
+            "awslogs-stream-prefix": "api",
+          },
+        },
+      },
+    ],
+  };
+  return JSON.stringify(def, null, 2) + "\n";
+}
+
+const kebabVar = (v: string) => v.toLowerCase().replace(/_/g, "-");
+const secretName = (app: string, v: string) => `${app}-${kebabVar(v)}`;
+
+function cloudRunService(config: StackConfig): string {
+  const name = safeName(config.name);
+  const vars = buildDeployEnvVarList(config).filter((v) => !PLAIN_ENV.has(v));
+  // PORT is reserved on Cloud Run — the platform injects it from containerPort.
+  const env = [
+    `            - name: APP_NAME\n              value: "${config.name}"`,
+    ...vars.map(
+      (v) => `            - name: ${v}\n              valueFrom:\n                secretKeyRef:\n                  name: ${secretName(name, v)}\n                  key: latest`
+    ),
+  ].join("\n");
+  return `# Deploy: envsubst < deploy/gcp/service.yaml > /tmp/service.yaml && gcloud run services replace /tmp/service.yaml --region ${config.region}
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: ${name}
+  labels:
+    cloud.googleapis.com/location: ${config.region}
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "${minInstances(config)}"
+        autoscaling.knative.dev/maxScale: "${maxInstances(config)}"
+    spec:
+      containerConcurrency: 80
+      containers:
+        - image: ${config.region}-docker.pkg.dev/\${GCP_PROJECT_ID}/${name}/${name}:latest
+          ports:
+            - name: ${config.api === "grpc" ? "h2c" : "http1"}
+              containerPort: 8080
+          resources:
+            limits:
+              cpu: "1"
+              memory: ${isJvm(config.language) ? "1Gi" : "512Mi"}
+          env:
+${env}
+`;
+}
+
+function azureContainerApp(config: StackConfig): string {
+  const name = safeName(config.name);
+  const acr = acrName(name);
+  const vars = buildDeployEnvVarList(config).filter((v) => !PLAIN_ENV.has(v));
+  const jvm = isJvm(config.language);
+  const secrets = [
+    `      - name: registry-password\n        value: "\${ACR_PASSWORD}"`,
+    ...vars.map((v) => `      - name: ${kebabVar(v)}\n        value: "\${${v}}"`),
+  ].join("\n");
+  const env = [
+    `          - name: APP_NAME\n            value: "${config.name}"`,
+    `          - name: PORT\n            value: "8080"`,
+    ...vars.map((v) => `          - name: ${v}\n            secretRef: ${kebabVar(v)}`),
+  ].join("\n");
+  return `# Deploy (values are substituted from your shell env — never commit them):
+#   set -a; . ./.env; set +a
+#   envsubst < deploy/azure/containerapp.yaml > /tmp/containerapp.yaml
+#   az containerapp create --name ${name} --resource-group ${name}-rg --yaml /tmp/containerapp.yaml
+location: ${config.region}
+name: ${name}
+type: Microsoft.App/containerApps
+properties:
+  managedEnvironmentId: /subscriptions/\${AZURE_SUBSCRIPTION_ID}/resourceGroups/${name}-rg/providers/Microsoft.App/managedEnvironments/${name}-env
+  configuration:
+    activeRevisionsMode: Single
+    ingress:
+      external: true
+      targetPort: 8080
+      transport: ${config.api === "grpc" ? "http2" : "auto"}
+    registries:
+      - server: ${acr}.azurecr.io
+        username: ${acr}
+        passwordSecretRef: registry-password
+    secrets:
+${secrets}
+  template:
+    containers:
+      - name: api
+        image: ${acr}.azurecr.io/${name}:latest
+        resources:
+          cpu: ${jvm ? "1.0" : "0.5"}
+          memory: ${jvm ? "2Gi" : "1Gi"}
+        env:
+${env}
+    scale:
+      minReplicas: ${minInstances(config)}
+      maxReplicas: ${maxInstances(config)}
+`;
+}
+
+// ACR names must be 5-50 alphanumeric characters — no dashes.
+function acrName(name: string): string {
+  return `${name.replace(/[^a-z0-9]/g, "")}registry`;
+}
+
+// ─── Alternate CI providers ──────────────────────────────────────────────────
+
+// Build/test commands shared by every CI provider. GitHub Actions uses
+// setup-* actions for toolchains; GitLab/CircleCI use these images.
+const ciCommands: Record<
+  StackConfig["language"],
+  { image: string; circleImage: string; setup: string[]; test: string[]; build: string[] }
+> = {
+  go: { image: "golang:1.23", circleImage: "cimg/go:1.23", setup: [], test: ["go vet ./...", "go test ./... -race -cover"], build: ["go build ./..."] },
+  typescript: { image: "node:22", circleImage: "cimg/node:lts", setup: ["npm ci"], test: ["npx tsc --noEmit", "npm test --if-present"], build: ["npm run build --if-present"] },
+  python: { image: "python:3.12", circleImage: "cimg/python:3.12", setup: ["pip install uv", 'uv pip install -e ".[dev]" --system'], test: ["ruff check .", "pytest -q"], build: [] },
+  rust: { image: "rust:1.82", circleImage: "cimg/rust:1.82.0", setup: ["rustup component add clippy"], test: ["cargo clippy -- -D warnings", "cargo test --all"], build: ["cargo build --release"] },
+  java: { image: "maven:3.9-eclipse-temurin-21", circleImage: "cimg/openjdk:21.0", setup: [], test: ["mvn -B test"], build: ["mvn -B package -DskipTests"] },
+  kotlin: { image: "gradle:8.10-jdk21", circleImage: "cimg/openjdk:21.0", setup: [], test: ["gradle test --no-daemon"], build: ["gradle build -x test --no-daemon"] },
+};
+
+function gitlabCi(config: StackConfig): string {
+  const c = ciCommands[config.language];
+  const script = [...c.setup, ...c.test, ...c.build].map((s) => `    - ${s}`).join("\n");
+  const docker = config.docker
+    ? `
+
+# Pushes to this project's GitLab Container Registry on the default branch.
+docker:
+  stage: build
+  image: docker:27
+  services: [docker:27-dind]
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" -t "$CI_REGISTRY_IMAGE:latest" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+    - docker push "$CI_REGISTRY_IMAGE:latest"`
+    : "";
+  return `stages: [test${config.docker ? ", build" : ""}]
+
+test:
+  stage: test
+  image: ${c.image}
+  script:
+${script}${docker}
+`;
+}
+
+function circleCi(config: StackConfig): string {
+  const c = ciCommands[config.language];
+  const image = `ghcr.io/${config.owner || "your-org"}/${safeName(config.name)}`;
+  const steps = [...c.setup, ...c.test, ...c.build].map((s) => `      - run: ${s}`).join("\n");
+  const dockerJob = config.docker
+    ? `
+  docker:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build and push
+          # Set REGISTRY_USER / REGISTRY_TOKEN (a GHCR token with write:packages) in a CircleCI context.
+          command: |
+            echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+            docker build -t ${image}:$CIRCLE_SHA1 -t ${image}:latest .
+            docker push ${image}:$CIRCLE_SHA1
+            docker push ${image}:latest`
+    : "";
+  const dockerWorkflow = config.docker
+    ? `
+      - docker:
+          requires: [test]
+          filters:
+            branches:
+              only: main`
+    : "";
+  return `version: 2.1
+
+jobs:
+  test:
+    docker:
+      - image: ${c.circleImage}
+    steps:
+      - checkout
+${steps}${dockerJob}
+
+workflows:
+  ci:
+    jobs:
+      - test${dockerWorkflow}
+`;
+}
+
+function argoApplication(config: StackConfig): string {
+  const name = safeName(config.name);
+  const owner = config.owner || "your-org";
+  // Plain manifests first: they need no chart-dependency fetch inside Argo.
+  const path = config.kubernetes ? "deploy/k8s" : "deploy/helm";
+  return `# Register with: kubectl apply -n argocd -f deploy/argocd/application.yaml
+# Argo CD syncs ${path} from the main branch; GitHub Actions builds and pushes the image.${config.kubernetes ? `
+# The ${name}-env Secret is not in git — create it once with: make -C deploy/k8s namespace secrets` : ""}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ${name}
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/${owner}/${name}.git
+    targetRevision: main
+    path: ${path}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ${name}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+`;
+}
+
+function otelCollectorConfig(): string {
+  return `# OpenTelemetry Collector — receives OTLP from the api and prints it.
+# Swap the debug exporter for otlp/otlphttp pointing at your backend
+# (Honeycomb, Grafana Tempo, Jaeger, …) when you have one.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+`;
 }

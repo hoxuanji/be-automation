@@ -7,12 +7,12 @@
   {
     "path": ".env.example",
     "lines": 37,
-    "size": 1983
+    "size": 2016
   },
   {
     "path": ".github/workflows/ci.yml",
     "lines": 65,
-    "size": 1720
+    "size": 1714
   },
   {
     "path": ".gitignore",
@@ -41,8 +41,13 @@
   },
   {
     "path": "deploy/helm/templates/deployment.yaml",
-    "lines": 22,
-    "size": 490
+    "lines": 24,
+    "size": 547
+  },
+  {
+    "path": "deploy/helm/templates/hpa.yaml",
+    "lines": 21,
+    "size": 546
   },
   {
     "path": "deploy/helm/templates/service.yaml",
@@ -51,8 +56,8 @@
   },
   {
     "path": "deploy/helm/values.yaml",
-    "lines": 63,
-    "size": 1195
+    "lines": 64,
+    "size": 1268
   },
   {
     "path": "deploy/k8s/deployment.yaml",
@@ -66,8 +71,8 @@
   },
   {
     "path": "deploy/k8s/Makefile",
-    "lines": 36,
-    "size": 1371
+    "lines": 37,
+    "size": 1466
   },
   {
     "path": "deploy/k8s/pdb.yaml",
@@ -85,14 +90,9 @@
     "size": 198
   },
   {
-    "path": "deploy/prometheus.yml",
-    "lines": 9,
-    "size": 152
-  },
-  {
     "path": "docker-compose.yml",
-    "lines": 53,
-    "size": 1195
+    "lines": 60,
+    "size": 1460
   },
   {
     "path": "Dockerfile",
@@ -107,12 +107,12 @@
   {
     "path": "QUICKSTART.md",
     "lines": 105,
-    "size": 2507
+    "size": 2516
   },
   {
     "path": "README.md",
-    "lines": 62,
-    "size": 2252
+    "lines": 63,
+    "size": 2182
   },
   {
     "path": "sdk/test-app_client.py",

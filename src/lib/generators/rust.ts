@@ -1,5 +1,21 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { toPascal, toSnake, toKebab } from "./types";
+import { needsAuth } from "./auth/providers";
+
+// SQL backend for the sqlx code paths. `null` means no SQL database was
+// selected and handlers fall back to an in-memory store.
+type RustSql = {
+  mysql: boolean;
+  pool: "PgPool" | "MySqlPool";
+  // Positional placeholder: `$1` (Postgres) vs `?` (MySQL).
+  ph: (i: number) => string;
+};
+
+function rustSql(db: string): RustSql | null {
+  if (/mysql|planetscale/.test(db)) return { mysql: true, pool: "MySqlPool", ph: () => "?" };
+  if (/postgres|neon|supabase|cockroach/.test(db)) return { mysql: false, pool: "PgPool", ph: (i) => `$${i}` };
+  return null;
+}
 
 export function rustFiles(
   config: StackConfig,
@@ -7,14 +23,19 @@ export function rustFiles(
   entities: Entity[] = []
 ): GeneratedFile[] {
   const safe = safeName(config.name);
-  const isPostgres = isPostgresDb(config.database);
+  const sql = rustSql(config.database);
+  const withAuth = needsAuth(config, endpoints.some((e) => e.auth));
+  const metrics = config.monitoring === "grafana";
   const files: GeneratedFile[] = [];
 
-  files.push({ path: "Cargo.toml", content: cargoToml(safe, config.framework) });
+  files.push({ path: "Cargo.toml", content: cargoToml(safe, config.framework, sql, withAuth, metrics) });
   files.push({ path: "Dockerfile", content: rustDockerfile(safe) });
-  files.push({ path: "src/config.rs", content: rustConfig() });
-  files.push({ path: "src/db.rs", content: rustDb(isPostgres) });
-  files.push({ path: "src/main.rs", content: rustMain(config.framework, entities, endpoints, isPostgres) });
+  files.push({ path: "src/config.rs", content: rustConfig(sql) });
+  files.push({ path: "src/db.rs", content: rustDb(sql) });
+  files.push({ path: "src/main.rs", content: rustMain(config.framework, entities, endpoints, sql, withAuth, metrics) });
+  if (withAuth) {
+    files.push({ path: "src/auth.rs", content: rustAuth(config.framework) });
+  }
 
   if (entities.length > 0) {
     files.push({ path: "src/models/mod.rs", content: modFile(entities, "models") });
@@ -23,19 +44,19 @@ export function rustFiles(
     for (const entity of entities) {
       files.push({
         path: `src/models/${toSnake(entity.name)}.rs`,
-        content: rustModel(entity, isPostgres),
+        content: rustModel(entity, sql),
       });
       files.push({
         path: `src/handlers/${toSnake(entity.name)}.rs`,
         content: config.framework === "actix"
-          ? actixHandler(entity, isPostgres)
-          : axumHandler(entity, isPostgres),
+          ? actixHandler(entity, sql)
+          : axumHandler(entity, sql),
       });
       files.push({
         path: `tests/${toSnake(entity.name)}_test.rs`,
         content: config.framework === "actix"
-          ? actixTest(entity)
-          : axumTest(entity),
+          ? actixTest(entity, sql)
+          : axumTest(entity, sql),
       });
     }
   } else {
@@ -53,13 +74,10 @@ function safeName(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "") || "app";
 }
 
-function isPostgresDb(db: string): boolean {
-  return /postgres|neon|supabase|cockroach|planetscale/.test(db);
-}
-
-function rustFieldType(t: FieldType): string {
+// MySQL stores UUIDs as CHAR(36) (see db/sql.ts), so they round-trip as String.
+function rustFieldType(t: FieldType, sql: RustSql | null = null): string {
   switch (t) {
-    case "uuid":    return "uuid::Uuid";
+    case "uuid":    return sql?.mysql ? "String" : "uuid::Uuid";
     case "string":  return "String";
     case "text":    return "String";
     case "number":  return "i64";
@@ -83,7 +101,17 @@ function modFile(entities: Entity[], _kind: string): string {
 
 // ─── Cargo.toml ───────────────────────────────────────────────────────────────
 
-function cargoToml(safeName: string, framework: string): string {
+function cargoToml(safeName: string, framework: string, sql: RustSql | null, withAuth: boolean, metrics: boolean): string {
+  const sqlxDriver = sql?.mysql ? "mysql" : "postgres";
+  const sqlx = `sqlx = { version = "0.8", features = ["runtime-tokio", "${sqlxDriver}", "uuid", "chrono", "json", "macros"] }`;
+  // JWKS-based JWT verification (src/auth.rs). rustls keeps the distroless
+  // runtime image free of an OpenSSL dependency.
+  const authDeps = withAuth
+    ? `jsonwebtoken = "9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+`
+    : "";
+
   if (framework === "actix") {
     return `[package]
 name = "${safeName}"
@@ -91,18 +119,18 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-actix-web = "4"
+actix-web = "4.9"
 actix-rt = "2"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "macros"] }
+${sqlx}
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
-
+${authDeps}${metrics ? `actix-web-prom = "0.8"\n` : ""}
 [dev-dependencies]
 actix-web = { version = "4", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
@@ -120,14 +148,14 @@ axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "macros"] }
+${sqlx}
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
-
+${authDeps}${metrics ? `axum-prometheus = "0.7"\n` : ""}
 [dev-dependencies]
 axum-test = "15"
 tokio = { version = "1", features = ["full"] }
@@ -155,7 +183,8 @@ ENTRYPOINT ["/api"]
 
 // ─── src/config.rs ────────────────────────────────────────────────────────────
 
-function rustConfig(): string {
+function rustConfig(sql: RustSql | null): string {
+  const defaultUrl = sql?.mysql ? "mysql://localhost/app" : "postgres://localhost/app";
   return `pub struct Config {
     pub database_url: String,
     pub port: String,
@@ -166,7 +195,7 @@ impl Config {
     pub fn from_env() -> Self {
         Self {
             database_url: std::env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgres://localhost/app".to_string()),
+                .unwrap_or_else(|_| "${defaultUrl}".to_string()),
             port: std::env::var("PORT").unwrap_or_else(|_| "8080".to_string()),
             log_level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
         }
@@ -177,9 +206,9 @@ impl Config {
 
 // ─── src/db.rs ────────────────────────────────────────────────────────────────
 
-function rustDb(isPostgres: boolean): string {
-  if (!isPostgres) {
-    // Simple in-memory store stub when no postgres
+function rustDb(sql: RustSql | null): string {
+  if (!sql) {
+    // Simple in-memory store stub when no SQL database
     return `use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -191,18 +220,20 @@ pub fn new_store() -> Store {
 `;
   }
 
-  return `use sqlx::postgres::PgPoolOptions;
+  const opts = sql.mysql ? "sqlx::mysql::MySqlPoolOptions" : "sqlx::postgres::PgPoolOptions";
+  const optsName = sql.mysql ? "MySqlPoolOptions" : "PgPoolOptions";
+  return `use ${opts};
 use std::time::Duration;
 
-/// Connect to Postgres with retry/backoff. Kubernetes pods frequently start
+/// Connect to the database with retry/backoff. Kubernetes pods frequently start
 /// before the database is ready; an unconditional \`.expect()\` turns the first
 /// connection failure into a crash loop. We retry up to ~30 seconds with
 /// exponential backoff before surfacing the last error.
-pub async fn connect(database_url: &str) -> sqlx::PgPool {
+pub async fn connect(database_url: &str) -> sqlx::${sql.pool} {
     let mut delay = Duration::from_millis(200);
     let mut last_err: Option<sqlx::Error> = None;
     for attempt in 1..=6 {
-        match PgPoolOptions::new()
+        match ${optsName}::new()
             .max_connections(20)
             .min_connections(2)
             .acquire_timeout(Duration::from_secs(10))
@@ -224,20 +255,127 @@ pub async fn connect(database_url: &str) -> sqlx::PgPool {
 `;
 }
 
+// ─── src/auth.rs ──────────────────────────────────────────────────────────────
+
+function rustAuth(framework: string): string {
+  const middleware = framework === "actix"
+    ? `/// actix-web middleware (wrap a scope with \`middleware::from_fn(require_auth)\`).
+/// Verified claims are stored in the request extensions.
+pub async fn require_auth(
+    req: actix_web::dev::ServiceRequest,
+    next: actix_web::middleware::Next<impl actix_web::body::MessageBody>,
+) -> Result<actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>, actix_web::Error> {
+    use actix_web::HttpMessage;
+    let token = bearer(req.headers().get("authorization").and_then(|v| v.to_str().ok()))
+        .ok_or_else(|| actix_web::error::ErrorUnauthorized("missing bearer token"))?;
+    let claims = verify(&token).await.map_err(|e| {
+        tracing::debug!("auth: {}", e);
+        actix_web::error::ErrorUnauthorized("invalid token")
+    })?;
+    req.extensions_mut().insert(claims);
+    next.call(req).await
+}`
+    : `/// axum middleware (\`route_layer(axum::middleware::from_fn(require_auth))\`).
+/// Verified claims are available to handlers as \`Extension<Claims>\`.
+pub async fn require_auth(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    let header = req.headers().get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    let token = bearer(header).ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let claims = verify(&token).await.map_err(|e| {
+        tracing::debug!("auth: {}", e);
+        axum::http::StatusCode::UNAUTHORIZED
+    })?;
+    req.extensions_mut().insert(claims);
+    Ok(next.run(req).await)
+}`;
+
+  return `//! JWT verification against the provider's JWKS (AUTH_JWKS_URL).
+//! Validates signature, exp, iss (AUTH_ISSUER) and — when set — aud (AUTH_AUDIENCE).
+
+use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
+use std::sync::OnceLock;
+use tokio::sync::RwLock;
+
+#[allow(dead_code)] // read by handlers via request extensions
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Claims {
+    pub sub: Option<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+static JWKS: OnceLock<RwLock<Option<JwkSet>>> = OnceLock::new();
+
+fn bearer(header: Option<&str>) -> Option<String> {
+    header?.strip_prefix("Bearer ").map(|t| t.trim().to_string())
+}
+
+async fn fetch_jwks() -> Result<JwkSet, String> {
+    let url = std::env::var("AUTH_JWKS_URL").map_err(|_| "AUTH_JWKS_URL is not set".to_string())?;
+    reqwest::get(&url)
+        .await
+        .map_err(|e| e.to_string())?
+        .json::<JwkSet>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub async fn verify(token: &str) -> Result<Claims, String> {
+    let header = decode_header(token).map_err(|e| e.to_string())?;
+    // Asymmetric algorithms only — never let a token pick HS256.
+    if !matches!(
+        header.alg,
+        Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 | Algorithm::PS256 | Algorithm::PS384
+            | Algorithm::PS512 | Algorithm::ES256 | Algorithm::ES384
+    ) {
+        return Err(format!("unsupported alg {:?}", header.alg));
+    }
+    let kid = header.kid.ok_or("token has no kid")?;
+
+    // ponytail: keys are cached until an unknown kid shows up (key rotation),
+    // then refetched once. Add a TTL if your provider revokes keys early.
+    let cache = JWKS.get_or_init(|| RwLock::new(None));
+    let mut jwk = cache.read().await.as_ref().and_then(|set| set.find(&kid).cloned());
+    if jwk.is_none() {
+        let fresh = fetch_jwks().await?;
+        jwk = fresh.find(&kid).cloned();
+        *cache.write().await = Some(fresh);
+    }
+    let jwk = jwk.ok_or("no JWK matches the token kid")?;
+    let key = DecodingKey::from_jwk(&jwk).map_err(|e| e.to_string())?;
+
+    let issuer = std::env::var("AUTH_ISSUER").map_err(|_| "AUTH_ISSUER is not set".to_string())?;
+    let mut validation = Validation::new(header.alg);
+    validation.set_issuer(&[issuer]);
+    match std::env::var("AUTH_AUDIENCE") {
+        Ok(aud) if !aud.is_empty() => validation.set_audience(&[aud]),
+        _ => validation.validate_aud = false,
+    }
+    decode::<Claims>(token, &key, &validation)
+        .map(|data| data.claims)
+        .map_err(|e| e.to_string())
+}
+
+${middleware}
+`;
+}
+
 // ─── src/models/{snake}.rs ────────────────────────────────────────────────────
 
-function rustModel(entity: Entity, isPostgres: boolean): string {
+function rustModel(entity: Entity, sql: RustSql | null): string {
   const pascal = toPascal(entity.name);
-  const fromRowDerive = isPostgres ? ", sqlx::FromRow" : "";
+  const fromRowDerive = sql ? ", sqlx::FromRow" : "";
 
   const structFields = entity.fields.map((f) => {
-    const rustType = rustFieldType(f.type);
+    const rustType = rustFieldType(f.type, sql);
     const fieldName = toSnake(f.name);
     return `    pub ${fieldName}: ${rustType},`;
   }).join("\n");
 
   const createFields = nonPkFields(entity).map((f) => {
-    const rustType = rustFieldType(f.type);
+    const rustType = rustFieldType(f.type, sql);
     const fieldName = toSnake(f.name);
     if (f.required) {
       return `    pub ${fieldName}: ${rustType},`;
@@ -247,7 +385,7 @@ function rustModel(entity: Entity, isPostgres: boolean): string {
   }).join("\n");
 
   const updateFields = nonPkFields(entity).map((f) => {
-    const rustType = rustFieldType(f.type);
+    const rustType = rustFieldType(f.type, sql);
     const fieldName = toSnake(f.name);
     return `    pub ${fieldName}: Option<${rustType}>,`;
   }).join("\n");
@@ -271,54 +409,105 @@ ${updateFields}
 
 // ─── src/handlers/{snake}.rs (Axum) ──────────────────────────────────────────
 
-function axumHandler(entity: Entity, isPostgres: boolean): string {
+function axumHandler(entity: Entity, sql: RustSql | null): string {
   const pascal = toPascal(entity.name);
   const snake = toSnake(entity.name);
   const kebab = toKebab(entity.name);
   const plural = `${kebab}s`;
 
   const pk = pkField(entity);
-  const pkType = pk ? rustFieldType(pk.type) : "uuid::Uuid";
+  const pkType = pk ? rustFieldType(pk.type, sql) : "uuid::Uuid";
   const pkParam = pk ? toSnake(pk.name) : "id";
 
   const nonPk = nonPkFields(entity);
 
-  if (!isPostgres) {
+  if (!sql) {
     // In-memory store fallback
     return axumHandlerInMemory(pascal, snake, plural, pkParam);
   }
+  const { pool, ph } = sql;
 
   // Build INSERT columns/placeholders
   const insertCols = nonPk.map((f) => toSnake(f.name));
   const allCols = [pkParam, ...insertCols];
   const allColsSql = allCols.join(", ");
-  const placeholders = allCols.map((_, i) => `$${i + 1}`).join(", ");
-  const insertBinds = nonPk.map((f) => `        .bind(body.${toSnake(f.name)})`).join("\n");
+  const placeholders = allCols.map((_, i) => ph(i + 1)).join(", ");
+  const fieldBinds = nonPk.map((f) => `        .bind(body.${toSnake(f.name)})`).join("\n");
 
-  // Build UPDATE SET with COALESCE; $1 is the ID, $2+ are fields
+  // UPDATE SET with COALESCE. Postgres: $1 is the ID, $2+ are fields.
+  // MySQL: positional `?`, so fields first and the ID last.
   const updateSets = nonPk.map((f, i) => {
     const col = toSnake(f.name);
-    return `${col} = COALESCE($${i + 2}, ${col})`;
+    return `${col} = COALESCE(${ph(i + 2)}, ${col})`;
   }).join(", ");
-  const updateBinds = nonPk.map((f) => `        .bind(body.${toSnake(f.name)})`).join("\n");
 
-  const idImport = pkType === "uuid::Uuid" ? "\nuse uuid::Uuid;" : "";
+  const idImport = pkType === "uuid::Uuid" || sql.mysql ? "\nuse uuid::Uuid;" : "";
+
+  // MySQL has no RETURNING — write, then read the row back.
+  const create = sql.mysql
+    ? `    let id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO ${plural} (${allColsSql}) VALUES (${placeholders})")
+        .bind(&id)
+${fieldBinds}
+        .execute(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let row = sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} WHERE ${pkParam} = ?")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((StatusCode::CREATED, Json(row)))`
+    : `    let row = sqlx::query_as::<_, ${pascal}>(
+        "INSERT INTO ${plural} (${allColsSql}) VALUES (${placeholders}) RETURNING *",
+    )
+        .bind(Uuid::new_v4())
+${fieldBinds}
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((StatusCode::CREATED, Json(row)))`;
+
+  const update = sql.mysql
+    ? `    sqlx::query("UPDATE ${plural} SET ${updateSets} WHERE ${pkParam} = ?")
+${fieldBinds}
+        .bind(&${pkParam})
+        .execute(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} WHERE ${pkParam} = ?")
+        .bind(&${pkParam})
+        .fetch_optional(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)`
+    : `    sqlx::query_as::<_, ${pascal}>(
+        "UPDATE ${plural} SET ${updateSets} WHERE ${pkParam} = $1 RETURNING *",
+    )
+        .bind(${pkParam})
+${fieldBinds}
+        .fetch_optional(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)`;
 
   return `use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
-use sqlx::PgPool;${idImport}
+use sqlx::${pool};${idImport}
 use crate::models::${snake}::{${pascal}, Create${pascal}, Update${pascal}};
 
-pub fn router() -> axum::Router<PgPool> {
+pub fn router() -> axum::Router<${pool}> {
     axum::Router::new()
         .route("/${plural}", axum::routing::get(list).post(create))
         .route("/${plural}/:${pkParam}", axum::routing::get(get_by_id).put(update).delete(delete))
 }
 
-async fn list(State(pool): State<PgPool>) -> Result<Json<Vec<${pascal}>>, StatusCode> {
+async fn list(State(pool): State<${pool}>) -> Result<Json<Vec<${pascal}>>, StatusCode> {
     sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} ORDER BY ${pkParam}")
         .fetch_all(&pool)
         .await
@@ -327,10 +516,10 @@ async fn list(State(pool): State<PgPool>) -> Result<Json<Vec<${pascal}>>, Status
 }
 
 async fn get_by_id(
-    State(pool): State<PgPool>,
+    State(pool): State<${pool}>,
     Path(${pkParam}): Path<${pkType}>,
 ) -> Result<Json<${pascal}>, StatusCode> {
-    sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} WHERE ${pkParam} = $1")
+    sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} WHERE ${pkParam} = ${ph(1)}")
         .bind(${pkParam})
         .fetch_optional(&pool)
         .await
@@ -340,42 +529,25 @@ async fn get_by_id(
 }
 
 async fn create(
-    State(pool): State<PgPool>,
+    State(pool): State<${pool}>,
     Json(body): Json<Create${pascal}>,
 ) -> Result<(StatusCode, Json<${pascal}>), StatusCode> {
-    let row = sqlx::query_as::<_, ${pascal}>(
-        "INSERT INTO ${plural} (${allColsSql}) VALUES (${placeholders}) RETURNING *",
-    )
-        .bind(Uuid::new_v4())
-${insertBinds}
-        .fetch_one(&pool)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok((StatusCode::CREATED, Json(row)))
+${create}
 }
 
 async fn update(
-    State(pool): State<PgPool>,
+    State(pool): State<${pool}>,
     Path(${pkParam}): Path<${pkType}>,
     Json(body): Json<Update${pascal}>,
 ) -> Result<Json<${pascal}>, StatusCode> {
-    sqlx::query_as::<_, ${pascal}>(
-        "UPDATE ${plural} SET ${updateSets} WHERE ${pkParam} = $1 RETURNING *",
-    )
-        .bind(${pkParam})
-${updateBinds}
-        .fetch_optional(&pool)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+${update}
 }
 
 async fn delete(
-    State(pool): State<PgPool>,
+    State(pool): State<${pool}>,
     Path(${pkParam}): Path<${pkType}>,
 ) -> StatusCode {
-    let result = sqlx::query("DELETE FROM ${plural} WHERE ${pkParam} = $1")
+    let result = sqlx::query("DELETE FROM ${plural} WHERE ${pkParam} = ${ph(1)}")
         .bind(${pkParam})
         .execute(&pool)
         .await;
@@ -477,38 +649,100 @@ async fn delete(
 
 // ─── src/handlers/{snake}.rs (Actix) ─────────────────────────────────────────
 
-function actixHandler(entity: Entity, isPostgres: boolean): string {
+function actixHandler(entity: Entity, sql: RustSql | null): string {
   const pascal = toPascal(entity.name);
   const snake = toSnake(entity.name);
   const kebab = toKebab(entity.name);
   const plural = `${kebab}s`;
 
   const pk = pkField(entity);
-  const pkType = pk ? rustFieldType(pk.type) : "uuid::Uuid";
+  const pkType = pk ? rustFieldType(pk.type, sql) : "uuid::Uuid";
   const pkParam = pk ? toSnake(pk.name) : "id";
 
   const nonPk = nonPkFields(entity);
 
-  if (!isPostgres) {
+  if (!sql) {
     return actixHandlerInMemory(pascal, snake, plural, pkParam);
   }
+  const { pool, ph } = sql;
 
   const insertCols = nonPk.map((f) => toSnake(f.name));
   const allCols = [pkParam, ...insertCols];
   const allColsSql = allCols.join(", ");
-  const placeholders = allCols.map((_, i) => `$${i + 1}`).join(", ");
-  const insertBinds = nonPk.map((f) => `        .bind(body.${toSnake(f.name)}.clone())`).join("\n");
+  const placeholders = allCols.map((_, i) => ph(i + 1)).join(", ");
+  const fieldBinds = nonPk.map((f) => `        .bind(body.${toSnake(f.name)}.clone())`).join("\n");
 
   const updateSets = nonPk.map((f, i) => {
     const col = toSnake(f.name);
-    return `${col} = COALESCE($${i + 2}, ${col})`;
+    return `${col} = COALESCE(${ph(i + 2)}, ${col})`;
   }).join(", ");
-  const updateBinds = nonPk.map((f) => `        .bind(body.${toSnake(f.name)}.clone())`).join("\n");
 
-  const idImport = pkType === "uuid::Uuid" ? "\nuse uuid::Uuid;" : "";
+  const idImport = pkType === "uuid::Uuid" || sql.mysql ? "\nuse uuid::Uuid;" : "";
+
+  // MySQL has no RETURNING — write, then read the row back.
+  const create = sql.mysql
+    ? `    let id = Uuid::new_v4().to_string();
+    let inserted = sqlx::query("INSERT INTO ${plural} (${allColsSql}) VALUES (${placeholders})")
+        .bind(&id)
+${fieldBinds}
+        .execute(pool.get_ref())
+        .await;
+    if inserted.is_err() {
+        return HttpResponse::InternalServerError().finish();
+    }
+    match sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} WHERE ${pkParam} = ?")
+        .bind(&id)
+        .fetch_one(pool.get_ref())
+        .await
+    {
+        Ok(row) => HttpResponse::Created().json(row),
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }`
+    : `    match sqlx::query_as::<_, ${pascal}>(
+        "INSERT INTO ${plural} (${allColsSql}) VALUES (${placeholders}) RETURNING *",
+    )
+        .bind(Uuid::new_v4())
+${fieldBinds}
+        .fetch_one(pool.get_ref())
+        .await
+    {
+        Ok(row) => HttpResponse::Created().json(row),
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }`;
+
+  const update = sql.mysql
+    ? `    let updated = sqlx::query("UPDATE ${plural} SET ${updateSets} WHERE ${pkParam} = ?")
+${fieldBinds}
+        .bind(&${pkParam})
+        .execute(pool.get_ref())
+        .await;
+    if updated.is_err() {
+        return HttpResponse::InternalServerError().finish();
+    }
+    match sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} WHERE ${pkParam} = ?")
+        .bind(&${pkParam})
+        .fetch_optional(pool.get_ref())
+        .await
+    {
+        Ok(Some(row)) => HttpResponse::Ok().json(row),
+        Ok(None) => HttpResponse::NotFound().finish(),
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }`
+    : `    match sqlx::query_as::<_, ${pascal}>(
+        "UPDATE ${plural} SET ${updateSets} WHERE ${pkParam} = $1 RETURNING *",
+    )
+        .bind(${pkParam})
+${fieldBinds}
+        .fetch_optional(pool.get_ref())
+        .await
+    {
+        Ok(Some(row)) => HttpResponse::Ok().json(row),
+        Ok(None) => HttpResponse::NotFound().finish(),
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }`;
 
   return `use actix_web::{web, HttpResponse, Responder};
-use sqlx::PgPool;${idImport}
+use sqlx::${pool};${idImport}
 use crate::models::${snake}::{${pascal}, Create${pascal}, Update${pascal}};
 
 pub fn config(cfg: &mut web::ServiceConfig) {
@@ -522,7 +756,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
     );
 }
 
-async fn list(pool: web::Data<PgPool>) -> impl Responder {
+async fn list(pool: web::Data<${pool}>) -> impl Responder {
     match sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} ORDER BY ${pkParam}")
         .fetch_all(pool.get_ref())
         .await
@@ -533,11 +767,11 @@ async fn list(pool: web::Data<PgPool>) -> impl Responder {
 }
 
 async fn get_by_id(
-    pool: web::Data<PgPool>,
+    pool: web::Data<${pool}>,
     path: web::Path<${pkType}>,
 ) -> impl Responder {
     let ${pkParam} = path.into_inner();
-    match sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} WHERE ${pkParam} = $1")
+    match sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} WHERE ${pkParam} = ${ph(1)}")
         .bind(${pkParam})
         .fetch_optional(pool.get_ref())
         .await
@@ -549,48 +783,27 @@ async fn get_by_id(
 }
 
 async fn create(
-    pool: web::Data<PgPool>,
+    pool: web::Data<${pool}>,
     body: web::Json<Create${pascal}>,
 ) -> impl Responder {
-    match sqlx::query_as::<_, ${pascal}>(
-        "INSERT INTO ${plural} (${allColsSql}) VALUES (${placeholders}) RETURNING *",
-    )
-        .bind(Uuid::new_v4())
-${insertBinds}
-        .fetch_one(pool.get_ref())
-        .await
-    {
-        Ok(row) => HttpResponse::Created().json(row),
-        Err(_) => HttpResponse::InternalServerError().finish(),
-    }
+${create}
 }
 
 async fn update(
-    pool: web::Data<PgPool>,
+    pool: web::Data<${pool}>,
     path: web::Path<${pkType}>,
     body: web::Json<Update${pascal}>,
 ) -> impl Responder {
     let ${pkParam} = path.into_inner();
-    match sqlx::query_as::<_, ${pascal}>(
-        "UPDATE ${plural} SET ${updateSets} WHERE ${pkParam} = $1 RETURNING *",
-    )
-        .bind(${pkParam})
-${updateBinds}
-        .fetch_optional(pool.get_ref())
-        .await
-    {
-        Ok(Some(row)) => HttpResponse::Ok().json(row),
-        Ok(None) => HttpResponse::NotFound().finish(),
-        Err(_) => HttpResponse::InternalServerError().finish(),
-    }
+${update}
 }
 
 async fn delete(
-    pool: web::Data<PgPool>,
+    pool: web::Data<${pool}>,
     path: web::Path<${pkType}>,
 ) -> impl Responder {
     let ${pkParam} = path.into_inner();
-    match sqlx::query("DELETE FROM ${plural} WHERE ${pkParam} = $1")
+    match sqlx::query("DELETE FROM ${plural} WHERE ${pkParam} = ${ph(1)}")
         .bind(${pkParam})
         .execute(pool.get_ref())
         .await
@@ -715,42 +928,57 @@ function rustMain(
   framework: string,
   entities: Entity[],
   endpoints: Endpoint[],
-  isPostgres: boolean
+  sql: RustSql | null,
+  withAuth: boolean,
+  metrics: boolean
 ): string {
+  // Endpoint stubs only when there are no entities (the entity CRUD routes
+  // already serve those paths — axum panics on overlapping routes). /health is
+  // always registered by the template itself.
+  const stubs = entities.length === 0 ? endpoints.filter((e) => e.path !== "/health") : [];
   if (framework === "actix") {
-    return actixMain(entities, endpoints, isPostgres);
+    return actixMain(entities, stubs, sql, withAuth, metrics);
   }
-  return axumMain(entities, endpoints, isPostgres);
+  return axumMain(entities, stubs, sql, withAuth, metrics);
 }
 
-function axumMain(entities: Entity[], endpoints: Endpoint[], isPostgres: boolean): string {
-  const entityRoutes = entities
-    .map((e) => `        .merge(handlers::${toSnake(e.name)}::router())`)
-    .join("\n");
+function axumMain(entities: Entity[], endpoints: Endpoint[], sql: RustSql | null, withAuth: boolean, metrics: boolean): string {
+  const entityRoutes = entities.map((e) => `        .merge(handlers::${toSnake(e.name)}::router())`);
 
-  const endpointRoutes = endpoints
-    .map((e) => {
-      const path = e.path.replace(/:([a-zA-Z0-9_]+)/g, ":$1");
-      const method = e.method.toLowerCase();
-      return `        .route("${path}", axum::routing::${method}(|| async { axum::Json(serde_json::json!({"ok": true, "op": "${e.method} ${e.path}"})) }))`;
-    })
-    .join("\n");
+  const stub = (e: Endpoint) => {
+    const path = e.path.replace(/:([a-zA-Z0-9_]+)/g, ":$1");
+    const method = e.method.toLowerCase();
+    return `        .route("${path}", axum::routing::${method}(|| async { axum::Json(serde_json::json!({"ok": true, "op": "${e.method} ${e.path}"})) }))`;
+  };
+  const publicRoutes = endpoints.filter((e) => !(withAuth && e.auth)).map(stub);
+  const protectedRoutes = withAuth ? [...endpoints.filter((e) => e.auth).map(stub), ...entityRoutes] : [];
+  const mainRoutes = withAuth ? publicRoutes : [...publicRoutes, ...entityRoutes];
 
-  const hasEntities = entities.length > 0;
-  const handlersMod = hasEntities ? "mod handlers;\n" : "mod handlers;\n";
-  const modelsMod = hasEntities ? "mod models;\n" : "mod models;\n";
+  // route_layer panics on a router without routes, so only build it when needed.
+  const protectedBlock = protectedRoutes.length > 0
+    ? `    // Every route below requires a valid Bearer JWT (see src/auth.rs).
+    let protected = Router::new()
+${protectedRoutes.join("\n")}
+        .route_layer(axum::middleware::from_fn(auth::require_auth));
+`
+    : "";
 
-  const poolSetup = isPostgres
+  const poolSetup = sql
     ? `    let pool = db::connect(&cfg.database_url).await;\n`
     : `    let store = db::new_store();\n`;
 
-  const withState = isPostgres
-    ? `        .with_state(pool)`
-    : `        .with_state(store)`;
+  const tail = [
+    ...mainRoutes,
+    ...(protectedBlock ? [`        .merge(protected)`] : []),
+    ...(metrics ? [`        .route("/metrics", axum::routing::get(|| async move { metric_handle.render() }))`, `        .layer(prometheus_layer)`] : []),
+    sql ? `        .with_state(pool);` : `        .with_state(store);`,
+  ].join("\n");
 
-  return `mod config;
+  return `${withAuth ? "mod auth;\n" : ""}mod config;
 mod db;
-${handlersMod}${modelsMod}
+mod handlers;
+mod models;
+
 use axum::Router;
 
 #[tokio::main]
@@ -763,11 +991,12 @@ async fn main() {
         .init();
     dotenvy::dotenv().ok();
     let cfg = config::Config::from_env();
-${poolSetup}
+${poolSetup}${metrics ? `    // Prometheus: per-route request counters + latency histograms, scraped at /metrics.
+    let (prometheus_layer, metric_handle) = axum_prometheus::PrometheusMetricLayer::pair();
+` : ""}${protectedBlock}
     let app = Router::new()
         .route("/health", axum::routing::get(|| async { "ok" }))
-${endpointRoutes}${endpointRoutes && entityRoutes ? "\n" : ""}${entityRoutes}
-${withState};
+${tail}
 
     let addr = format!("0.0.0.0:{}", cfg.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
@@ -803,26 +1032,43 @@ async fn shutdown_signal() {
 `;
 }
 
-function actixMain(entities: Entity[], endpoints: Endpoint[], isPostgres: boolean): string {
-  const entityConfigs = entities
-    .map((e) => `            .configure(handlers::${toSnake(e.name)}::config)`)
-    .join("\n");
+function actixMain(entities: Entity[], endpoints: Endpoint[], sql: RustSql | null, withAuth: boolean, metrics: boolean): string {
+  const entityConfigs = entities.map((e) => `.configure(handlers::${toSnake(e.name)}::config)`);
 
-  const endpointRoutes = endpoints
-    .map((e) => {
-      const path = e.path.replace(/:([a-zA-Z0-9_]+)/g, "{$1}");
-      const method = e.method.toLowerCase();
-      return `            .route("${path}", web::${method}().to(|| async { actix_web::HttpResponse::Ok().json(serde_json::json!({"ok": true, "op": "${e.method} ${e.path}"})) }))`;
-    })
-    .join("\n");
+  const stub = (e: Endpoint) => {
+    const path = e.path.replace(/:([a-zA-Z0-9_]+)/g, "{$1}");
+    const method = e.method.toLowerCase();
+    return `.route("${path}", web::${method}().to(|| async { actix_web::HttpResponse::Ok().json(serde_json::json!({"ok": true, "op": "${e.method} ${e.path}"})) }))`;
+  };
+  const publicRoutes = endpoints.filter((e) => !(withAuth && e.auth)).map(stub);
+  const protectedRoutes = withAuth ? [...endpoints.filter((e) => e.auth).map(stub), ...entityConfigs] : [];
+  const mainRoutes = withAuth ? publicRoutes : [...publicRoutes, ...entityConfigs];
 
-  const poolSetup = isPostgres
+  // Registered last: an empty-prefix scope matches every remaining path.
+  const protectedScope = protectedRoutes.length > 0
+    ? [`            // Every route in this scope requires a valid Bearer JWT (see src/auth.rs).
+            .service(
+                web::scope("")
+                    .wrap(actix_web::middleware::from_fn(auth::require_auth))
+${protectedRoutes.map((r) => `                    ${r}`).join("\n")},
+            )`]
+    : [];
+
+  const poolSetup = sql
     ? `    let pool = db::connect(&cfg.database_url).await;\n    let pool_data = actix_web::web::Data::new(pool);\n`
     : `    let store = db::new_store();\n    let store_data = actix_web::web::Data::new(store);\n`;
 
-  const appData = isPostgres ? `            .app_data(pool_data.clone())` : `            .app_data(store_data.clone())`;
+  const appData = sql ? `            .app_data(pool_data.clone())` : `            .app_data(store_data.clone())`;
 
-  return `mod config;
+  const body = [
+    ...(metrics ? [`            .wrap(prometheus.clone())`] : []),
+    appData,
+    `            .route("/health", web::get().to(|| async { actix_web::HttpResponse::Ok().body("ok") }))`,
+    ...mainRoutes.map((r) => `            ${r}`),
+    ...protectedScope,
+  ].join("\n");
+
+  return `${withAuth ? "mod auth;\n" : ""}mod config;
 mod db;
 mod handlers;
 mod models;
@@ -838,15 +1084,18 @@ async fn main() -> std::io::Result<()> {
         .init();
     dotenvy::dotenv().ok();
     let cfg = config::Config::from_env();
-${poolSetup}
+${poolSetup}${metrics ? `    // Prometheus: per-route request counters + latency histograms, served at /metrics.
+    let prometheus = actix_web_prom::PrometheusMetricsBuilder::new("api")
+        .endpoint("/metrics")
+        .build()
+        .expect("build prometheus metrics");
+` : ""}
     let addr = format!("0.0.0.0:{}", cfg.port);
     tracing::info!("listening on {}", addr);
 
     HttpServer::new(move || {
         App::new()
-${appData}
-            .route("/health", web::get().to(|| async { actix_web::HttpResponse::Ok().body("ok") }))
-${endpointRoutes}${endpointRoutes && entityConfigs ? "\n" : ""}${entityConfigs}
+${body}
     })
     .bind(&addr)?
     // Actix's HttpServer::run already installs SIGTERM/SIGINT handlers and
@@ -861,7 +1110,7 @@ ${endpointRoutes}${endpointRoutes && entityConfigs ? "\n" : ""}${entityConfigs}
 
 // ─── tests/{snake}_test.rs ────────────────────────────────────────────────────
 
-function axumTest(entity: Entity): string {
+function axumTest(entity: Entity, sql: RustSql | null): string {
   const snake = toSnake(entity.name);
   const kebab = toKebab(entity.name);
   const plural = `${kebab}s`;
@@ -875,7 +1124,7 @@ mod tests {
     use serde_json::json;
 
     async fn build_server() -> TestServer {
-        let pool = sqlx::PgPool::connect(
+        let pool = sqlx::${sql?.pool ?? "PgPool"}::connect(
             &std::env::var("TEST_DATABASE_URL").unwrap_or_default(),
         )
         .await
@@ -933,7 +1182,7 @@ mod tests {
 `;
 }
 
-function actixTest(entity: Entity): string {
+function actixTest(entity: Entity, sql: RustSql | null): string {
   const snake = toSnake(entity.name);
   const kebab = toKebab(entity.name);
   const plural = `${kebab}s`;
@@ -951,7 +1200,7 @@ mod tests {
         Response = actix_web::dev::ServiceResponse,
         Error = actix_web::Error,
     > {
-        let pool = sqlx::PgPool::connect(
+        let pool = sqlx::${sql?.pool ?? "PgPool"}::connect(
             &std::env::var("TEST_DATABASE_URL").unwrap_or_default(),
         )
         .await
