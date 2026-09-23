@@ -4,9 +4,21 @@ import { Badge } from "@/components/ui/badge";
 
 const ENTRIES = [
   {
+    version: "0.6.0",
+    date: "2026-09-23",
+    tag: "latest",
+    changes: [
+      "Security hardening — OAuth state binding, open-redirect fix on login, team project visibility fix",
+      "Logout now clears stored deploy-provider tokens",
+      "Next.js upgraded to a patched 15.x release",
+      "AI copilot Stop button, plus a fix for corrupted generated handler logic",
+      "Java and Kotlin enabled in the builder",
+      "Sidebar navigation for API Builder, Preview, Templates, Gallery, Import repo, Editor and Git settings",
+    ],
+  },
+  {
     version: "0.5.0",
     date: "2026-05-12",
-    tag: "latest",
     changes: [
       "Public stack gallery — share and browse community stacks",
       "Team invites — link-based invitations with 7-day expiry",
@@ -15,8 +27,8 @@ const ENTRIES = [
       "Project rename and delete from the builder menu",
       "Real-time stats on landing page",
       "SQLite persistence warning on ephemeral deployments",
-      "GraphQL / tRPC marked as coming soon in the API panel",
-      "Deploy page — non-Railway providers labelled CLI only",
+      "GraphQL and tRPC generation in the API panel (tRPC is TypeScript-only)",
+      "Deploy page — Railway, Render, Fly and Vercel deploy for real; other providers marked coming soon",
     ],
   },
   {

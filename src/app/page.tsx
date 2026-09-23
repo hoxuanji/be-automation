@@ -172,32 +172,33 @@ export default function LandingPage() {
   );
 }
 
+// ponytail: no billing exists — tiers are descriptive only, everything is free during beta.
 const PRICING_TIERS = [
   {
     name: "Hobby",
     price: "Free",
     description: "For solo developers getting started.",
-    features: ["5 generated stacks / month", "All 6 languages", "Download as zip", "Public gallery access", "Community support"],
+    features: ["All 6 languages", "Download as zip", "Public gallery access", "Community support"],
     cta: "Start for free",
     href: "/login",
     highlight: false,
   },
   {
     name: "Pro",
-    price: "$19",
-    per: "/ month",
-    description: "For developers who ship regularly.",
-    features: ["Unlimited stacks", "GitHub push integration", "Railway one-click deploy", "Private gallery stacks", "Team (up to 5 members)", "Priority support"],
-    cta: "Get started",
+    price: "Free",
+    per: "during beta",
+    description: "Early access for developers who ship regularly.",
+    features: ["Everything in Hobby", "GitHub push integration", "Deploy to Railway / Render / Fly / Vercel", "AI copilot"],
+    cta: "Join early access",
     href: "/login",
     highlight: true,
   },
   {
     name: "Team",
-    price: "$49",
-    per: "/ month",
-    description: "For teams building together.",
-    features: ["Everything in Pro", "Unlimited team members", "Shared stack presets", "Audit logs", "SSO / SAML (coming soon)", "Dedicated support"],
+    price: "Free",
+    per: "during beta",
+    description: "Early access for teams building together.",
+    features: ["Everything in Pro", "Shared team workspaces", "Invite teammates", "SSO / SAML (coming soon)"],
     cta: "Contact us",
     href: "mailto:hello@helios.app",
     highlight: false,
@@ -208,8 +209,8 @@ function PricingSection() {
   return (
     <section id="pricing" className="container py-24">
       <div className="mx-auto max-w-2xl text-center mb-12">
-        <h2 className="text-3xl md:text-4xl font-semibold tracking-tight">Simple pricing</h2>
-        <p className="mt-3 text-muted-foreground">Start free. Upgrade when you need more.</p>
+        <h2 className="text-3xl md:text-4xl font-semibold tracking-tight">Pricing</h2>
+        <p className="mt-3 text-muted-foreground">Every tier is free during the beta. Paid plans will be announced before billing starts.</p>
       </div>
       <div className="grid gap-6 md:grid-cols-3 max-w-5xl mx-auto">
         {PRICING_TIERS.map((tier) => (
@@ -219,7 +220,7 @@ function PricingSection() {
           >
             {tier.highlight && (
               <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full border border-brand-500/40 bg-brand-500/20 px-3 py-0.5 text-[11px] font-medium text-brand-300">
-                Most popular
+                Early access
               </span>
             )}
             <div>
@@ -290,8 +291,8 @@ function SiteFooter() {
           <Link href="/changelog" className="hover:text-foreground">Changelog</Link>
           <Link href="/api/health" className="hover:text-foreground" target="_blank">Status</Link>
           <a href="mailto:security@helios.app" className="hover:text-foreground">Security</a>
-          <a href="#pricing" className="hover:text-foreground">Terms</a>
-          <a href="#pricing" className="hover:text-foreground">Privacy</a>
+          <Link href="/terms" className="hover:text-foreground">Terms</Link>
+          <Link href="/privacy" className="hover:text-foreground">Privacy</Link>
         </div>
       </div>
     </footer>

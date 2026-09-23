@@ -15,9 +15,11 @@ npm run dev     # local dev server on :3000
 npm run build   # production build
 npm run start   # start production server
 npm run lint    # Next.js ESLint
+npm test        # generator snapshot tests (node test runner)
+UPDATE_SNAPSHOTS=1 npm test   # regenerate snapshots (alias: npm run test:update)
 ```
 
-No tests yet. No prisma / no DB — state is Zustand only, per-tab.
+Persistence: SQLite via `better-sqlite3` (`src/lib/db.ts`) for users, sessions, projects, teams, gallery and deploy creds. Client state is Zustand with `persist` to localStorage. CI (`.github/workflows/ci.yml`) runs lint, typecheck, tests and builds generated repos. See `ROADMAP.md` for the full feature inventory.
 
 ## Architecture in one screen
 
@@ -30,12 +32,18 @@ Zustand store  ──┐
                  │    body: {config, endpoints}
                  │    resp: application/zip
                  │
-                 └─▶ POST /api/ai/chat        → Anthropic SDK messages.stream() → SSE
-                      body: {messages, config?}
-                      resp: text/event-stream
+                 ├─▶ POST /api/ai/chat        → Anthropic SDK messages.stream() → SSE
+                 │    body: {messages, config?}
+                 │    resp: text/event-stream
+                 │
+                 ├─▶ /api/auth/*              → GitHub / Bitbucket OAuth → JWT cookie + SQLite session
+                 ├─▶ /api/projects, teams, …  → SQLite (src/lib/db.ts)
+                 └─▶ /api/{railway,render,fly,vercel}/deploy → deploy pipeline (SSE progress)
+
+src/middleware.ts verifies the JWT and redirects protected routes to /login.
 ```
 
-The client is the source of truth for `StackConfig` and `Endpoint[]`. The server is stateless — it takes the current state and emits artifacts.
+The client is the source of truth for the in-progress `StackConfig` and `Endpoint[]`; generation is stateless. Saved projects, sessions and teams live in SQLite.
 
 ## Directory map
 
@@ -45,9 +53,11 @@ The client is the source of truth for `StackConfig` and `Endpoint[]`. The server
   - `builder/` — **Core surface.** 10 tabs (Runtime, Database, Cache, Queue, APIs, Security, Deployment, Scaling, CI/CD, Monitoring) + architecture preview + AI assistant + summary.
   - `api-builder/` — REST/gRPC endpoint editor.
   - `preview/` — Generated repository browser with Download zip CTA.
-  - `deploy/` — Provider grid + credentials + simulated deploy flow.
+  - `deploy/` — Provider grid + credentials. Railway / Render / Fly / Vercel deploy for real; the rest are "Coming soon".
+  - Also: `templates/`, `gallery/`, `from-repo/`, `editor/`, `git-settings/`, `settings/`, `changelog/`, `terms/`, `privacy/`, `(auth)/login`, `invite/`.
   - `api/generate/route.ts` — zip stream endpoint.
   - `api/ai/chat/route.ts` — Anthropic SSE endpoint.
+  - `api/auth/`, `api/projects/`, `api/teams/`, `api/gallery/`, `api/<provider>/deploy/` — auth, persistence, deploys.
 - `src/components/`
   - `ui/` — shadcn-style primitives (Button, Card, Tabs, Switch, Slider, Badge, Input, Tooltip, ScrollArea, SelectableCard, Dropdown, Toast, Separator, Kbd).
   - `layout/` — Sidebar, Topbar, WorkspaceShell.
@@ -58,10 +68,12 @@ The client is the source of truth for `StackConfig` and `Endpoint[]`. The server
   - `store.ts` — Zustand: `config`, `endpoints`, `workspace[s]`. Mutators: `set`, `patch`, `addEndpoint`, `removeEndpoint`, `updateEndpoint`, `addEnvVar`, `removeEnvVar`, `setWorkspace`.
   - `schema.ts` — Zod schemas for API request validation. Mirrors store types.
   - `utils.ts` — `cn()`, `formatBytes()`, `shortId()`.
+  - `db.ts` — SQLite schema + queries. `auth.ts` — JWT/session helpers. `deploy-pipeline.ts` + `railway.ts` / `render.ts` / `fly.ts` / `vercel.ts` — deploy providers.
   - `generators/` — Templated file emitters.
     - `index.ts` — `generate(config, endpoints) → GeneratedFile[]`.
     - `common.ts` — README, env, Dockerfile, docker-compose, K8s, Helm, CI, OpenAPI.
-    - `go.ts` / `typescript.ts` / `python.ts` / `others.ts` (Rust/Java/Kotlin).
+    - `go.ts` / `typescript.ts` / `python.ts` / `rust.ts` / `java.ts` / `kotlin.ts` (+ `graphql/`, `grpc/`, `auth/`, `db/`, `patterns/`).
+    - `__tests__/` — snapshot tests across language × framework × API combos.
 - `src/data/stack-options.ts` — Catalog of languages, frameworks, DBs, caches, queues, auth, deployments, monitoring, CI. Brand ids in this file must match keys in `BrandIcon`'s registry.
 
 ## State model
@@ -154,7 +166,7 @@ Generators must output **plain text** files — no binary. Use `dedent` / templa
 - Don't run `git config --global …` — keep identity changes scoped to the repo (`git config user.email "…"`).
 - Don't commit `.env*.local` or `.claude/` (both are gitignored).
 - Don't add a CSS framework beyond Tailwind. Don't add another state library. Don't add a component library on top of the current primitives.
-- Don't replace the Zustand store with Redux/Jotai/Context. Don't add persistence unless asked.
+- Don't replace the Zustand store with Redux/Jotai/Context. Don't add new persistence layers (SQLite + Zustand `persist` already exist).
 - Don't lift the AI copilot into global state — it's a panel, rendered per-page via `WorkspaceShell.right`.
 
 ## Glossary of ids (must stay consistent)

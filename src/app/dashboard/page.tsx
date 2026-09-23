@@ -281,7 +281,7 @@ const templates: Template[] = [
 const quickActions = [
   { label: "New stack", desc: "Start from scratch", icon: Boxes, href: "/builder" },
   { label: "API contract", desc: "Design endpoints", icon: FileCode2, href: "/api-builder" },
-  { label: "Connect cloud", desc: "AWS / GCP / Azure", icon: Cloud, href: "/deploy" },
+  { label: "Deploy", desc: "Railway / Render / Fly / Vercel", icon: Cloud, href: "/deploy" },
   { label: "Import repo", desc: "Analyze existing", icon: FolderGit2, href: "/from-repo" },
 ];
 
@@ -356,33 +356,14 @@ export default function DashboardPage() {
                   <ArrowUpRight className="ml-auto h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
                 </div>
               );
-              if ("href" in a && a.href) {
-                return (
-                  <Link
-                    key={a.label}
-                    href={a.href}
-                    className="group relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 hover-raise"
-                  >
-                    {card}
-                  </Link>
-                );
-              }
               return (
-                <button
+                <Link
                   key={a.label}
-                  type="button"
-                  onClick={() =>
-                    toast({
-                      title: "Import coming soon",
-                      description:
-                        "Connect a GitHub repo to let Helios analyze and upgrade it.",
-                      kind: "info",
-                    })
-                  }
-                  className="group relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 hover-raise text-left"
+                  href={a.href}
+                  className="group relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 hover-raise"
                 >
                   {card}
-                </button>
+                </Link>
               );
             })}
           </div>
