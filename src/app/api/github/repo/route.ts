@@ -1,5 +1,7 @@
 import { cookies } from "next/headers";
 import { NextResponse, type NextRequest } from "next/server";
+import { getCurrentUser } from "@/lib/auth";
+import { isGhName, isGhRef } from "../_validate";
 
 export const runtime = "nodejs";
 
@@ -24,6 +26,7 @@ export type GhTreeItem = {
 // GET /api/github/repo?owner=&repo=&ref=
 // Returns repo metadata + flat recursive file tree
 export async function GET(req: NextRequest) {
+  if (!(await getCurrentUser(req))) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const cookieStore = await cookies();
   const token = cookieStore.get("github_token")?.value;
   if (!token) return NextResponse.json({ error: "no_token" }, { status: 401 });
@@ -34,6 +37,9 @@ export async function GET(req: NextRequest) {
   const ref = searchParams.get("ref"); // optional — defaults to repo's default branch
 
   if (!owner || !repo) return NextResponse.json({ error: "missing_params" }, { status: 400 });
+  if (!isGhName(owner) || !isGhName(repo) || (ref !== null && !isGhRef(ref))) {
+    return NextResponse.json({ error: "invalid_params" }, { status: 400 });
+  }
 
   // Fetch repo metadata
   const repoRes = await ghFetch(`/repos/${owner}/${repo}`, token);

@@ -4,6 +4,8 @@ import { z } from "zod";
 import { pushGeneratedRepo } from "@/lib/github-push";
 import { PipelineError } from "@/lib/pipeline-types";
 import { stackConfigSchema, endpointSchema, entitySchema } from "@/lib/schema";
+import { getCurrentUser } from "@/lib/auth";
+import { isGhName } from "../_validate";
 
 export const runtime = "nodejs";
 
@@ -11,11 +13,12 @@ const bodySchema = z.object({
   config: stackConfigSchema,
   endpoints: z.array(endpointSchema),
   entities: z.array(entitySchema),
-  repoName: z.string().min(1).max(100).regex(/^[a-zA-Z0-9_.-]+$/),
+  repoName: z.string().min(1).max(100).refine(isGhName),
   private: z.boolean().optional().default(false),
 });
 
 export async function POST(req: NextRequest) {
+  if (!(await getCurrentUser(req))) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const cookieStore = await cookies();
   const token = cookieStore.get("github_token")?.value;
   if (!token) {

@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import crypto from "crypto";
 import { getJwtSecret } from "@/lib/env";
+import { safeReturnTo } from "@/lib/auth";
 
 // Bitbucket OAuth 2 — auth code grant. Identical state-signing scheme as
 // the GitHub route so we can reuse the same TTL/HMAC logic and force the
@@ -51,8 +52,17 @@ export async function GET(req: NextRequest) {
     `https://bitbucket.org/site/oauth2/authorize?${params.toString()}`
   );
 
-  const returnTo = req.nextUrl.searchParams.get("returnTo");
-  if (returnTo && returnTo.startsWith("/")) {
+  // Browser-bound copy of the nonce; the callback requires state nonce === cookie.
+  response.cookies.set("bitbucket_oauth_nonce", nonce, {
+    httpOnly: true,
+    path: "/",
+    maxAge: STATE_TTL_SEC,
+    sameSite: "lax",
+    secure: IS_PROD,
+  });
+
+  const returnTo = safeReturnTo(req.nextUrl.searchParams.get("returnTo"));
+  if (returnTo) {
     response.cookies.set("bitbucket_return_to", returnTo, {
       httpOnly: true,
       path: "/",

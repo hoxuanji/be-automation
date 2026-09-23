@@ -1,4 +1,5 @@
 import { type NextRequest } from "next/server";
+import { getCurrentUser } from "@/lib/auth";
 import { listRenderOwners, RenderError } from "@/lib/render";
 
 export const runtime = "nodejs";
@@ -8,6 +9,9 @@ export const runtime = "nodejs";
 // Returns the first owner the API key has access to so the UI can confirm
 // "you're connected as <name>". Mirrors the Railway verify shape.
 export async function POST(req: NextRequest) {
+  if (!(await getCurrentUser(req))) {
+    return Response.json({ code: "unauthorized", error: "Sign in required." }, { status: 401 });
+  }
   let body: unknown;
   try {
     body = await req.json();

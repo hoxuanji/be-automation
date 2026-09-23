@@ -1,4 +1,5 @@
 import { type NextRequest } from "next/server";
+import { getCurrentUser } from "@/lib/auth";
 import { listFlyOrgs, FlyError } from "@/lib/fly";
 
 export const runtime = "nodejs";
@@ -7,6 +8,9 @@ export const runtime = "nodejs";
 // Body: { token: string }
 // Returns the orgs the token can deploy into.
 export async function POST(req: NextRequest) {
+  if (!(await getCurrentUser(req))) {
+    return Response.json({ code: "unauthorized", error: "Sign in required." }, { status: 401 });
+  }
   let body: unknown;
   try {
     body = await req.json();

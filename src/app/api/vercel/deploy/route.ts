@@ -97,7 +97,7 @@ export async function POST(req: NextRequest) {
       {
         error: "vercel_error",
         message: "Deployment failed unexpectedly.",
-        hint: err instanceof Error ? err.message : "Check server logs.",
+        hint: "Check server logs.",
       },
       { status: 502 }
     );

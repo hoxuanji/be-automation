@@ -4,6 +4,8 @@ import { z } from "zod";
 import { generate } from "@/lib/generators";
 import { stackConfigSchema, endpointSchema, entitySchema } from "@/lib/schema";
 import type { GitConfig } from "@/lib/git-config";
+import { getCurrentUser } from "@/lib/auth";
+import { isGhName, isGhRef } from "../_validate";
 
 export const runtime = "nodejs";
 
@@ -22,10 +24,10 @@ async function ghFetch(path: string, token: string, init?: RequestInit) {
 }
 
 const bodySchema = z.object({
-  owner: z.string().min(1).max(100),
-  repo: z.string().min(1).max(100),
-  baseBranch: z.string().min(1).max(255),
-  branchName: z.string().min(1).max(255),
+  owner: z.string().min(1).max(100).refine(isGhName),
+  repo: z.string().min(1).max(100).refine(isGhName),
+  baseBranch: z.string().min(1).max(255).refine(isGhRef),
+  branchName: z.string().min(1).max(255).refine(isGhRef),
   title: z.string().min(1).max(200),
   body: z.string().max(10000).optional(),
   config: stackConfigSchema,
@@ -37,6 +39,7 @@ const bodySchema = z.object({
 // POST /api/github/pr
 // Full flow: create branch → commit generated files → open PR → return PR URL
 export async function POST(req: NextRequest) {
+  if (!(await getCurrentUser(req))) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const cookieStore = await cookies();
   const token = cookieStore.get("github_token")?.value;
   if (!token) {

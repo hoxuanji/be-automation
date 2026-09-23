@@ -1,6 +1,8 @@
 import { cookies } from "next/headers";
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
+import { getCurrentUser } from "@/lib/auth";
+import { isGhName } from "../_validate";
 
 export const runtime = "nodejs";
 
@@ -26,8 +28,8 @@ const envSchema = z.object({
 });
 
 const bodySchema = z.object({
-  owner: z.string().min(1).max(100),
-  repo: z.string().min(1).max(100),
+  owner: z.string().min(1).max(100).refine(isGhName),
+  repo: z.string().min(1).max(100).refine(isGhName),
   environments: z.array(envSchema).min(1).max(10),
   // Branch protection rules to apply
   branchProtection: z.array(z.object({
@@ -43,6 +45,7 @@ const bodySchema = z.object({
 
 // POST /api/github/environments — push environments + branch protection rules to GitHub
 export async function POST(req: NextRequest) {
+  if (!(await getCurrentUser(req))) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const cookieStore = await cookies();
   const token = cookieStore.get("github_token")?.value;
   if (!token) {

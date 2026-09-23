@@ -198,6 +198,7 @@ export async function POST(req: NextRequest) {
           : provider === "render" ? "render_error"
           : provider === "vercel" ? "vercel_error"
           : "fly_error";
+        if (!(err instanceof PipelineError)) console.error(`[deploy/stream] ${provider} unexpected error:`, err);
         const pe =
           err instanceof PipelineError
             ? err
@@ -205,7 +206,7 @@ export async function POST(req: NextRequest) {
                 code: fallbackCode,
                 status: 502,
                 message: "Deployment failed unexpectedly.",
-                hint: err instanceof Error ? err.message : String(err),
+                hint: "Check server logs.",
               });
         send("error", { type: "error", error: { ...pe.toJSON(), status: pe.status } });
       } finally {
