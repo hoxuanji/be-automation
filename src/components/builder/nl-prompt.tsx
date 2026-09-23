@@ -28,17 +28,22 @@ export function NLPrompt() {
   const [result, setResult] = React.useState<SuggestResult | null>(null);
   const [showDetail, setShowDetail] = React.useState(false);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+  const abortRef = React.useRef<AbortController | null>(null);
+  React.useEffect(() => () => abortRef.current?.abort(), []);
 
   async function suggest() {
     const text = prompt.trim();
     if (!text || loading) return;
     setLoading(true);
     setResult(null);
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       const res = await fetch("/api/ai/suggest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: text }),
+        signal: controller.signal,
       });
       const data = await res.json();
       if (res.status === 503) {
@@ -52,8 +57,10 @@ export function NLPrompt() {
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
       setResult(data as SuggestResult);
     } catch (err) {
+      if ((err as Error).name === "AbortError") return;
       toast({ title: "Suggestion failed", description: (err as Error).message, kind: "error" });
     } finally {
+      abortRef.current = null;
       setLoading(false);
     }
   }

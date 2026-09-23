@@ -509,6 +509,8 @@ function BusinessLogicPanel({
 }) {
   const [generating, setGenerating] = React.useState(false);
   const [preview, setPreview] = React.useState<string | null>(null);
+  const abortRef = React.useRef<AbortController | null>(null);
+  React.useEffect(() => () => abortRef.current?.abort(), []);
 
   const selectedPattern = PATTERN_CATALOG.find((p) => p.id === endpoint.pattern);
 
@@ -519,6 +521,9 @@ function BusinessLogicPanel({
     }
     setGenerating(true);
     setPreview(null);
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       const res = await fetch("/api/ai/generate-logic", {
         method: "POST",
@@ -527,6 +532,7 @@ function BusinessLogicPanel({
           endpoint: { method: endpoint.method, path: endpoint.path, pattern: endpoint.pattern, logic: endpoint.logic, summary: endpoint.summary },
           config,
         }),
+        signal: controller.signal,
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
@@ -536,24 +542,46 @@ function BusinessLogicPanel({
       const reader = res.body?.getReader();
       if (!reader) return;
       let code = "";
+      let buffer = "";
+      let streamError: string | null = null;
       const decoder = new TextDecoder();
-      while (true) {
+      read: while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value);
-        for (const line of chunk.split("\n")) {
-          if (line.startsWith("data: ")) {
-            try { code += JSON.parse(line.slice(6)); } catch { /* skip */ }
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+        for (const frame of frames) {
+          let event = "message";
+          let data = "";
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("event:")) event = line.slice(6).trim();
+            else if (line.startsWith("data:")) data += line.slice(5).trim();
           }
+          let parsed: unknown;
+          try { parsed = JSON.parse(data); } catch { continue; }
+          if (event === "error") {
+            streamError = (parsed as { error?: string })?.error ?? "Stream error";
+            break read;
+          }
+          if (event === "message" && typeof parsed === "string") code += parsed;
         }
         setPreview(code);
+      }
+      if (streamError) {
+        reader.cancel().catch(() => {});
+        setPreview(null);
+        toast({ title: "Generation failed", description: streamError, kind: "error" });
+        return;
       }
       onUpdate({ logicCode: code });
       setPreview(null);
       toast({ title: "Logic generated", kind: "success" });
-    } catch {
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return;
       toast({ title: "Network error", kind: "error" });
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setGenerating(false);
     }
   }
