@@ -148,6 +148,7 @@ jobs:
         run: |
           go mod tidy
           go build ./...
+          test -z "$(gofmt -l .)" || { echo "::error::generated Go is not gofmt-clean:"; gofmt -l .; exit 1; }
 
       - name: Setup Node (TS)
         if: matrix.combo.language == 'typescript'

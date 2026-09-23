@@ -155,7 +155,7 @@ type GoDeps = {
   api: { usesDb: boolean; usesRdb: boolean } | null;
 };
 
-function goDbKind(database: string): GoDbKind {
+export function goDbKind(database: string): GoDbKind {
   if (/postgres|neon|supabase|cockroach/.test(database)) return "postgres";
   if (/mysql|planetscale/.test(database)) return "mysql";
   if (database === "sqlite") return "sqlite";
@@ -867,7 +867,7 @@ function goDocEntityTest(module: string, fw: GoFw, entity: Entity): string {
   return goEntityTest(module, fw, entity)
     .replace(`\t"github.com/glebarez/sqlite"\n`, "")
     .replace(`\t"gorm.io/gorm"\n`, "")
-    .replace(`\t"${module}/internal/models"`, `\t"${module}/internal/db"`)
+    .replace(`\t"${module}/internal/handlers"\n\t"${module}/internal/models"`, `\t"${module}/internal/db"\n\t"${module}/internal/handlers"`)
     .replace(new RegExp(`func setup${pascal}DB\\(t \\*testing\\.T\\) \\*gorm\\.DB \\{[\\s\\S]*?\\n\\}\\n\\n`), "")
     .replace(`\tdb := setup${pascal}DB(t)\n\th := handlers.New${pascal}Handler(db)`, `\th := handlers.New${pascal}Handler(db.NewMemoryStore())`);
 }
