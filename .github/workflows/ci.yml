@@ -83,6 +83,25 @@ jobs:
           - { label: "java-quarkus", language: "java", framework: "quarkus", javaVersion: "21" }
           - { label: "kotlin-ktor", language: "kotlin", framework: "ktor", javaVersion: "21" }
           - { label: "kotlin-spring-kt", language: "kotlin", framework: "spring-kt", javaVersion: "21" }
+          # "full" profile: every flag on (tracing, rateLimit, audit, auth, k8s/helm) + an entity,
+          # across frameworks and databases, so the code behind those options is actually compiled.
+          - { label: "go-gin-full-mysql", language: "go", framework: "gin", profile: "full", database: "mysql" }
+          - { label: "go-fiber-full-mongodb", language: "go", framework: "fiber", profile: "full", database: "mongodb" }
+          - { label: "go-echo-full", language: "go", framework: "echo", profile: "full" }
+          - { label: "go-chi-full", language: "go", framework: "chi", profile: "full" }
+          - { label: "ts-express-full", language: "typescript", framework: "express", profile: "full" }
+          - { label: "ts-nestjs-full", language: "typescript", framework: "nestjs", profile: "full" }
+          - { label: "ts-fastify-full", language: "typescript", framework: "fastify", profile: "full" }
+          - { label: "ts-hono-full", language: "typescript", framework: "hono", profile: "full" }
+          - { label: "python-fastapi-full-mysql", language: "python", framework: "fastapi", profile: "full", database: "mysql" }
+          - { label: "python-litestar-full", language: "python", framework: "litestar", profile: "full" }
+          - { label: "python-django-full", language: "python", framework: "django", profile: "full" }
+          - { label: "rust-axum-full-mysql", language: "rust", framework: "axum", profile: "full", database: "mysql" }
+          - { label: "rust-actix-full", language: "rust", framework: "actix", profile: "full" }
+          - { label: "java-spring-full-mysql", language: "java", framework: "spring", profile: "full", database: "mysql", javaVersion: "21" }
+          - { label: "java-quarkus-full", language: "java", framework: "quarkus", profile: "full", javaVersion: "21" }
+          - { label: "kotlin-ktor-full", language: "kotlin", framework: "ktor", profile: "full", javaVersion: "21" }
+          - { label: "kotlin-spring-kt-full", language: "kotlin", framework: "spring-kt", profile: "full", javaVersion: "21" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -92,49 +111,15 @@ jobs:
       - run: npm ci
 
       - name: Generate repo
+        env:
+          LANGUAGE: ${{ matrix.combo.language }}
+          FRAMEWORK: ${{ matrix.combo.framework }}
+          PROFILE: ${{ matrix.combo.profile || 'minimal' }}
+          DATABASE: ${{ matrix.combo.database || 'postgres' }}
         run: |
           node --experimental-strip-types --no-warnings \
             --import ./src/lib/generators/__tests__/loader.mjs \
-            -e "
-            import { generate } from './src/lib/generators/index.ts';
-            import { writeFileSync, mkdirSync } from 'node:fs';
-            import { dirname, join } from 'node:path';
-            const config = {
-              name: 'smoke-app',
-              language: '${{ matrix.combo.language }}',
-              framework: '${{ matrix.combo.framework }}',
-              database: 'postgres',
-              cache: 'redis',
-              queue: 'rabbitmq',
-              api: 'rest',
-              auth: 'none',
-              deployment: 'k8s',
-              scaling: 'horizontal',
-              monitoring: 'prometheus',
-              cicd: 'github-actions',
-              docker: true,
-              kubernetes: false,
-              helm: false,
-              tracing: false,
-              rateLimit: false,
-              audit: false,
-              autoscale: false,
-              replicas: 1,
-              region: 'us-east-1',
-              envVars: [],
-            };
-            const endpoints = [
-              { id: '1', method: 'GET', path: '/health', summary: 'Health', auth: false },
-            ];
-            const files = generate(config, endpoints);
-            const out = '/tmp/smoke-repo';
-            for (const f of files) {
-              const p = join(out, f.path);
-              mkdirSync(dirname(p), { recursive: true });
-              writeFileSync(p, f.content);
-            }
-            console.log(files.length + ' files written to ' + out);
-            "
+            scripts/smoke-generate.mjs
 
       - name: Setup Go
         if: matrix.combo.language == 'go'
@@ -148,6 +133,7 @@ jobs:
         run: |
           go mod tidy
           go build ./...
+          go vet ./...
 
       - name: Setup Node (TS)
         if: matrix.combo.language == 'typescript'
@@ -178,7 +164,10 @@ jobs:
             pip install -q poetry==1.8.3 &&
             poetry config virtualenvs.create false &&
             poetry install --no-root &&
-            python -m py_compile $(find . -name "*.py" -not -path "./.venv/*" | head -20)
+            python -m py_compile $(find . -name "*.py" -not -path "./.venv/*") &&
+            pip install -q pyflakes &&
+            # Only undefined names fail the build: they are runtime NameErrors. Other pyflakes output is style.
+            ! python -m pyflakes . | grep "undefined name"
           } 2>&1 | tee /tmp/py.log || {
             grep -iE "error|failed|because|not found|No such" /tmp/py.log | head -25 | while IFS= read -r l; do echo "::error::$l"; done
             exit 1
