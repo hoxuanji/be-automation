@@ -17,6 +17,8 @@ export function javaFiles(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+const isMysql = (db: string) => /mysql|planetscale/.test(db);
+
 function safe(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9-_]+/g, "-").replace(/^-+|-+$/g, "") || "app";
 }
@@ -45,17 +47,17 @@ function importsForType(t: FieldType): string[] {
 }
 
 /** Spring-style path: :id → {id} */
-function springPath(p: string): string {
+export function springPath(p: string): string {
   return p.replace(/:([a-zA-Z0-9_]+)/g, "{$1}");
 }
 
 /** Build @Column annotation for a non-PK field */
-function columnAnnotation(field: EntityField): string {
+function columnAnnotation(field: EntityField, mysql = false): string {
   const parts: string[] = [];
   if (field.unique)    parts.push("unique = true");
   if (field.required)  parts.push("nullable = false");
   if (field.type === "text") parts.push('columnDefinition = "TEXT"');
-  if (field.type === "json") parts.push('columnDefinition = "jsonb"');
+  if (field.type === "json") parts.push(`columnDefinition = "${mysql ? "json" : "jsonb"}"`);
   if (parts.length === 0) return "@Column";
   return `@Column(${parts.join(", ")})`;
 }
@@ -89,8 +91,10 @@ function springFiles(
   const files: GeneratedFile[] = [];
   const anyProtected = endpoints.some((e) => e.auth);
   const withAuth = needsAuth(config, anyProtected);
+  const mysql = isMysql(config.database);
+  const metrics = config.monitoring === "grafana";
 
-  files.push({ path: "pom.xml",    content: springPom(artifact, withAuth) });
+  files.push({ path: "pom.xml",    content: springPom(artifact, withAuth, mysql, metrics) });
   files.push({ path: "Dockerfile", content: springDockerfile() });
   files.push({
     path: "src/main/resources/logback-spring.xml",
@@ -106,7 +110,7 @@ function springFiles(
   });
   files.push({
     path: "src/main/resources/application.properties",
-    content: springAppProperties(config.name, withAuth),
+    content: springAppProperties(config.name, withAuth, mysql, metrics),
   });
 
   if (withAuth) {
@@ -120,7 +124,7 @@ function springFiles(
   if (entities.length === 0 && endpoints.length > 0) {
     files.push({
       path: "src/main/java/dev/helios/app/ApiController.java",
-      content: scaffoldApiController(endpoints),
+      content: scaffoldApiController(endpoints.filter((e) => e.path !== "/health")),
     });
   }
 
@@ -128,7 +132,7 @@ function springFiles(
     const pascal = toPascal(entity.name);
     files.push({
       path: `src/main/java/dev/helios/app/model/${pascal}.java`,
-      content: entityClass(entity),
+      content: entityClass(entity, mysql),
     });
     files.push({
       path: `src/main/java/dev/helios/app/repository/${pascal}Repository.java`,
@@ -151,7 +155,30 @@ function springFiles(
   return files;
 }
 
-function springPom(artifactId: string, withAuth = false): string {
+function springPom(artifactId: string, withAuth = false, mysql = false, metrics = false): string {
+  const driver = mysql
+    ? `    <dependency>
+      <groupId>com.mysql</groupId>
+      <artifactId>mysql-connector-j</artifactId>
+      <scope>runtime</scope>
+    </dependency>`
+    : `    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>`;
+  const metricsDeps = metrics
+    ? `    <!-- Prometheus metrics at /actuator/prometheus. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+    </dependency>
+`
+    : "";
   const authDeps = withAuth
     ? `    <!-- Spring Security + OAuth2 Resource Server validates JWTs via JWKS,
          gated by \`spring.security.oauth2.resourceserver.jwt.issuer-uri\` in
@@ -191,11 +218,7 @@ function springPom(artifactId: string, withAuth = false): string {
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-data-jpa</artifactId>
     </dependency>
-    <dependency>
-      <groupId>org.postgresql</groupId>
-      <artifactId>postgresql</artifactId>
-      <scope>runtime</scope>
-    </dependency>
+${driver}
     <!-- Flyway runs src/main/resources/db/migration/*.sql on Spring Boot startup. -->
     <dependency>
       <groupId>org.flywaydb</groupId>
@@ -203,13 +226,13 @@ function springPom(artifactId: string, withAuth = false): string {
     </dependency>
     <dependency>
       <groupId>org.flywaydb</groupId>
-      <artifactId>flyway-database-postgresql</artifactId>
+      <artifactId>${mysql ? "flyway-mysql" : "flyway-database-postgresql"}</artifactId>
     </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-validation</artifactId>
     </dependency>
-${authDeps}    <dependency>
+${authDeps}${metricsDeps}    <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
       <scope>test</scope>
@@ -316,7 +339,13 @@ public class HealthController {
 `;
 }
 
-function springAppProperties(appName: string, withAuth = false): string {
+function springAppProperties(appName: string, withAuth = false, mysql = false, metrics = false): string {
+  const metricsProps = metrics
+    ? `
+# Prometheus scrape endpoint: /actuator/prometheus
+management.endpoints.web.exposure.include=health,prometheus
+`
+    : "";
   const authProps = withAuth
     ? `
 # ─── OAuth2 Resource Server ──────────────────────────────────────────────────
@@ -331,10 +360,12 @@ auth.expected-audience=\${AUTH_AUDIENCE:}
 `
     : "";
   return `spring.application.name=${appName}
-spring.datasource.url=\${DATABASE_URL:jdbc:postgresql://localhost:5432/${appName}}
-spring.datasource.driver-class-name=org.postgresql.Driver
+spring.datasource.url=\${DATABASE_URL:${mysql ? `jdbc:mysql://localhost:3306/${appName}` : `jdbc:postgresql://localhost:5432/${appName}`}}
+spring.datasource.driver-class-name=${mysql ? "com.mysql.cj.jdbc.Driver" : "org.postgresql.Driver"}
 # JPA: Flyway handles schema so \`ddl-auto=validate\` is safer than \`update\`.
-spring.jpa.hibernate.ddl-auto=validate
+spring.jpa.hibernate.ddl-auto=validate${mysql ? `
+# Migrations store UUIDs as CHAR(36); Hibernate defaults to BINARY(16) on MySQL.
+spring.jpa.properties.hibernate.type.preferred_uuid_jdbc_type=CHAR` : ""}
 spring.jpa.show-sql=false
 
 # HikariCP — sized for a single-container deployment. Tune when scaling out
@@ -349,7 +380,7 @@ spring.datasource.hikari.validation-timeout=5000
 # Flyway auto-runs src/main/resources/db/migration/V*.sql on startup.
 spring.flyway.enabled=true
 spring.flyway.baseline-on-migrate=true
-${authProps}
+${authProps}${metricsProps}
 server.port=\${PORT:8080}
 `;
 }
@@ -463,7 +494,7 @@ ${methods}
 `;
 }
 
-function methodAnnotation(method: string): string {
+export function methodAnnotation(method: string): string {
   switch (method) {
     case "GET":    return "GetMapping";
     case "POST":   return "PostMapping";
@@ -474,7 +505,7 @@ function methodAnnotation(method: string): string {
   }
 }
 
-function handlerMethodName(e: Endpoint): string {
+export function handlerMethodName(e: Endpoint): string {
   const parts = e.path
     .split("/")
     .filter(Boolean)
@@ -488,7 +519,7 @@ function cap(s: string): string {
 
 // ─── Entity class ─────────────────────────────────────────────────────────────
 
-function entityClass(entity: Entity): string {
+function entityClass(entity: Entity, mysql = false): string {
   const pascal = toPascal(entity.name);
   const tableName = toSnake(entity.name);
   const pk = pkField(entity);
@@ -513,7 +544,7 @@ function entityClass(entity: Entity): string {
       lines.push("    @Id");
       lines.push("    @GeneratedValue(strategy = GenerationType.UUID)");
     } else {
-      lines.push(`    ${columnAnnotation(f)}`);
+      lines.push(`    ${columnAnnotation(f, mysql)}`);
       if (f.name === "createdAt") {
         lines.push("    @CreationTimestamp");
         lines.push("    @Column(updatable = false)");
@@ -797,12 +828,20 @@ function quarkusFiles(
 ): GeneratedFile[] {
   const artifact = safe(config.name);
   const files: GeneratedFile[] = [];
+  const withAuth = needsAuth(config, endpoints.some((e) => e.auth));
+  const mysql = isMysql(config.database);
+  const metrics = config.monitoring === "grafana";
 
-  files.push({ path: "pom.xml",    content: quarkusPom(artifact) });
+  files.push({ path: "pom.xml",    content: quarkusPom(artifact, withAuth, mysql, metrics) });
   files.push({ path: "Dockerfile", content: springDockerfile() }); // same JRE pattern
   files.push({
     path: "src/main/resources/application.properties",
-    content: quarkusAppProperties(config.name),
+    content: quarkusAppProperties(config.name, withAuth, mysql),
+  });
+  // Always served — the K8s probes and docker-compose healthcheck hit /health.
+  files.push({
+    path: "src/main/java/dev/helios/app/HealthResource.java",
+    content: quarkusHealthResource(),
   });
 
   for (const entity of entities) {
@@ -810,11 +849,11 @@ function quarkusFiles(
     const kebab = toKebab(entity.name);
     files.push({
       path: `src/main/java/dev/helios/app/${pascal}.java`,
-      content: quarkusEntity(entity),
+      content: quarkusEntity(entity, mysql),
     });
     files.push({
       path: `src/main/java/dev/helios/app/${pascal}Resource.java`,
-      content: quarkusResource(entity, pascal, kebab),
+      content: quarkusResource(entity, pascal, kebab, withAuth),
     });
     // Smoke test mirrors what the Spring path emits — list returns 200,
     // create returns 201. Real assertion logic is left to the user, who
@@ -823,24 +862,62 @@ function quarkusFiles(
     // reflectively-broken Panache bindings.
     files.push({
       path: `src/test/java/dev/helios/app/${pascal}ResourceTest.java`,
-      content: quarkusResourceTest(entity, pascal, kebab),
+      content: quarkusResourceTest(entity, pascal, kebab, withAuth),
     });
   }
 
-  if (entities.length === 0) {
+  // Same rule as Spring: endpoint stubs only when no entity CRUD owns the paths.
+  const stubs = endpoints.filter((e) => e.path !== "/health");
+  if (entities.length === 0 && stubs.length > 0) {
     files.push({
-      path: "src/main/java/dev/helios/app/HealthResource.java",
-      content: quarkusHealthResource(),
+      path: "src/main/java/dev/helios/app/ApiResource.java",
+      content: quarkusApiResource(stubs, withAuth),
     });
   }
-
-  // Suppress unused-variable warnings from TypeScript perspective
-  void endpoints;
 
   return files;
 }
 
-function quarkusPom(artifactId: string): string {
+function quarkusApiResource(endpoints: Endpoint[], withAuth: boolean): string {
+  const methods = endpoints.map((e) => {
+    const verb = ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(e.method) ? e.method : "GET";
+    const auth = withAuth && e.auth ? "\n    @Authenticated" : "";
+    return `    @${verb}
+    @Path(${JSON.stringify(springPath(e.path))})${auth}
+    public Map<String, Object> ${handlerMethodName(e)}() {
+        return Map.of("ok", true, "op", "${e.method} ${e.path}");
+    }`;
+  }).join("\n\n");
+
+  return `package dev.helios.app;
+
+${withAuth ? "import io.quarkus.security.Authenticated;\n" : ""}import jakarta.ws.rs.*;
+import jakarta.ws.rs.core.MediaType;
+import java.util.Map;
+
+@Path("/")
+@Produces(MediaType.APPLICATION_JSON)
+public class ApiResource {
+
+${methods}
+}
+`;
+}
+
+function quarkusPom(artifactId: string, withAuth = false, mysql = false, metrics = false): string {
+  const extra = [
+    // SmallRye JWT verifies Bearer tokens against AUTH_JWKS_URL (see application.properties).
+    withAuth ? "quarkus-smallrye-jwt" : "",
+    // Micrometer + Prometheus registry → /q/metrics.
+    metrics ? "quarkus-micrometer-registry-prometheus" : "",
+  ]
+    .filter(Boolean)
+    .map((a) => `    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>${a}</artifactId>
+    </dependency>
+`)
+    .join("");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
@@ -874,13 +951,13 @@ function quarkusPom(artifactId: string): string {
     </dependency>
     <dependency>
       <groupId>io.quarkus</groupId>
-      <artifactId>quarkus-jdbc-postgresql</artifactId>
+      <artifactId>${mysql ? "quarkus-jdbc-mysql" : "quarkus-jdbc-postgresql"}</artifactId>
     </dependency>
     <dependency>
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-smallrye-openapi</artifactId>
     </dependency>
-    <dependency>
+${extra}    <dependency>
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-junit5</artifactId>
       <scope>test</scope>
@@ -909,16 +986,25 @@ function quarkusPom(artifactId: string): string {
 `;
 }
 
-function quarkusAppProperties(appName: string): string {
+function quarkusAppProperties(appName: string, withAuth = false, mysql = false): string {
+  const authProps = withAuth
+    ? `
+# SmallRye JWT: signature via the provider's JWKS, plus iss/aud checks.
+# An unset AUTH_JWKS_URL leaves no verification key, so protected routes return 401.
+mp.jwt.verify.publickey.location=\${AUTH_JWKS_URL:}
+mp.jwt.verify.issuer=\${AUTH_ISSUER:}
+mp.jwt.verify.audiences=\${AUTH_AUDIENCE:}
+`
+    : "";
   return `quarkus.application.name=${appName}
-quarkus.datasource.db-kind=postgresql
-quarkus.datasource.jdbc.url=\${DATABASE_URL:jdbc:postgresql://localhost:5432/${appName}}
+quarkus.datasource.db-kind=${mysql ? "mysql" : "postgresql"}
+quarkus.datasource.jdbc.url=\${DATABASE_URL:${mysql ? `jdbc:mysql://localhost:3306/${appName}` : `jdbc:postgresql://localhost:5432/${appName}`}}
 quarkus.hibernate-orm.database.generation=update
 quarkus.http.port=\${PORT:8080}
-`;
+${authProps}`;
 }
 
-function quarkusEntity(entity: Entity): string {
+function quarkusEntity(entity: Entity, mysql = false): string {
   const pascal = toPascal(entity.name);
   const tableName = toSnake(entity.name);
 
@@ -941,7 +1027,7 @@ function quarkusEntity(entity: Entity): string {
       lines.push("    @Id");
       lines.push("    @GeneratedValue(strategy = GenerationType.UUID)");
     } else {
-      lines.push(`    ${columnAnnotation(f)}`);
+      lines.push(`    ${columnAnnotation(f, mysql)}`);
     }
     lines.push(`    public ${javaShortType(f.type)} ${toCamel(f.name)};`);
     return lines.join("\n");
@@ -960,21 +1046,21 @@ ${fieldDeclarations}
 `;
 }
 
-function quarkusResource(entity: Entity, pascal: string, kebab: string): string {
+function quarkusResource(entity: Entity, pascal: string, kebab: string, withAuth = false): string {
   const pk = pkField(entity);
   const idType = pk ? javaShortType(pk.type) : "UUID";
   const idImport = "import java.util.UUID;";
 
   return `package dev.helios.app;
 
-import jakarta.transaction.Transactional;
+${withAuth ? "import io.quarkus.security.Authenticated;\n" : ""}import jakarta.transaction.Transactional;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 ${idImport}
 import java.util.List;
 
-@Path("/${kebab}s")
+@Path("/${kebab}s")${withAuth ? "\n@Authenticated" : ""}
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class ${pascal}Resource {
@@ -1044,7 +1130,7 @@ public class HealthResource {
 `;
 }
 
-function quarkusResourceTest(entity: Entity, pascal: string, kebab: string): string {
+function quarkusResourceTest(entity: Entity, pascal: string, kebab: string, withAuth = false): string {
   // We assert only that the route table is wired and reachable. The exact
   // status code on POST is left flexible (201 vs 200 vs 400) because Panache
   // entity validation depends on the specific @NotNull annotations the
@@ -1063,9 +1149,9 @@ import static org.hamcrest.Matchers.lessThan;
 class ${pascal}ResourceTest {
 
     @Test
-    void list${pascal}s_returnsOk() {
+    void list${pascal}s_${withAuth ? "rejectsMissingToken" : "returnsOk"}() {
         given().when().get("/${kebab}s")
-               .then().statusCode(200);
+               .then().statusCode(${withAuth ? 401 : 200});
     }
 
     @Test

@@ -7,12 +7,12 @@
   {
     "path": ".env.example",
     "lines": 37,
-    "size": 1983
+    "size": 2016
   },
   {
     "path": ".github/workflows/ci.yml",
-    "lines": 65,
-    "size": 1715
+    "lines": 68,
+    "size": 1801
   },
   {
     "path": ".gitignore",
@@ -31,8 +31,8 @@
   },
   {
     "path": "build.gradle.kts",
-    "lines": 32,
-    "size": 1357
+    "lines": 35,
+    "size": 1550
   },
   {
     "path": "DEPLOY.md",
@@ -46,8 +46,13 @@
   },
   {
     "path": "deploy/helm/templates/deployment.yaml",
-    "lines": 22,
-    "size": 490
+    "lines": 24,
+    "size": 547
+  },
+  {
+    "path": "deploy/helm/templates/hpa.yaml",
+    "lines": 21,
+    "size": 546
   },
   {
     "path": "deploy/helm/templates/service.yaml",
@@ -56,8 +61,8 @@
   },
   {
     "path": "deploy/helm/values.yaml",
-    "lines": 63,
-    "size": 1195
+    "lines": 64,
+    "size": 1268
   },
   {
     "path": "deploy/k8s/deployment.yaml",
@@ -71,8 +76,8 @@
   },
   {
     "path": "deploy/k8s/Makefile",
-    "lines": 36,
-    "size": 1371
+    "lines": 37,
+    "size": 1466
   },
   {
     "path": "deploy/k8s/pdb.yaml",
@@ -90,14 +95,9 @@
     "size": 174
   },
   {
-    "path": "deploy/prometheus.yml",
-    "lines": 9,
-    "size": 152
-  },
-  {
     "path": "docker-compose.yml",
-    "lines": 53,
-    "size": 1195
+    "lines": 60,
+    "size": 1460
   },
   {
     "path": "Dockerfile",
@@ -107,12 +107,12 @@
   {
     "path": "QUICKSTART.md",
     "lines": 105,
-    "size": 2495
+    "size": 2504
   },
   {
     "path": "README.md",
-    "lines": 58,
-    "size": 2001
+    "lines": 59,
+    "size": 1962
   },
   {
     "path": "sdk/test-app_client.py",
@@ -131,13 +131,18 @@
   },
   {
     "path": "src/main/kotlin/Application.kt",
-    "lines": 23,
-    "size": 706
+    "lines": 27,
+    "size": 820
+  },
+  {
+    "path": "src/main/kotlin/Auth.kt",
+    "lines": 32,
+    "size": 1180
   },
   {
     "path": "src/main/kotlin/Database.kt",
     "lines": 43,
-    "size": 1440
+    "size": 1444
   },
   {
     "path": "src/main/kotlin/models/Post.kt",
@@ -152,12 +157,12 @@
   {
     "path": "src/main/kotlin/routes/postRoutes.kt",
     "lines": 65,
-    "size": 2495
+    "size": 2521
   },
   {
     "path": "src/main/kotlin/routes/userRoutes.kt",
     "lines": 67,
-    "size": 2601
+    "size": 2627
   },
   {
     "path": "src/main/resources/db/migration/V1__init.sql",

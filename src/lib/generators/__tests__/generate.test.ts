@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generate } from "../index.ts";
+import { databases, caches, queues, monitoring as monitoringOptions } from "../../../data/stack-options.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SNAPSHOT_DIR = resolve(__dirname, "__snapshots__");
@@ -362,5 +363,151 @@ describe("Generator invariants", () => {
     const envExample = files.find((f) => f.path === ".env.example");
     assert.ok(envExample, "missing .env.example");
     assert.ok(!envExample.content.includes("sk-1234567890"), "secret value leaked into .env.example");
+  });
+});
+
+// ─── Stack-option wiring ────────────────────────────────────────────────────
+// Principle: every builder option produces real config or isn't claimed.
+
+
+function gen(overrides: Record<string, unknown>, endpoints = SAMPLE_ENDPOINTS, entities: typeof SAMPLE_ENTITIES = []) {
+  const config = { ...BASE_CONFIG, language: "go", framework: "gin", api: "rest", ...overrides };
+  const files = generate(config as never, endpoints, entities);
+  const get = (p: string) => files.find((f) => f.path === p)?.content;
+  return { files, get };
+}
+
+// Top-level service names in a compose file we emitted (2-space indented keys).
+function composeServiceNames(compose: string): Set<string> {
+  const body = compose.split("\nvolumes:")[0];
+  return new Set([...body.matchAll(/^ {2}([a-z][a-z0-9-]*):$/gm)].map((m) => m[1]));
+}
+
+function composeDependsOn(compose: string): string[] {
+  const m = compose.match(/depends_on:\n((?: {6}.*\n| {8}.*\n)+)/);
+  return m ? [...m[1].matchAll(/^ {6}([a-z0-9-]+):$/gm)].map((x) => x[1]) : [];
+}
+
+describe("Stack-option wiring", () => {
+  it("docker-compose depends_on only references services that exist, for every db/cache/queue/monitoring option", () => {
+    // A dangling depends_on makes `docker compose up` fail outright.
+    for (const database of databases.map((o) => o.id)) {
+      for (const cache of caches.map((o) => o.id)) {
+        for (const queue of queues.map((o) => o.id)) {
+          for (const monitoring of monitoringOptions.map((o) => o.id)) {
+            const g = gen({ database, cache, queue, monitoring });
+            const compose = g.get("docker-compose.yml")!;
+            const services = composeServiceNames(compose);
+            for (const dep of composeDependsOn(compose)) {
+              assert.ok(services.has(dep), `${database}/${cache}/${queue}/${monitoring}: depends_on ${dep} has no service`);
+            }
+            for (const vol of compose.matchAll(/\.\/(deploy\/[^:]+):/g)) {
+              assert.ok(g.get(vol[1]), `compose mounts missing file ${vol[1]}`);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it("dynamodb, sqs and bullmq get local services the api can reach", () => {
+    const compose = gen({ database: "dynamodb", queue: "sqs" }).get("docker-compose.yml")!;
+    assert.ok(composeServiceNames(compose).has("dynamodb"));
+    assert.ok(composeServiceNames(compose).has("sqs"));
+    assert.match(compose, /AWS_ENDPOINT_URL_DYNAMODB: "http:\/\/dynamodb:8000"/);
+    const bull = gen({ cache: "memcached", queue: "bullmq" }).get("docker-compose.yml")!;
+    assert.ok(composeServiceNames(bull).has("redis"), "bullmq needs redis even when the cache isn't redis");
+  });
+
+  it("gitlab-ci / circleci replace GitHub Actions; argo adds an Application alongside it", () => {
+    const gl = gen({ cicd: "gitlab-ci" });
+    assert.ok(gl.get(".gitlab-ci.yml")?.includes("$CI_REGISTRY_IMAGE"));
+    assert.ok(!gl.get(".github/workflows/ci.yml"), "gitlab stack should not ship a GitHub workflow");
+    assert.ok(gen({ cicd: "circleci" }).get(".circleci/config.yml")?.includes("version: 2.1"));
+    const argo = gen({ cicd: "argo" });
+    assert.ok(argo.get("deploy/argocd/application.yaml")?.includes("kind: Application"));
+    assert.ok(argo.get(".github/workflows/ci.yml"), "argo is CD only; CI still needs to build the image");
+  });
+
+  it("cloud deployments emit real IaC driven by region/replicas/scaling", () => {
+    const aws = JSON.parse(gen({ deployment: "aws" }).get("deploy/aws/task-definition.json")!);
+    assert.deepEqual(aws.requiresCompatibilities, ["FARGATE"]);
+    const gcp = gen({ deployment: "gcp", scaling: "serverless" }).get("deploy/gcp/service.yaml")!;
+    assert.match(gcp, /minScale: "0"/, "serverless should scale to zero");
+    assert.ok(!/name: PORT\n/.test(gcp), "PORT is reserved on Cloud Run");
+    assert.match(gen({ deployment: "azure", replicas: 3 }).get("deploy/azure/containerapp.yaml")!, /minReplicas: 3/);
+    const vertical = gen({ scaling: "vertical" });
+    assert.ok(vertical.get("deploy/k8s/vpa.yaml") && !vertical.get("deploy/k8s/hpa.yaml"), "HPA and VPA must not both target CPU");
+  });
+
+  it("README only claims tracing/rate limiting where the language implements it", () => {
+    for (const [language, framework] of [["rust", "axum"], ["java", "quarkus"], ["kotlin", "ktor"]]) {
+      const readme = gen({ language, framework }).get("README.md")!;
+      assert.ok(!readme.includes("traces are exported via OTLP"), `${language} README over-claims tracing`);
+      assert.ok(!readme.includes("rate limiting is enabled"), `${language} README over-claims rate limiting`);
+    }
+    assert.ok(gen({}).get("README.md")!.includes("traces are exported via OTLP"));
+    assert.ok(gen({}).get(".env.example")!.includes("OTEL_EXPORTER_OTLP_ENDPOINT="));
+    assert.ok(!gen({ language: "rust", framework: "axum" }).get(".env.example")!.includes("OTEL_EXPORTER_OTLP_ENDPOINT"));
+  });
+
+  it("otel monitoring ships a collector the api exports to", () => {
+    const g = gen({ monitoring: "otel" });
+    assert.ok(g.get("deploy/otel-collector.yaml")?.includes("otlp"));
+    assert.match(g.get("docker-compose.yml")!, /OTEL_EXPORTER_OTLP_ENDPOINT: "http:\/\/otel-collector:4318"/);
+  });
+
+  it("auth:true endpoints are protected on Rust, Quarkus and Ktor", () => {
+    const eps = [
+      { id: "1", method: "GET" as const, path: "/me", summary: "Me", auth: true },
+      { id: "2", method: "GET" as const, path: "/ping", summary: "Ping", auth: false },
+    ];
+    const axum = gen({ language: "rust", framework: "axum" }, eps);
+    assert.ok(axum.get("src/auth.rs")?.includes("jwk::JwkSet"));
+    assert.match(axum.get("src/main.rs")!, /let protected = Router::new\(\)\n\s+\.route\("\/me"[\s\S]*route_layer/);
+    const actix = gen({ language: "rust", framework: "actix" }, eps);
+    assert.match(actix.get("src/main.rs")!, /from_fn\(auth::require_auth\)\)\n\s+\.route\("\/me"/);
+    const quarkus = gen({ language: "java", framework: "quarkus" }, eps);
+    assert.match(quarkus.get("src/main/java/dev/helios/app/ApiResource.java")!, /@Path\("\/me"\)\n\s+@Authenticated/);
+    assert.ok(!/@Path\("\/ping"\)\n\s+@Authenticated/.test(quarkus.get("src/main/java/dev/helios/app/ApiResource.java")!));
+    assert.ok(quarkus.get("pom.xml")!.includes("quarkus-smallrye-jwt"));
+    const ktor = gen({ language: "kotlin", framework: "ktor" }, eps);
+    assert.match(ktor.get("src/main/kotlin/Application.kt")!, /authenticate\("auth-jwt"\) \{\n\s+get\("\/me"\)/);
+    assert.ok(ktor.get("src/main/kotlin/Auth.kt")?.includes("JwkProviderBuilder"));
+  });
+
+  it("mysql/planetscale use MySQL drivers on Rust, Java and Kotlin", () => {
+    for (const database of ["mysql", "planetscale"]) {
+      assert.ok(gen({ database, language: "rust", framework: "axum" }).get("Cargo.toml")!.includes(`"mysql"`));
+      const spring = gen({ database, language: "java", framework: "spring" });
+      assert.ok(spring.get("pom.xml")!.includes("mysql-connector-j") && !spring.get("pom.xml")!.includes("org.postgresql"));
+      assert.ok(gen({ database, language: "java", framework: "quarkus" }).get("pom.xml")!.includes("quarkus-jdbc-mysql"));
+      assert.ok(gen({ database, language: "kotlin", framework: "ktor" }).get("build.gradle.kts")!.includes("mysql-connector-j"));
+      assert.ok(gen({ database, language: "kotlin", framework: "spring-kt" }).get("build.gradle.kts")!.includes("flyway-mysql"));
+    }
+    // MySQL has no RETURNING — the sqlx handlers must not use it.
+    const handler = gen({ database: "mysql", language: "rust", framework: "axum" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("src/handlers/user.rs")!;
+    assert.ok(!handler.includes("RETURNING") && !handler.includes("$1"));
+  });
+
+  it("grafana monitoring exposes Prometheus metrics on Rust/Java/Kotlin at the scraped path", () => {
+    const cases: [string, string, string, string][] = [
+      ["java", "spring", "pom.xml", "/actuator/prometheus"],
+      ["java", "quarkus", "pom.xml", "/q/metrics"],
+      ["kotlin", "ktor", "build.gradle.kts", "/metrics"],
+      ["rust", "axum", "Cargo.toml", "/metrics"],
+    ];
+    for (const [language, framework, build, path] of cases) {
+      const g = gen({ language, framework, monitoring: "grafana" });
+      assert.match(g.get(build)!, /prometheus/, `${framework} build file lacks a Prometheus registry`);
+      assert.ok(g.get("deploy/prometheus.yml")!.includes(`metrics_path: '${path}'`), `${framework} scrape path`);
+    }
+  });
+
+  it("Quarkus, Ktor and Spring-kt emit stubs for custom endpoints", () => {
+    const eps = [{ id: "1", method: "POST" as const, path: "/orders", summary: "Create", auth: false }];
+    assert.ok(gen({ language: "java", framework: "quarkus" }, eps).get("src/main/java/dev/helios/app/ApiResource.java")?.includes('@Path("/orders")'));
+    assert.ok(gen({ language: "kotlin", framework: "ktor" }, eps).get("src/main/kotlin/Application.kt")?.includes('post("/orders")'));
+    assert.ok(gen({ language: "kotlin", framework: "spring-kt" }, eps).files.some((f) => f.path.endsWith("/ApiController.kt") && f.content.includes('@PostMapping("/orders")')));
   });
 });
