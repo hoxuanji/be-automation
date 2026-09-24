@@ -577,10 +577,11 @@ describe("Stack-option wiring", () => {
   it("Ktor tests load the application module (otherwise every route 404s)", () => {
     const ktor = gen({ language: "kotlin", framework: "ktor" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
     const app = ktor.get("src/main/kotlin/Application.kt")!;
-    assert.match(app, /fun Application\.module\(\)[\s\S]*routing \{/);
+    assert.match(app, /fun Application\.module\((jwtVerifier: JWTVerifier\? = null)?\)[\s\S]*routing \{/);
     assert.match(app, /embeddedServer\(Netty, .*module = Application::module\)/);
     const test = ktor.get("src/test/kotlin/UserRouteTest.kt")!;
-    assert.equal(test.match(/application \{ module\(\) \}/g)?.length, test.match(/testApplication \{/g)?.length);
+    assert.equal(test.match(/application \{ testModule\(\) \}/g)?.length, test.match(/testApplication \{/g)?.length);
+    assert.match(ktor.get("src/test/kotlin/TestSupport.kt")!, /fun Application\.testModule\(\) \{[\s\S]*module\(/);
   });
 
   it("Spring tests authenticate with jwt() when routes are protected, and not otherwise", () => {
@@ -907,5 +908,45 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
 
     // Self-issued auth (auth "none" + auth_* patterns) now reaches these frameworks too.
     assert.match(gen({ language: "python", framework: "django", auth: "none" }, eps, SAMPLE_ENTITIES).get("app/auth.py")!, /def create_access_token/);
+  });
+
+  it("Ktor tests run without Postgres: in-memory H2 with the production schema", () => {
+    // Before, tests never connected a database, so every entity route threw inside transaction {}.
+    for (const [database, mode] of [["postgres", "PostgreSQL"], ["mysql", "MySQL"]]) {
+      const ktor = gen({ language: "kotlin", framework: "ktor", database }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      assert.match(ktor.get("build.gradle.kts")!, /testImplementation\("com\.h2database:h2:\d+\.\d+\.\d+"\)/);
+      const support = ktor.get("src/test/kotlin/TestSupport.kt")!;
+      assert.ok(support.includes(`jdbc:h2:mem:test;MODE=${mode};DB_CLOSE_DELAY=-1`), database);
+      // Same createSchema() as production, so tests can't drift from the real tables.
+      assert.match(support, /createSchema\(\)/);
+      assert.match(ktor.get("src/main/kotlin/Database.kt")!, /Database\.connect\(ds\)\n\s+createSchema\(\)/);
+      // H2 has no INSERT ... RETURNING; the create route must not depend on it.
+      assert.ok(!ktor.get("src/main/kotlin/routes/userRoutes.kt")!.includes("insertReturning"));
+    }
+    assert.equal(gen({ language: "kotlin", framework: "ktor" }).files.filter((f) => f.path.endsWith("ApiContractTest.kt")).length, 0,
+      "the old contract test didn't compile (JVM names can't contain '/')");
+  });
+
+  it("Ktor tests authenticate with a locally signed JWT instead of the provider's JWKS", () => {
+    const ktor = gen({ language: "kotlin", framework: "ktor", auth: "clerk" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    // Production still verifies against the env-configured JWKS when no verifier is injected.
+    const auth = ktor.get("src/main/kotlin/Auth.kt")!;
+    assert.match(auth, /fun Application\.configureAuth\(jwtVerifier: JWTVerifier\? = null\)/);
+    assert.match(auth, /if \(jwtVerifier != null\) \{\n\s+verifier\(jwtVerifier\)\n\s+\} else \{[\s\S]*AUTH_JWKS_URL[\s\S]*verifier\(jwkProvider, issuer\)/);
+    const support = ktor.get("src/test/kotlin/TestSupport.kt")!;
+    assert.match(support, /Algorithm\.RSA256\(/);
+    assert.match(support, /module\(jwtVerifier = TestAuth\.verifier\)/);
+    // Protected route: 401 without a token, 200 with the signed one.
+    const appTest = ktor.get("src/test/kotlin/ApplicationTest.kt")!;
+    assert.match(appTest, /client\.request\("\/users"\) \{ method = HttpMethod\.Get \}\n\s+assertEquals\(HttpStatusCode\.Unauthorized/);
+    assert.match(appTest, /Bearer \$\{TestAuth\.token\(\)\}"\)\n\s+\}\n\s+assertEquals\(HttpStatusCode\.OK/);
+    const routeTest = ktor.get("src/test/kotlin/UserRouteTest.kt")!;
+    assert.equal(routeTest.match(/TestAuth\.token\(\)/g)?.length, routeTest.match(/testApplication \{/g)?.length, "entity routes sit behind auth");
+    // A JSON body in a Kotlin raw string must not carry backslash escapes.
+    assert.ok(!routeTest.includes('\\"'));
+
+    const open = gen({ language: "kotlin", framework: "ktor", auth: "none" }, SAMPLE_ENDPOINTS.map((e) => ({ ...e, auth: false })), SAMPLE_ENTITIES);
+    assert.ok(!open.get("src/test/kotlin/TestSupport.kt")!.includes("TestAuth"), "no JWT code without ktor-server-auth-jwt on the classpath");
+    assert.ok(!open.get("src/test/kotlin/UserRouteTest.kt")!.includes("Authorization"));
   });
 });

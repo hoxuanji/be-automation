@@ -190,11 +190,6 @@
     "size": 441
   },
   {
-    "path": "src/test/kotlin/com/example/testapp/ApiContractTest.kt",
-    "lines": 55,
-    "size": 1527
-  },
-  {
     "path": "src/test/kotlin/dev/helios/test_app/PostControllerTest.kt",
     "lines": 44,
     "size": 1601

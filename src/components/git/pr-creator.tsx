@@ -83,7 +83,6 @@ export function PRCreator() {
 
   // Load GitHub connection status
   React.useEffect(() => {
-    setLoadingStatus(true);
     fetch("/api/auth/github/status")
       .then((r) => r.json())
       .then((d: { connected: boolean; login?: string; avatarUrl?: string }) => setGhStatus(d))
@@ -91,14 +90,18 @@ export function PRCreator() {
       .finally(() => setLoadingStatus(false));
   }, []);
 
-  // Pre-fill branch name and PR title when config loads
-  React.useEffect(() => {
+  // Pre-fill branch name and PR title when config loads / changes. The form
+  // only renders after the client-side GitHub status fetch, so the date in
+  // the branch name never reaches SSR markup.
+  const prefillKey = [config.name, config.language, config.framework, config.database, gitConfig.branchNaming.feature].join("\u0000");
+  const [prefilledFor, setPrefilledFor] = React.useState<string | null>(null);
+  if (prefillKey !== prefilledFor) {
+    setPrefilledFor(prefillKey);
     const prefix = gitConfig.branchNaming.feature.split("/")[0] ?? "feat";
     setBranchName(defaultBranchName(prefix, config.name));
     setPrTitle(`feat: generated ${config.name} (${config.language}/${config.framework})`);
     setPrBody(defaultPrBody(config, 0));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.name, config.language, config.framework, config.database, gitConfig.branchNaming.feature]);
+  }
 
   function parseRepo(input: string): { owner: string; repo: string } | null {
     const clean = input.trim().replace(/^https?:\/\/github\.com\//, "");

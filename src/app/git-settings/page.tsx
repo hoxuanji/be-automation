@@ -340,8 +340,7 @@ function WorkflowCard({ id, language }: { id: WorkflowId; language: string }) {
 
   const yamlContent = React.useMemo(
     () => renderWorkflowYaml(id, gitConfig, language),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [id, language, JSON.stringify(gitConfig)]
+    [id, language, gitConfig]
   );
 
   return (
@@ -831,8 +830,7 @@ function ReleaseSection({ language }: { language: string }) {
   const releaseYaml = React.useMemo(() => renderReleaseRcYaml(gitConfig), [gitConfig]);
   const workflowYaml = React.useMemo(
     () => renderWorkflowYaml("release", gitConfig, language),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [language, JSON.stringify(gitConfig)]
+    [language, gitConfig]
   );
 
   return (

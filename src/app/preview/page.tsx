@@ -220,9 +220,11 @@ export default function PreviewPage() {
   }
 
   // Keep selected in sync when generated files change (e.g. config change)
-  React.useEffect(() => {
+  const [prevDefaultSelected, setPrevDefaultSelected] = React.useState(defaultSelected);
+  if (defaultSelected !== prevDefaultSelected) {
+    setPrevDefaultSelected(defaultSelected);
     setSelected(defaultSelected);
-  }, [defaultSelected]);
+  }
 
   // Check GitHub connection status on mount
   React.useEffect(() => {

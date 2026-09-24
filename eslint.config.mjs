@@ -21,12 +21,6 @@ const eslintConfig = defineConfig([
       // Generator files assign to `module` as a local variable (Go module path),
       // not the CommonJS global — disable the Next.js rule for these files.
       "@next/next/no-assign-module-variable": "off",
-      // ponytail: React Compiler rules new in eslint-plugin-react-hooks v7
-      // (via eslint-config-next 16). Off to keep lint parity with Next 15;
-      // re-enable and fix the ~20 existing hits as a follow-up.
-      "react-hooks/set-state-in-effect": "off",
-      "react-hooks/purity": "off",
-      "react-hooks/use-memo": "off",
     },
   },
 ]);

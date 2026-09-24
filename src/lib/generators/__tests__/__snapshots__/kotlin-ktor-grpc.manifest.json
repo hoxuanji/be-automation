@@ -31,8 +31,8 @@
   },
   {
     "path": "build.gradle.kts",
-    "lines": 35,
-    "size": 1538
+    "lines": 37,
+    "size": 1692
   },
   {
     "path": "DEPLOY.md",
@@ -131,18 +131,18 @@
   },
   {
     "path": "src/main/kotlin/Application.kt",
-    "lines": 31,
-    "size": 941
+    "lines": 33,
+    "size": 1127
   },
   {
     "path": "src/main/kotlin/Auth.kt",
-    "lines": 32,
-    "size": 1180
+    "lines": 38,
+    "size": 1553
   },
   {
     "path": "src/main/kotlin/Database.kt",
-    "lines": 43,
-    "size": 1444
+    "lines": 48,
+    "size": 1564
   },
   {
     "path": "src/main/kotlin/models/Post.kt",
@@ -156,13 +156,13 @@
   },
   {
     "path": "src/main/kotlin/routes/postRoutes.kt",
-    "lines": 65,
-    "size": 2521
+    "lines": 66,
+    "size": 2610
   },
   {
     "path": "src/main/kotlin/routes/userRoutes.kt",
-    "lines": 67,
-    "size": 2627
+    "lines": 68,
+    "size": 2766
   },
   {
     "path": "src/main/resources/db/migration/V1__init.sql",
@@ -170,18 +170,23 @@
     "size": 791
   },
   {
-    "path": "src/test/kotlin/com/example/testapp/ApiContractTest.kt",
-    "lines": 55,
-    "size": 1527
+    "path": "src/test/kotlin/ApplicationTest.kt",
+    "lines": 30,
+    "size": 905
   },
   {
     "path": "src/test/kotlin/PostRouteTest.kt",
-    "lines": 25,
-    "size": 713
+    "lines": 28,
+    "size": 875
+  },
+  {
+    "path": "src/test/kotlin/TestSupport.kt",
+    "lines": 40,
+    "size": 1453
   },
   {
     "path": "src/test/kotlin/UserRouteTest.kt",
-    "lines": 25,
-    "size": 749
+    "lines": 28,
+    "size": 907
   }
 ]

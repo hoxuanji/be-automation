@@ -320,39 +320,6 @@ ${tests}
 `;
 }
 
-// ─── Kotlin (Ktor testApplication) ───────────────────────────────────────────
-
-function kotlinContractTests(config: StackConfig, endpoints: Endpoint[]): string {
-  const tests = endpoints.map((ep) => {
-    const method = ep.method;
-    const testPath = pathToParam(ep.path);
-    const status = expectedStatus(ep.method, ep.auth);
-    const authLine = ep.auth ? '\n            header("Authorization", "Bearer test-token")' : "";
-    const bodyLine = ["POST", "PUT", "PATCH"].includes(method) ? '\n            setBody("{}")' : "";
-
-    return `
-    @Test
-    fun \`test ${method} ${ep.path}\`() = testApplication {
-        // ${ep.summary}
-        val response = client.${method.toLowerCase()}("${testPath}") {${authLine}${bodyLine}
-        }
-        assertEquals(HttpStatusCode.fromValue(${status}), response.status)
-    }`;
-  }).join("\n");
-
-  return `package com.example.${safeName(config.name).replace(/-/g, "")}
-
-import io.ktor.client.request.*
-import io.ktor.http.*
-import io.ktor.server.testing.*
-import kotlin.test.*
-
-class ApiContractTest {
-${tests}
-}
-`;
-}
-
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 export function contractTestFiles(
@@ -376,7 +343,10 @@ export function contractTestFiles(
     case "java":
       return [{ path: `src/test/java/com/example/${safeName(config.name).replace(/-/g, "")}/ApiContractTest.java`, content: javaContractTests(config, endpoints) }];
     case "kotlin":
-      return [{ path: `src/test/kotlin/com/example/${safeName(config.name).replace(/-/g, "")}/ApiContractTest.kt`, content: kotlinContractTests(config, endpoints) }];
+      // ponytail: skipped. The Ktor-style file never compiled (JVM names can't contain "/"),
+      // sent fake tokens, and is Ktor code in spring-kt projects too. kotlin.ts emits its own
+      // Ktor tests (in-memory DB + signed token); spring-kt has MockMvc tests.
+      return [];
     default:
       return [];
   }
