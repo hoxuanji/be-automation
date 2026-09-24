@@ -718,7 +718,7 @@ function springKtFiles(
   entities: Entity[]
 ): GeneratedFile[] {
   const safe = safeName(config.name);
-  const pkg = `dev.helios.${safe.replace(/-/g, "_")}`;
+  const pkg = springKtPkg(config);
   const files: GeneratedFile[] = [];
   const anyProtected = endpoints.some((e) => e.auth);
   const withAuth = needsAuth(config, anyProtected);
@@ -759,7 +759,7 @@ function springKtFiles(
   if (withAuth) {
     files.push({
       path: `src/main/kotlin/${pkgPath(pkg)}/SecurityConfig.kt`,
-      content: springKtSecurityConfig(pkg),
+      content: springKtSecurityConfig(pkg, springPublicStubs(stubEndpoints(endpoints, entities))),
     });
   }
 
@@ -788,6 +788,10 @@ function springKtFiles(
     });
   }
 
+  // Tests activate the "test" profile: in-memory H2, schema from the entities, no Flyway,
+  // so `gradle test` needs no database.
+  files.push({ path: "src/test/resources/application-test.properties", content: springKtTestProperties(mysql) });
+
   const stubs = stubEndpoints(endpoints, entities);
   if (stubs.length > 0) {
     files.push({
@@ -797,6 +801,10 @@ function springKtFiles(
   }
 
   return files;
+}
+
+function springKtPkg(config: StackConfig): string {
+  return `dev.helios.${safeName(config.name).replace(/-/g, "_")}`;
 }
 
 function pkgPath(pkg: string): string {
@@ -891,6 +899,16 @@ server.port=\${PORT:8080}
 `;
 }
 
+function springKtTestProperties(mysql: boolean): string {
+  return `spring.datasource.url=jdbc:h2:mem:test;MODE=${mysql ? "MySQL" : "PostgreSQL"};DB_CLOSE_DELAY=-1
+spring.datasource.driver-class-name=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.jpa.hibernate.ddl-auto=create-drop
+spring.flyway.enabled=false
+`;
+}
+
 function springKtApiController(pkg: string, endpoints: Endpoint[]): string {
   const methods = endpoints.map((e) =>
     `    @${methodAnnotation(e.method)}(${JSON.stringify(springPath(e.path))})
@@ -908,13 +926,16 @@ ${methods}
 `;
 }
 
-function springKtSecurityConfig(pkg: string): string {
+function springKtSecurityConfig(pkg: string, publicStubs: Endpoint[] = []): string {
+  const permits = publicStubs
+    .map((e) => `\n                  .requestMatchers(HttpMethod.${ktMethod(e.method)}, ${JSON.stringify(springPath(e.path))}).permitAll()`)
+    .join("");
   return `package ${pkg}
 
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
-import org.springframework.security.config.annotation.web.builders.HttpSecurity
+${permits ? "import org.springframework.http.HttpMethod\n" : ""}import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.oauth2.core.OAuth2Error
 import org.springframework.security.oauth2.core.OAuth2TokenValidator
 import org.springframework.security.oauth2.core.OAuth2TokenValidatorResult
@@ -928,7 +949,7 @@ import org.springframework.security.web.SecurityFilterChain
  * OAuth2 Resource Server. Spring validates JWT signature, iss, and exp
  * automatically; we layer an optional audience check on top.
  *
- * /health stays public; everything else requires a valid Bearer token.
+ * /health${permits ? " and endpoints marked public" : ""} stay public; everything else requires a valid Bearer token.
  */
 @Configuration
 class SecurityConfig(
@@ -940,7 +961,7 @@ class SecurityConfig(
     fun filterChain(http: HttpSecurity): SecurityFilterChain {
         http
             .authorizeHttpRequests {
-                it.requestMatchers("/health", "/actuator/**").permitAll()
+                it.requestMatchers("/health", "/actuator/**").permitAll()${permits}
                   .anyRequest().authenticated()
             }
             .csrf { it.disable() }
@@ -1138,13 +1159,15 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
 import org.springframework.boot.test.context.SpringBootTest
 ${withAuth ? "import org.springframework.boot.test.mock.mockito.MockBean\n" : ""}import org.springframework.http.MediaType
-${withAuth ? "import org.springframework.security.oauth2.jwt.JwtDecoder\nimport org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt\n" : ""}import org.springframework.test.web.servlet.MockMvc
+${withAuth ? "import org.springframework.security.oauth2.jwt.JwtDecoder\nimport org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt\n" : ""}import org.springframework.test.context.ActiveProfiles
+import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 
 @SpringBootTest
 @AutoConfigureMockMvc
+@ActiveProfiles("test")
 class ${pascal}ControllerTest {
 
     @Autowired
@@ -1171,6 +1194,238 @@ ${withAuth ? `
     }
 }
 `;
+}
+
+// ─── Contract tests (src/test/kotlin/**/ApiContractTest.kt) ──────────────────
+
+const KT_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+const ktMethod = (m: string) => (KT_METHODS.includes(m) ? m : "GET"); // same fallback as the stub routes
+
+// Spring's URL matchers can't tell "/users/{id}" from "/users/search", so a public
+// templated stub that could also match a protected stub stays protected (fail closed).
+function shadowsProtected(pub: Endpoint, stubs: Endpoint[]): boolean {
+  const segs = (p: string) => p.split("/").filter(Boolean);
+  const a = segs(pub.path);
+  return stubs.some((s) => {
+    if (!s.auth || ktMethod(s.method) !== ktMethod(pub.method)) return false;
+    const b = segs(s.path);
+    return a.length === b.length && a.every((x, i) => x === b[i] || x.startsWith(":") || b[i].startsWith(":"));
+  });
+}
+
+function springPublicStubs(stubs: Endpoint[]): Endpoint[] {
+  return stubs.filter((e) => !e.auth && !shadowsProtected(e, stubs));
+}
+
+type KtContractCase = {
+  label: string;      // "GET users by id"
+  method: string;
+  path: string;       // concrete request path
+  protected: boolean;
+  status: number;     // expected status with a valid token (or with no auth at all)
+  body?: string;      // Kotlin raw-string JSON body
+  json?: "object" | "array";
+  keys?: string[];    // top-level keys the response object must carry
+};
+
+// Required fields get fresh values per request: the in-memory DB is shared across
+// test classes, so a fixed value for a unique column would collide.
+function ktContractBody(entity: Entity): string {
+  const pairs = entity.fields.filter((f) => !f.primaryKey && f.required).map((f) => {
+    const name = toCamel(f.name);
+    switch (f.type as FieldType) {
+      case "string":
+      case "text":    return `"${name}":"\${unique()}"`;
+      case "number":  return `"${name}":1`;
+      case "boolean": return `"${name}":true`;
+      case "uuid":    return `"${name}":"\${java.util.UUID.randomUUID()}"`;
+      case "date":    return `"${name}":"2024-01-01T00:00:00Z"`;
+      case "json":    return `"${name}":"{}"`;
+    }
+  });
+  return `"""{${pairs.join(",")}}"""`;
+}
+
+function ktContractCases(stubs: Endpoint[], entities: Entity[], withAuth: boolean, spring: boolean): KtContractCase[] {
+  const cases: KtContractCase[] = [];
+  const publicSpring = springPublicStubs(stubs);
+  for (const e of stubs) {
+    const method = ktMethod(e.method);
+    cases.push({
+      label: `${method} ${e.path}`,
+      method,
+      path: springPath(e.path).replace(/\{[^}]+\}/g, "1"),
+      protected: withAuth && (spring ? !publicSpring.includes(e) : e.auth),
+      status: 200,
+      body: ["POST", "PUT", "PATCH"].includes(method) ? `"""{}"""` : undefined,
+      json: "object",
+      keys: ["op"],
+    });
+  }
+  for (const entity of entities) {
+    const base = `/${toKebab(entity.name)}s`;
+    const body = ktContractBody(entity);
+    const pk = toCamel(entity.fields.find((f) => f.primaryKey)?.name ?? "id");
+    const keys = [pk, ...entity.fields.filter((f) => !f.primaryKey && f.required).map((f) => toCamel(f.name))];
+    // By-id routes get a malformed id: 400 proves the route is wired (a missing route is 404).
+    const bad = `${base}/not-a-uuid`;
+    cases.push(
+      { label: `GET ${base}`, method: "GET", path: base, protected: withAuth, status: 200, json: "array" },
+      { label: `POST ${base}`, method: "POST", path: base, protected: withAuth, status: 201, body, json: "object", keys },
+      { label: `GET ${base}/:id`, method: "GET", path: bad, protected: withAuth, status: 400 },
+      { label: `PUT ${base}/:id`, method: "PUT", path: bad, protected: withAuth, status: 400, body },
+      { label: `DELETE ${base}/:id`, method: "DELETE", path: bad, protected: withAuth, status: 400 },
+    );
+  }
+  return cases;
+}
+
+// JVM method names can't contain / . ; [ ] < > : so "GET /users/:id" → `GET users by id`.
+function ktTestNames(): (c: KtContractCase, suffix: string) => string {
+  const seen = new Map<string, number>();
+  return (c, suffix) => {
+    const words = c.label
+      .split("/")
+      .filter(Boolean)
+      .map((s) => (s.trim().startsWith(":") ? `by ${s.trim().slice(1)}` : s))
+      .join(" ")
+      .replace(/[^A-Za-z0-9 _-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const name = `${words} ${suffix}`;
+    const n = (seen.get(name) ?? 0) + 1;
+    seen.set(name, n);
+    return n === 1 ? name : `${name} ${n}`;
+  };
+}
+
+const ktStr = (s: string) => JSON.stringify(s).replace(/\$/g, "\\$");
+const verb = (c: KtContractCase) => (c.status === 400 ? "rejects a malformed id" : `returns ${c.status}`);
+
+function ktorContractTest(cases: KtContractCase[]): string {
+  const name = ktTestNames();
+  const call = (c: KtContractCase, token: boolean) => {
+    const lines = [`method = HttpMethod.${toPascal(c.method.toLowerCase())}`];
+    if (token) lines.push(`header(HttpHeaders.Authorization, "Bearer \${TestAuth.token()}")`);
+    if (c.body) lines.push("contentType(ContentType.Application.Json)", `setBody(${c.body})`);
+    return `val response = client.request(${ktStr(c.path)}) {\n${lines.map((l) => `            ${l}`).join("\n")}\n        }`;
+  };
+  const shape = (c: KtContractCase) => {
+    if (!c.json) return "";
+    const lines = [`        assertEquals(ContentType.Application.Json, response.contentType()?.withoutParameters())`];
+    if (c.json === "array") lines.push(`        Json.parseToJsonElement(response.bodyAsText()).jsonArray`);
+    else {
+      lines.push(`        val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject`);
+      if (c.keys?.length) lines.push(`        for (key in listOf(${c.keys.map(ktStr).join(", ")})) assertTrue(key in body, "response is missing \\"\$key\\"")`);
+    }
+    return "\n" + lines.join("\n");
+  };
+  const test = (fn: string, c: KtContractCase, token: boolean, status: number, withShape: boolean) => `
+    @Test
+    fun \`${fn}\`() = testApplication {
+        application { testModule() }
+        ${call(c, token)}
+        assertEquals(HttpStatusCode.fromValue(${status}), response.status)${withShape ? shape(c) : ""}
+    }
+`;
+  const tests = cases.map((c) =>
+    c.protected
+      ? test(name(c, "returns 401 without token"), c, false, 401, false) +
+        test(name(c, `${verb(c)} with token`), c, true, c.status, true)
+      : test(name(c, verb(c)), c, false, c.status, true)
+  ).join("");
+  return `import io.ktor.client.request.*
+import io.ktor.client.statement.*
+import io.ktor.http.*
+import io.ktor.server.testing.*
+import kotlinx.serialization.json.*
+import kotlin.test.*
+
+/**
+ * Contract tests: every route is served (not 404), protected routes reject a
+ * missing token and accept a signed one, and JSON responses carry the expected shape.
+ * Runs on the in-memory test module (TestSupport.kt) — no database or network.
+ */
+class ApiContractTest {
+    private fun unique() = "test-" + java.util.UUID.randomUUID()
+${tests}}
+`;
+}
+
+function springKtContractTest(pkg: string, cases: KtContractCase[], withAuth: boolean): string {
+  const name = ktTestNames();
+  const perform = (c: KtContractCase, token: boolean) => {
+    const parts = [`request(HttpMethod.${c.method}, ${ktStr(c.path)})`];
+    if (token) parts.push(".with(jwt())");
+    if (c.body) parts.push(".contentType(MediaType.APPLICATION_JSON)", `.content(${c.body})`);
+    return `mvc.perform(\n            ${parts.join("\n                ")}\n        )`;
+  };
+  const shape = (c: KtContractCase) => {
+    if (!c.json) return "";
+    const lines = [`.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))`];
+    if (c.json === "array") lines.push(`.andExpect(jsonPath("\\$").isArray)`);
+    for (const k of c.keys ?? []) lines.push(`.andExpect(jsonPath(${ktStr(`$.${k}`)}).exists())`);
+    return lines.map((l) => `\n            ${l}`).join("");
+  };
+  const test = (fn: string, c: KtContractCase, token: boolean, status: number, withShape: boolean) => `
+    @Test
+    fun \`${fn}\`() {
+        ${perform(c, token)}
+            .andExpect(status().\`is\`(${status}))${withShape ? shape(c) : ""}
+    }
+`;
+  const tests = cases.map((c) =>
+    c.protected
+      ? test(name(c, "returns 401 without token"), c, false, 401, false) +
+        test(name(c, `${verb(c)} with token`), c, true, c.status, true)
+      : test(name(c, verb(c)), c, false, c.status, true)
+  ).join("");
+  return `package ${pkg}
+
+import org.junit.jupiter.api.Test
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
+import org.springframework.boot.test.context.SpringBootTest
+${withAuth ? "import org.springframework.boot.test.mock.mockito.MockBean\n" : ""}import org.springframework.http.HttpMethod
+import org.springframework.http.MediaType
+${withAuth ? "import org.springframework.security.oauth2.jwt.JwtDecoder\nimport org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt\n" : ""}import org.springframework.test.context.ActiveProfiles
+import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.content
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+
+/**
+ * Contract tests: every route is served (not 404), protected routes reject a
+ * missing token and accept an authenticated one, and JSON responses carry the
+ * expected shape. The "test" profile uses in-memory H2 — no database or network.
+ */
+@SpringBootTest
+@AutoConfigureMockMvc
+@ActiveProfiles("test")
+class ApiContractTest {
+
+    @Autowired
+    lateinit var mvc: MockMvc
+${withAuth ? `
+    // jwt() supplies the authenticated principal; the mock keeps the context off the JWKS endpoint.
+    @MockBean
+    lateinit var jwtDecoder: JwtDecoder
+` : ""}
+    private fun unique() = "test-" + java.util.UUID.randomUUID()
+${tests}}
+`;
+}
+
+/** ApiContractTest.kt per framework; emitted from contract-tests.ts. */
+export function kotlinContractTestFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
+  const withAuth = needsAuth(config, endpoints.some((e) => e.auth));
+  const spring = config.framework === "spring-kt";
+  const cases = ktContractCases(stubEndpoints(endpoints, entities), entities, withAuth, spring);
+  if (cases.length === 0) return [];
+  if (!spring) return [{ path: "src/test/kotlin/ApiContractTest.kt", content: ktorContractTest(cases) }];
+  const pkg = springKtPkg(config);
+  return [{ path: `src/test/kotlin/${pkgPath(pkg)}/ApiContractTest.kt`, content: springKtContractTest(pkg, cases, withAuth) }];
 }
 
 function safeName(s: string): string {

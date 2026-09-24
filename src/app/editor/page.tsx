@@ -31,7 +31,7 @@ import { detectStack, detectionSummary } from "@/lib/stack-detect";
 import { cn } from "@/lib/utils";
 
 // Monaco is ~4MB — load it only client-side, lazily
-const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
+const MonacoEditor = dynamic(() => import("@/lib/monaco"), {
   ssr: false,
   loading: () => (
     <div className="flex h-full items-center justify-center text-xs text-muted-foreground gap-2">
