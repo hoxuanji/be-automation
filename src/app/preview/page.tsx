@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import dynamic from "next/dynamic";
 
-const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false, loading: () => null });
+const MonacoEditor = dynamic(() => import("@/lib/monaco"), { ssr: false, loading: () => null });
 import { WorkspaceShell } from "@/components/layout/workspace-shell";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
