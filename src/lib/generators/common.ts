@@ -202,7 +202,9 @@ export function commonFiles(
   });
 
   if (config.monitoring === "grafana") {
-    files.push({ path: "deploy/prometheus.yml", content: prometheusConfig(name, metricsPath(config)) });
+    // gRPC servers serve metrics on a separate plain-HTTP listener (:9464), not the gRPC port.
+    const metricsTarget = config.api === "grpc" && isGrpcSupported(config.language) ? "api:9464" : "api:8080";
+    files.push({ path: "deploy/prometheus.yml", content: prometheusConfig(name, metricsPath(config), metricsTarget) });
     files.push({ path: "deploy/grafana/datasource.yml", content: grafanaDatasource() });
   }
 
@@ -287,7 +289,7 @@ must follow.
 
 \`\`\`bash
 # Local development
-curl -s http://localhost:4000/graphql \\
+curl -s http://localhost:8080/graphql \\
   -H 'Content-Type: application/json' \\
   -d '{"query":"{ health }"}'
 \`\`\`
@@ -367,6 +369,10 @@ function observabilityClaims(config: StackConfig): string[] {
   switch (config.monitoring) {
     case "grafana":
       out.push(`- Prometheus metrics at \`${metricsPath(config)}\`; \`deploy/prometheus.yml\` + a Grafana datasource are included${config.docker ? " and run via docker compose (Grafana on :3000)" : ""}.`);
+      // gRPC servers expose metrics on a separate plain-HTTP listener, not the gRPC port.
+      if (config.api === "grpc" && isGrpcSupported(lang)) {
+        out.push("- gRPC: metrics are served on `:9464/metrics` (`METRICS_PORT`), not the gRPC port; `deploy/prometheus.yml` already scrapes `api:9464`.");
+      }
       break;
     case "datadog":
       out.push(full
@@ -2383,14 +2389,14 @@ ${securityJob}`
   );
 }
 
-function prometheusConfig(name: string, path: string) {
+function prometheusConfig(name: string, path: string, target: string) {
   return `global:
   scrape_interval: 15s
 
 scrape_configs:
   - job_name: '${name}'
     static_configs:
-      - targets: ['api:8080']
+      - targets: ['${target}']
     metrics_path: '${path}'
 `;
 }

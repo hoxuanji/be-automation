@@ -3,8 +3,7 @@ import { toPascal, toSnake, toKebab } from "./types";
 import { pyGrpcFiles } from "./grpc/python";
 import { pythonGraphqlFiles } from "./graphql/python";
 import { isGraphqlSupported } from "./types";
-import { needsAuth } from "./auth/providers";
-import { pyPatternRoute, pyPatternImports, pyHasRedis } from "./patterns/python";
+import { pyPatternRoute, pyPatternImports, pyHasRedis, pyAuthMode, type PyAuthMode } from "./patterns/python";
 
 export function pythonFiles(
   config: StackConfig,
@@ -13,23 +12,22 @@ export function pythonFiles(
 ): GeneratedFile[] {
   // gRPC mode replaces the FastAPI / Django / Litestar bootstrap entirely.
   if (config.api === "grpc") {
-    return pyGrpcFiles(config, entities);
+    return pyGrpcFiles(config, entities, config.tracing ? pyTracingModule(config.name) : "");
   }
 
-  // GraphQL mode replaces FastAPI with a Strawberry-mounted FastAPI app —
-  // structurally similar but the resolver layout is the source of truth, not
-  // the route table. Same dispatch shape as gRPC.
+  // GraphQL: Strawberry mounted on the REST FastAPI app (built with no routes),
+  // so its middleware — slowapi, audit, OTel, Prometheus/Sentry — applies.
   if (config.api === "graphql" && isGraphqlSupported(config.language)) {
-    return pythonGraphqlFiles(config, entities);
+    return pythonGraphqlFiles(entities, pythonFiles({ ...config, api: "rest", framework: "fastapi" }, [], []));
   }
 
   const files: GeneratedFile[] = [];
-  const anyProtected = endpoints.some((e) => e.auth);
-  const withAuth = needsAuth(config, anyProtected);
+  const authMode = pyAuthMode(config, endpoints);
+  const withAuth = authMode !== "off";
   const hasEntities = entities.length > 0;
   const isMongo = /mongo/.test(config.database);
 
-  files.push({ path: "pyproject.toml", content: pyproject(config, hasEntities, withAuth) });
+  files.push({ path: "pyproject.toml", content: pyproject(config, hasEntities, authMode, endpoints) });
   files.push({ path: "Dockerfile", content: pyDockerfile() });
   files.push({ path: "app/__init__.py", content: "" });
   files.push({
@@ -81,11 +79,11 @@ settings = Settings()
 
   files.push({
     path: "app/main.py",
-    content: appMain(config, endpoints, hasEntities && !isMongo ? entities : [], withAuth),
+    content: appMain(config, endpoints, hasEntities && !isMongo ? entities : [], authMode),
   });
 
   if (withAuth) {
-    files.push({ path: "app/auth.py", content: pyAuthModule() });
+    files.push({ path: "app/auth.py", content: authMode === "hs256" ? pyAuthHS256Module() : pyAuthModule() });
   }
 
   if (pyHasRedis(config)) {
@@ -346,7 +344,8 @@ ${docs}
         const pk = f.primaryKey ? ", primary_key=True" : "";
         const uniq = f.unique && !f.primaryKey ? ", unique=True" : "";
         const nullable = !f.required && !f.primaryKey ? ", nullable=True" : "";
-        const default_ = f.primaryKey && f.type === "uuid" ? ", default=uuid.uuid4" : "";
+        // String(36) PKs (non-Postgres) need a str; the DB drivers can't bind uuid.UUID.
+        const default_ = f.primaryKey && f.type === "uuid" ? (isPostgres ? ", default=uuid.uuid4" : ", default=lambda: str(uuid.uuid4())") : "";
         return `    ${f.name} = Column(${colType}${pk}${default_}${uniq}${nullable})`;
       });
       if (!e.fields.some((f) => f.name === "createdAt"))
@@ -398,7 +397,7 @@ function saColType(t: FieldType, isPostgres: boolean): string {
   }
 }
 
-function pyproject(config: StackConfig, withModels = false, withAuth = false) {
+function pyproject(config: StackConfig, withModels: boolean, authMode: PyAuthMode, endpoints: Endpoint[]) {
   const isPostgres = /postgres|neon|supabase|cockroach/.test(config.database);
   const isMysql = /mysql|planetscale/.test(config.database);
   // db.py uses a sync SQLAlchemy engine, so the drivers are the sync ones:
@@ -406,9 +405,8 @@ function pyproject(config: StackConfig, withModels = false, withAuth = false) {
   const sqlDeps = withModels && !(/mongo/.test(config.database))
     ? `\nsqlalchemy = "^2.0.0"\nalembic = "^1.13.0"\n${isPostgres ? `psycopg2-binary = "^2.9.0"\n` : isMysql ? `pymysql = "^1.1.1"\n` : ""}`
     : "";
-  const authDeps = withAuth
-    ? `\npyjwt = { version = "^2.9.0", extras = ["crypto"] }`
-    : "";
+  const authDeps = (authMode !== "off" ? `\npyjwt = { version = "^2.9.0", extras = ["crypto"] }` : "")
+    + (authMode === "hs256" ? `\nbcrypt = "^4.2.0"` : "");
   const fw = config.framework;
   const extra: string[] = [];
   if (/prometheus|grafana/.test(config.monitoring)) {
@@ -427,6 +425,8 @@ function pyproject(config: StackConfig, withModels = false, withAuth = false) {
     );
   }
   if (pyHasRedis(config)) extra.push(`redis = "^5.2.0"`);
+  // FastAPI refuses to register UploadFile routes without python-multipart.
+  if (fw === "fastapi" && endpoints.some((e) => e.pattern === "file_upload")) extra.push(`python-multipart = "^0.0.20"`);
   const monDeps = extra.map((l) => `\n${l}`).join("");
   const deps =
     config.framework === "fastapi"
@@ -500,7 +500,12 @@ def _verify(token: str) -> dict:
     )
 
 
-async def auth_required(authorization: str | None = Header(default=None)) -> dict:
+${pyAuthRequired()}`;
+}
+
+// auth_required body shared by the JWKS and HS256 modules; both expose _verify().
+function pyAuthRequired(): string {
+  return `async def auth_required(authorization: str | None = Header(default=None)) -> dict:
     """FastAPI dependency that enforces a valid Bearer JWT.
 
     Usage::
@@ -522,6 +527,44 @@ async def auth_required(authorization: str | None = Header(default=None)) -> dic
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                             detail=str(exc))
 `;
+}
+
+function pyAuthHS256Module(): string {
+  return `"""HS256 JWTs this service issues itself (auth "none" = self-managed).
+
+The login/register/refresh handlers sign with JWT_SECRET and auth_required
+verifies exactly those tokens — no external identity provider involved.
+"""
+from __future__ import annotations
+
+import os
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from fastapi import Header, HTTPException, status
+
+
+def _secret() -> str:
+    secret = os.environ.get("JWT_SECRET")
+    if not secret:
+        raise RuntimeError("JWT_SECRET is not set")
+    return secret
+
+
+def create_access_token(sub: str, ttl: timedelta = timedelta(hours=24)) -> str:
+    now = datetime.now(tz=timezone.utc)
+    return jwt.encode({"sub": sub, "iat": now, "exp": now + ttl}, _secret(), algorithm="HS256")
+
+
+def verify_token(token: str) -> dict:
+    """Signature (HS256 only) + expiry check; raises jwt.InvalidTokenError."""
+    return jwt.decode(token, _secret(), algorithms=["HS256"], options={"require": ["exp", "sub"]})
+
+
+_verify = verify_token
+
+
+${pyAuthRequired()}`;
 }
 
 function pyDockerfile() {
@@ -548,7 +591,7 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
 `;
 }
 
-function pyTracingModule(name: string): string {
+export function pyTracingModule(name: string): string {
   return `"""OpenTelemetry tracing — spans are exported over OTLP/HTTP.
 
 The exporter reads OTEL_EXPORTER_OTLP_ENDPOINT (default http://localhost:4318).
@@ -680,13 +723,14 @@ function ddtracePreamble(config: StackConfig): string {
   return /datadog/.test(config.monitoring) ? "import ddtrace.auto  # noqa: F401 — must stay the first import\n" : "";
 }
 
-function appMain(config: StackConfig, endpoints: Endpoint[], entities: Entity[], withAuth = false) {
+function appMain(config: StackConfig, endpoints: Endpoint[], entities: Entity[], authMode: PyAuthMode) {
+  const withAuth = authMode !== "off";
   if (config.framework === "fastapi") {
-    const patternExtraImports = pyPatternImports(endpoints, config, entities).join("\n");
+    const patternExtraImports = pyPatternImports(endpoints, config, entities, authMode).join("\n");
     const wiring = fastapiWiring(config);
     const routes = endpoints
       .map((e) => {
-        if (e.pattern) return pyPatternRoute(e, "fastapi", config, entities);
+        if (e.pattern) return pyPatternRoute(e, "fastapi", config, entities, authMode);
         const py = e.path.replace(/:([a-zA-Z0-9_]+)/g, "{$1}");
         const paramsDecl = (e.path.match(/:([a-zA-Z0-9_]+)/g) ?? [])
           .map((p) => `${p.slice(1)}: str`)

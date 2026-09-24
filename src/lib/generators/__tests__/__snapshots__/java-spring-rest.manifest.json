@@ -101,8 +101,8 @@
   },
   {
     "path": "pom.xml",
-    "lines": 82,
-    "size": 2804
+    "lines": 88,
+    "size": 3052
   },
   {
     "path": "QUICKSTART.md",
@@ -201,12 +201,12 @@
   },
   {
     "path": "src/test/java/dev/helios/app/PostControllerTest.java",
-    "lines": 34,
-    "size": 1114
+    "lines": 43,
+    "size": 1586
   },
   {
     "path": "src/test/java/dev/helios/app/UserControllerTest.java",
-    "lines": 34,
-    "size": 1150
+    "lines": 43,
+    "size": 1622
   }
 ]

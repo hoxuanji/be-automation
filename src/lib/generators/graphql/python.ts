@@ -1,4 +1,4 @@
-import type { Entity, GeneratedFile, StackConfig } from "../types";
+import type { Entity, GeneratedFile } from "../types";
 import { primaryKey, pluralize } from "./schema";
 
 /**
@@ -15,119 +15,31 @@ import { primaryKey, pluralize } from "./schema";
  * tooling parity with TS/Go.
  */
 export function pythonGraphqlFiles(
-  config: StackConfig,
-  entities: Entity[]
+  entities: Entity[],
+  rest: GeneratedFile[]
 ): GeneratedFile[] {
-  void config;
-  const files: GeneratedFile[] = [];
+  // `rest` is the FastAPI tree built with no routes. Mount Strawberry right
+  // before /health, i.e. after every middleware wired onto `app`.
+  const health = "\n\n@app.get(\"/health\")";
+  const files = rest.map((f) => {
+    if (f.path === "app/main.py") {
+      if (!f.content.includes(health)) throw new Error("graphql/python: REST main.py has no /health route to mount GraphQL beside");
+      return {
+        ...f,
+        content: f.content.replace(health, `\n\nfrom strawberry.fastapi import GraphQLRouter\n\nfrom .schema import schema\n\napp.include_router(GraphQLRouter(schema), prefix="/graphql")\n${health}`),
+      };
+    }
+    if (f.path === "pyproject.toml") {
+      if (!/^fastapi = .*$/m.test(f.content)) throw new Error("graphql/python: REST pyproject.toml has no fastapi dependency");
+      return { ...f, content: f.content.replace(/^fastapi = .*$/m, `$&\nstrawberry-graphql = { extras = ["fastapi"], version = "^0.247.0" }`) };
+    }
+    return f;
+  });
 
-  files.push({ path: "app/__init__.py", content: "" });
-  files.push({ path: "app/main.py", content: pyGraphqlMain() });
   files.push({ path: "app/schema.py", content: pyGraphqlSchema(entities) });
   files.push({ path: "app/graphql_store.py", content: pyGraphqlStore(entities) });
-  files.push({ path: "pyproject.toml", content: pyGraphqlPyproject() });
-  files.push({ path: "Dockerfile", content: pyGraphqlDockerfile() });
 
   return files;
-}
-
-function pyGraphqlPyproject(): string {
-  return `[tool.poetry]
-name = "graphql-app"
-version = "0.1.0"
-description = "Helios-generated GraphQL server"
-authors = ["you <you@example.com>"]
-package-mode = false
-
-[tool.poetry.dependencies]
-python = "^3.12"
-fastapi = "^0.115.0"
-uvicorn = {extras = ["standard"], version = "^0.32.0"}
-"strawberry-graphql" = {extras = ["fastapi"], version = "^0.247.0"}
-
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.3.0"
-httpx = "^0.27.0"
-
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
-`;
-}
-
-function pyGraphqlDockerfile(): string {
-  return `# syntax=docker/dockerfile:1.7
-
-FROM python:3.12-slim AS deps
-WORKDIR /app
-RUN pip install --no-cache-dir poetry==1.8.4
-COPY pyproject.toml ./
-RUN poetry config virtualenvs.create false && poetry install --no-root --without dev
-
-FROM python:3.12-slim AS runtime
-WORKDIR /app
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
-COPY --from=deps /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=deps /usr/local/bin /usr/local/bin
-COPY app ./app
-COPY graphql ./graphql
-RUN useradd -m -u 1001 app && chown -R app:app /app
-USER app
-EXPOSE 4000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "4000"]
-`;
-}
-
-function pyGraphqlMain(): string {
-  return `"""Application entrypoint. Mounts the Strawberry schema at /graphql.
-
-The schema is built once at import time so first request latency is dominated
-by Python startup, not GraphQL introspection.
-"""
-
-import logging
-import signal
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI
-from strawberry.fastapi import GraphQLRouter
-
-from app.schema import schema
-
-logger = logging.getLogger(__name__)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: ARG001 — FastAPI requires the parameter
-    logger.info("startup: GraphQL ready at /graphql")
-    yield
-    logger.info("shutdown")
-
-
-app = FastAPI(lifespan=lifespan)
-graphql_app = GraphQLRouter(schema)
-app.include_router(graphql_app, prefix="/graphql")
-
-
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-def _term(*_args: object) -> None:
-    """Strawberry/uvicorn handle SIGTERM themselves — this only runs if we are
-    embedded in a host that doesn't. Safe to leave in place.
-    """
-    raise SystemExit(0)
-
-
-for sig in (signal.SIGINT, signal.SIGTERM):
-    try:
-        signal.signal(sig, _term)
-    except (ValueError, OSError):
-        # Worker thread — uvicorn's main process owns the real handlers.
-        pass
-`;
 }
 
 function pyGraphqlSchema(entities: Entity[]): string {

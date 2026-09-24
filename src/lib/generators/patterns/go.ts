@@ -36,7 +36,7 @@ interface FwCtx {
   getBodyTyped: (typ: string) => string; // bind into typed struct
   sendJSON: (status: string, expr: string) => string;
   sendNoContent: () => string;
-  retErr: (code: string, msg: string) => string; // return error response
+  retErr: (code: string, msg: string, indent?: string) => string; // return error response; indent = depth of the call site
   retOK: (expr: string) => string;
   retCreated: (expr: string) => string;
   afterReturn: string; // "" for gin, "return nil" isn't needed — or "return" for void
@@ -52,7 +52,7 @@ function fwCtx(fw: Fw): FwCtx {
     getBodyTyped: (t) => `\tvar body ${t}\n\tif err := c.ShouldBindJSON(&body); err != nil {\n\t\tc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})\n\t\treturn\n\t}`,
     sendJSON: (s, e) => `c.JSON(${s}, ${e})`,
     sendNoContent: () => `c.Status(http.StatusNoContent)`,
-    retErr: (code, msg) => `c.JSON(${code}, gin.H{"error": ${JSON.stringify(msg)}})\n\t\treturn`,
+    retErr: (code, msg, ind = "\t\t") => `c.JSON(${code}, gin.H{"error": ${JSON.stringify(msg)}})\n${ind}return`,
     retOK: (e) => `c.JSON(http.StatusOK, ${e})`,
     retCreated: (e) => `c.JSON(http.StatusCreated, ${e})`,
     afterReturn: "return",
@@ -75,8 +75,8 @@ function fwCtx(fw: Fw): FwCtx {
   };
 
   if (fw === "echo") return {
-    queryStr: (k, d = "") => `func() string { v := c.QueryParam(${JSON.stringify(k)}); if v == "" { return ${JSON.stringify(d)} }; return v }()`,
-    queryInt: (k, d) => `func() int { v, _ := strconv.Atoi(c.QueryParam(${JSON.stringify(k)})); if v == 0 { return ${String(d)} }; return v }()`,
+    queryStr: (k, d = "") => d ? `queryOr(c.QueryParam(${JSON.stringify(k)}), ${JSON.stringify(d)})` : `c.QueryParam(${JSON.stringify(k)})`,
+    queryInt: (k, d) => `queryIntOr(c.QueryParam(${JSON.stringify(k)}), ${String(d)})`,
     pathParam: (n) => `c.Param(${JSON.stringify(n)})`,
     getBody: () => `\tvar body map[string]any\n\tif err := c.Bind(&body); err != nil {\n\t\treturn c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t}`,
     getBodyTyped: (t) => `\tvar body ${t}\n\tif err := c.Bind(&body); err != nil {\n\t\treturn c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t}`,
@@ -91,14 +91,14 @@ function fwCtx(fw: Fw): FwCtx {
 
   // chi (stdlib)
   return {
-    queryStr: (k, d = "") => `func() string { v := r.URL.Query().Get(${JSON.stringify(k)}); if v == "" { return ${JSON.stringify(d)} }; return v }()`,
-    queryInt: (k, d) => `func() int { v, _ := strconv.Atoi(r.URL.Query().Get(${JSON.stringify(k)})); if v == 0 { return ${String(d)} }; return v }()`,
+    queryStr: (k, d = "") => d ? `queryOr(r.URL.Query().Get(${JSON.stringify(k)}), ${JSON.stringify(d)})` : `r.URL.Query().Get(${JSON.stringify(k)})`,
+    queryInt: (k, d) => `queryIntOr(r.URL.Query().Get(${JSON.stringify(k)}), ${String(d)})`,
     pathParam: (n) => `chi.URLParam(r, ${JSON.stringify(n)})`,
     getBody: () => `\tvar body map[string]any\n\tif err := json.NewDecoder(r.Body).Decode(&body); err != nil {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t\treturn\n\t}`,
     getBodyTyped: (t) => `\tvar body ${t}\n\tif err := json.NewDecoder(r.Body).Decode(&body); err != nil {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t\treturn\n\t}`,
     sendJSON: (s, e) => `writeJSON(w, ${s}, ${e})`,
     sendNoContent: () => `w.WriteHeader(http.StatusNoContent)`,
-    retErr: (code, msg) => `writeJSON(w, ${code}, map[string]any{"error": ${JSON.stringify(msg)}})\n\t\treturn`,
+    retErr: (code, msg, ind = "\t\t") => `writeJSON(w, ${code}, map[string]any{"error": ${JSON.stringify(msg)}})\n${ind}return`,
     retOK: (e) => `writeJSON(w, http.StatusOK, ${e})`,
     retCreated: (e) => `writeJSON(w, http.StatusCreated, ${e})`,
     afterReturn: "return",
@@ -210,7 +210,9 @@ ${x.getBody()}
 \t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
 \t}
 
-\tfor k, v := range body { existing[k] = v }
+\tfor k, v := range body {
+\t\texisting[k] = v
+\t}
 \t${x.retOK("existing")}`;
 }
 
@@ -356,7 +358,9 @@ function authLogout(fw: Fw): string {
 
 function authRefreshFw(fw: Fw): string {
   const x = fwCtx(fw);
-  return `\ttype refreshReq struct { RefreshToken string \`json:"refresh_token"\` }
+  return `\ttype refreshReq struct {
+\t\tRefreshToken string \`json:"refresh_token"\`
+\t}
 ${x.getBodyTyped("refreshReq")}
 \tif body.RefreshToken == "" {
 \t\t${x.retErr("http.StatusBadRequest", "refresh_token required")}
@@ -377,7 +381,7 @@ function authChangePasswordFw(fw: Fw): string {
   return `${dbNilCheck(fw)}
 \ttype cpReq struct {
 \t\tCurrentPassword string \`json:"current_password"\`
-\t\tNewPassword      string \`json:"new_password"\`
+\t\tNewPassword     string \`json:"new_password"\`
 \t}
 ${x.getBodyTyped("cpReq")}
 \tif len(body.NewPassword) < 8 {
@@ -388,7 +392,9 @@ ${x.getBodyTyped("cpReq")}
 \t\t${x.retErr("http.StatusUnauthorized", "missing_or_invalid_token")}
 \t}
 \tsub := claims.Subject
-\tvar user struct{ PasswordHash string \`json:"password_hash"\` }
+\tvar user struct {
+\t\tPasswordHash string \`json:"password_hash"\`
+\t}
 \tif err := h.db.Table("users").Where("id = ?", sub).First(&user).Error; err != nil {
 \t\t${x.retErr("http.StatusNotFound", "user not found")}
 \t}
@@ -460,7 +466,7 @@ fw === "fiber" ? `\trawBody := c.Body()` :
 \t\t${fw === "chi" ? "mac.Write(body)" : "mac.Write(rawBody)"}
 \t\texpected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 \t\tif !hmac.Equal([]byte(sig), []byte(expected)) {
-\t\t\t${x.retErr("http.StatusUnauthorized", "invalid_signature")}
+\t\t\t${x.retErr("http.StatusUnauthorized", "invalid_signature", "\t\t\t")}
 \t\t}
 \t}
 
@@ -511,7 +517,12 @@ fw === "fiber" || fw === "echo" ? `\theader, err := c.FormFile("file")
 \t}
 \tallowed := ${allowedMimes}
 \tvalidMime := false
-\tfor _, m := range allowed { if m == mimeType { validMime = true; break } }
+\tfor _, m := range allowed {
+\t\tif m == mimeType {
+\t\t\tvalidMime = true
+\t\t\tbreak
+\t\t}
+\t}
 \tif !validMime {
 \t\t${x.retErr("http.StatusUnsupportedMediaType", "unsupported file type")}
 \t}
@@ -530,7 +541,7 @@ fw === "fiber" || fw === "echo" ? `\theader, err := c.FormFile("file")
 \t\t${x.retErr("http.StatusInternalServerError", "cannot store upload")}
 \t}
 \th.log.Info("file uploaded", "name", destName, "mime", mimeType)
-\t${x.retCreated(mapLit(fw, ["id", "destName"], ["url", '"/uploads/"+destName'], ["mime", "mimeType"]))}`;
+\t${x.retCreated(mapLit(fw, ["id", "destName"], ["url", '"/uploads/" + destName'], ["mime", "mimeType"]))}`;
 }
 
 function paginatedSearch(fw: Fw, table: string): string {
@@ -605,9 +616,9 @@ function sendNotification(fw: Fw, config: StackConfig): string {
     ? "NATS — use github.com/nats-io/nats.go"
     : "message queue — configure broker URL via env";
   return `\ttype notifReq struct {
-\t\tRecipient string \`json:"recipient"\`
-\t\tChannel   string \`json:"channel"\` // "email" | "sms" | "push"
-\t\tTemplate  string \`json:"template"\`
+\t\tRecipient string         \`json:"recipient"\`
+\t\tChannel   string         \`json:"channel"\` // "email" | "sms" | "push"
+\t\tTemplate  string         \`json:"template"\`
 \t\tPayload   map[string]any \`json:"payload"\`
 \t}
 ${x.getBodyTyped("notifReq")}
@@ -623,6 +634,8 @@ ${x.getBodyTyped("notifReq")}
 
 function cacheRead(fw: Fw, table: string): string {
   const x = fwCtx(fw);
+  // gin/chi retOK writes without returning; a cache hit must stop before the DB lookup.
+  const stopAfterHit = fw === "gin" || fw === "chi" ? "\n\t\t\treturn" : "";
   return `${redisNilCheck(fw)}
 \tid := ${x.pathParam("id")}
 \tcacheKey := fmt.Sprintf(${JSON.stringify(table + ":%s")}, id)
@@ -633,7 +646,7 @@ function cacheRead(fw: Fw, table: string): string {
 \t\t// Cache hit — return parsed JSON
 \t\tvar cached map[string]any
 \t\tif jsonErr := json.Unmarshal([]byte(val), &cached); jsonErr == nil {
-\t\t\t${x.retOK("cached")}
+\t\t\t${x.retOK("cached")}${stopAfterHit}
 \t\t}
 \t}
 
@@ -670,7 +683,7 @@ function patternBody(pattern: string | undefined, fw: Fw, e: Endpoint, config: S
   // tokens with JWT_SECRET and authRequired verifies exactly those.
   if (authProviderSpec(config) && ["auth_login", "auth_register", "auth_refresh", "auth_change_password"].includes(pattern ?? "")) {
     return `\t// Credentials are managed by ${config.auth}; tokens minted here would fail JWKS verification.
-\t${fwCtx(fw).retErr("http.StatusNotImplemented", `handled_by_${config.auth}`)}`;
+\t${fwCtx(fw).retErr("http.StatusNotImplemented", `handled_by_${config.auth}`, "\t")}`;
   }
   switch (pattern as PatternId) {
     case "crud_list":    return crudList(fw, table);
@@ -763,6 +776,23 @@ function buildStruct(fw: Fw, methods: string, usesDb: boolean, usesRdb: boolean)
 func (h *APIHandlers) claimsFromContext(${fw === "gin" ? "c *gin.Context" : fw === "fiber" ? "c *fiber.Ctx" : fw === "echo" ? "c echo.Context" : "r *http.Request"}) (*auth.Claims, bool) {
 \treturn auth.FromContext(${fw === "gin" ? "c.Request.Context()" : fw === "fiber" ? "c.UserContext()" : fw === "echo" ? "c.Request().Context()" : "r.Context()"})
 }`);
+  // Named helpers instead of inline closures: gofmt expands multi-statement
+  // func literals, so one-line closures would leave the file un-gofmt'd.
+  if (methods.includes("queryOr(")) helpers.push(`// queryOr returns v, or def when v is empty.
+func queryOr(v, def string) string {
+\tif v == "" {
+\t\treturn def
+\t}
+\treturn v
+}`);
+  if (methods.includes("queryIntOr(")) helpers.push(`// queryIntOr parses v as an int, returning def when it is missing, invalid or 0.
+func queryIntOr(v string, def int) int {
+\tn, _ := strconv.Atoi(v)
+\tif n == 0 {
+\t\treturn def
+\t}
+\treturn n
+}`);
   if (methods.includes("generateID(")) helpers.push(`func generateID() string {
 \treturn uuid.New().String()
 }`);
@@ -774,7 +804,7 @@ func (h *APIHandlers) claimsFromContext(${fw === "gin" ? "c *gin.Context" : fw =
 
   const fields = [
     "\tlog *slog.Logger",
-    usesDb ? "\tdb  *gorm.DB // nil when the stack has no SQL database" : "",
+    usesDb ? "\tdb  *gorm.DB      // nil when the stack has no SQL database" : "",
     usesRdb ? "\trdb *redis.Client // nil when the stack has no Redis cache" : "",
   ].filter(Boolean).join("\n");
   const params = ["log *slog.Logger", usesDb ? "gdb *gorm.DB" : "", usesRdb ? "rdb *redis.Client" : ""].filter(Boolean).join(", ");

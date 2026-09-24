@@ -158,7 +158,7 @@ export function initialMigrationSql(
   const down = [
     "-- Reverses the initial migration.",
     "",
-    ...entities.reverse().map((e) => `DROP TABLE IF EXISTS ${tableName(e)};`),
+    ...[...entities].reverse().map((e) => `DROP TABLE IF EXISTS ${tableName(e)};`), // copy: don't mutate the caller's array
     "",
   ].join("\n");
 

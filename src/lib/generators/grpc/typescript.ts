@@ -11,18 +11,26 @@ import { safeName, toCamel, toKebab } from "../types";
  */
 export function tsGrpcFiles(
   config: StackConfig,
-  entities: Entity[]
+  entities: Entity[],
+  // REST-path instrumentation: main.ts preamble (tracing / APM / metrics
+  // registry imports) and the npm deps it needs. Built by typescript.ts.
+  obs: { preamble: string; deps: Record<string, string> } = { preamble: "", deps: {} }
 ): GeneratedFile[] {
   const name = safeName(config.name);
   const pkg = name.replace(/-/g, "_") + ".v1";
+  const prom = /prometheus|grafana/.test(config.monitoring);
 
   const files: GeneratedFile[] = [];
 
-  files.push({ path: "package.json", content: tsGrpcPkgJson(name, entities.length > 0, config.database) });
+  files.push({ path: "package.json", content: tsGrpcPkgJson(name, entities.length > 0, config.database, obs.deps) });
   files.push({ path: "tsconfig.json", content: tsGrpcTsconfig() });
   files.push({ path: "Dockerfile", content: tsGrpcDockerfile() });
-  files.push({ path: "src/main.ts", content: tsGrpcMain(pkg, entities) });
+  // ESM (Node16 resolution) needs the .js suffix on relative imports.
+  files.push({ path: "src/main.ts", content: obs.preamble.replace(`"./tracing"`, `"./tracing.js"`) + tsGrpcMain(pkg, entities, config, prom) });
   files.push({ path: "src/proto-loader.ts", content: tsGrpcProtoLoader(pkg) });
+  if (config.rateLimit || config.audit || prom) {
+    files.push({ path: "src/interceptors.ts", content: tsGrpcInterceptors(config, prom) });
+  }
 
   for (const entity of entities) {
     files.push({
@@ -34,11 +42,12 @@ export function tsGrpcFiles(
   return files;
 }
 
-function tsGrpcPkgJson(name: string, hasEntities: boolean, database: string): string {
+function tsGrpcPkgJson(name: string, hasEntities: boolean, database: string, extraDeps: Record<string, string>): string {
   const deps: Record<string, string> = {
     "@grpc/grpc-js": "^1.12.3",
     "@grpc/proto-loader": "^0.7.13",
     "grpc-health-check": "^2.0.2",
+    ...extraDeps,
   };
   if (hasEntities && /postgres|neon|supabase|mysql|planetscale|cockroach/.test(database)) {
     deps["@prisma/client"] = "^5.22.0";
@@ -147,7 +156,8 @@ export function serviceDefOf(name: string): grpc.ServiceDefinition {
 `;
 }
 
-function tsGrpcMain(pkg: string, entities: Entity[]): string {
+function tsGrpcMain(pkg: string, entities: Entity[], config: StackConfig, prom: boolean): string {
+  const intercepted = config.rateLimit || config.audit || prom;
   const imports = entities
     .map((e) => `import { ${toCamel(e.name)}Service } from "./services/${toKebab(e.name)}.service.js";`)
     .join("\n");
@@ -160,11 +170,11 @@ function tsGrpcMain(pkg: string, entities: Entity[]): string {
 
   return `import * as grpc from "@grpc/grpc-js";
 import { HealthImplementation } from "grpc-health-check";
-import { serviceDefOf } from "./proto-loader.js";
-${imports}
+${prom ? `import http from "node:http";\n` : ""}import { serviceDefOf } from "./proto-loader.js";
+${intercepted ? `import { interceptors } from "./interceptors.js";\n` : ""}${imports}
 
 const port = Number(process.env.PORT ?? 8080);
-const server = new grpc.Server();
+const server = new grpc.Server(${intercepted ? "{ interceptors }" : ""});
 
 ${registrations}
 
@@ -181,13 +191,26 @@ server.bindAsync(\`0.0.0.0:\${port}\`, grpc.ServerCredentials.createInsecure(), 
   }
   console.log(\`gRPC server listening on :\${bound}\`);
 });
-
+${prom ? `
+// Prometheus scrapes this plain-HTTP listener; the gRPC port only speaks HTTP/2.
+const metricsServer = http
+  .createServer(async (req, res) => {
+    if (req.url !== "/metrics") {
+      res.statusCode = 404;
+      res.end();
+      return;
+    }
+    res.setHeader("Content-Type", register.contentType);
+    res.end(await register.metrics());
+  })
+  .listen(Number(process.env.METRICS_PORT ?? 9464));
+` : ""}
 // Graceful shutdown on SIGTERM.
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => {
     console.log(\`\${signal} received — draining\`);
     health.setStatus("", "NOT_SERVING");
-    server.tryShutdown((err) => {
+${prom ? "    metricsServer.close();\n" : ""}    server.tryShutdown((err) => {
       if (err) {
         console.error("graceful shutdown failed, forcing:", err);
         server.forceShutdown();
@@ -196,6 +219,91 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
     });
   });
 }
+`;
+}
+
+// Server interceptors for the cross-cutting flags (grpc-js >= 1.10).
+function tsGrpcInterceptors(config: StackConfig, prom: boolean): string {
+  const blocks: string[] = [];
+  const names: string[] = [];
+  if (prom) {
+    names.push("metrics");
+    blocks.push(`const rpcs = new Counter({
+  name: "grpc_server_handled_total",
+  help: "RPCs completed on the server, by method and status code.",
+  labelNames: ["grpc_method", "grpc_code"],
+});
+const rpcSeconds = new Histogram({
+  name: "grpc_server_handling_seconds",
+  help: "RPC latency on the server, by method.",
+  labelNames: ["grpc_method"],
+});
+
+// Per-RPC count + latency; main.ts serves them on METRICS_PORT.
+const metrics: grpc.ServerInterceptor = (method, call) => {
+  const end = rpcSeconds.startTimer({ grpc_method: method.path });
+  return new grpc.ServerInterceptingCall(call, {
+    sendStatus: (status, next) => {
+      end();
+      rpcs.inc({ grpc_method: method.path, grpc_code: grpc.status[status.code] });
+      next(status);
+    },
+  });
+};`);
+  }
+  if (config.rateLimit) {
+    names.push("rateLimit");
+    blocks.push(`// ponytail: in-memory fixed window (60 RPCs / min / client), per replica. Move
+// the counter to Redis if limits must hold across replicas.
+const buckets = new Map<string, { count: number; resetAt: number }>();
+
+const rateLimit: grpc.ServerInterceptor = (_method, call) =>
+  new grpc.ServerInterceptingCall(call, {
+    start: (next) => {
+      next({
+        onReceiveMetadata: (metadata, mdNext) => {
+          const key = peerOf(call);
+          const now = Date.now();
+          const b = buckets.get(key);
+          if (!b || b.resetAt < now) buckets.set(key, { count: 1, resetAt: now + 60_000 });
+          else if (b.count >= 60) return call.sendStatus({ code: grpc.status.RESOURCE_EXHAUSTED, details: "rate_limited" });
+          else b.count++;
+          mdNext(metadata);
+        },
+      });
+    },
+  });`);
+  }
+  if (config.audit) {
+    names.push("audit");
+    blocks.push(`// One structured log line per RPC.
+const audit: grpc.ServerInterceptor = (method, call) =>
+  new grpc.ServerInterceptingCall(call, {
+    sendStatus: (status, next) => {
+      process.stdout.write(
+        JSON.stringify({
+          level: "info",
+          event: "audit",
+          method: method.path,
+          code: grpc.status[status.code],
+          peer: peerOf(call),
+          time: new Date().toISOString(),
+        }) + "\\n"
+      );
+      next(status);
+    },
+  });`);
+  }
+  const peer = config.rateLimit || config.audit
+    ? `\n// Client address without the port ("ipv4:10.0.0.1:5123" -> "ipv4:10.0.0.1").
+const peerOf = (call: grpc.ServerInterceptingCallInterface) => call.getPeer().replace(/:\\d+$/, "");\n`
+    : "";
+  return `import * as grpc from "@grpc/grpc-js";
+${prom ? `import { Counter, Histogram } from "prom-client";\n` : ""}${peer}
+${blocks.join("\n\n")}
+
+// Same order as the REST middleware chain.
+export const interceptors: grpc.ServerInterceptor[] = [${names.join(", ")}];
 `;
 }
 

@@ -41,8 +41,8 @@
   },
   {
     "path": "cmd/api/main.go",
-    "lines": 64,
-    "size": 1565
+    "lines": 108,
+    "size": 3100
   },
   {
     "path": "cmd/migrate/main.go",
@@ -116,13 +116,13 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 14,
-    "size": 336
+    "lines": 16,
+    "size": 423
   },
   {
     "path": "go.mod",
-    "lines": 13,
-    "size": 286
+    "lines": 18,
+    "size": 586
   },
   {
     "path": "internal/config/config.go",
@@ -135,9 +135,19 @@
     "size": 256
   },
   {
+    "path": "internal/grpcserver/interceptors.go",
+    "lines": 106,
+    "size": 3276
+  },
+  {
     "path": "internal/grpcserver/post_service.go",
     "lines": 45,
     "size": 1502
+  },
+  {
+    "path": "internal/grpcserver/ratelimit_test.go",
+    "lines": 21,
+    "size": 516
   },
   {
     "path": "internal/grpcserver/server.go",
@@ -148,6 +158,11 @@
     "path": "internal/grpcserver/user_service.go",
     "lines": 45,
     "size": 1502
+  },
+  {
+    "path": "internal/tracing/tracing.go",
+    "lines": 51,
+    "size": 1891
   },
   {
     "path": "Makefile",

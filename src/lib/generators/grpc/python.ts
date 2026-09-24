@@ -11,21 +11,30 @@ import { safeName, toSnake } from "../types";
  */
 export function pyGrpcFiles(
   config: StackConfig,
-  entities: Entity[]
+  entities: Entity[],
+  // app/tracing.py from the REST generator ("" when tracing is off).
+  tracingModule = ""
 ): GeneratedFile[] {
   const name = safeName(config.name);
-  const pkg = name.replace(/-/g, "_") + "_v1";
+  // Stubs land in gen/python/<proto package>/v1 (see the Dockerfile protoc
+  // step); gen/python is on PYTHONPATH, so they import as <proto package>.v1.
+  const protoPkg = name.replace(/-/g, "_");
+  const o = pyGrpcObservability(config);
 
   const files: GeneratedFile[] = [];
-  files.push({ path: "pyproject.toml", content: pyGrpcPyproject(name, entities.length > 0) });
+  files.push({ path: "pyproject.toml", content: pyGrpcPyproject(name, entities.length > 0, o) });
   files.push({ path: "Dockerfile", content: pyGrpcDockerfile() });
   files.push({ path: "app/__init__.py", content: "" });
-  files.push({ path: "app/main.py", content: pyGrpcMain(pkg, entities) });
+  files.push({ path: "app/main.py", content: pyGrpcMain(protoPkg, entities, o) });
+  if (o.interceptors.length > 0) {
+    files.push({ path: "app/interceptors.py", content: pyGrpcInterceptors(o) });
+  }
+  if (tracingModule) files.push({ path: "app/tracing.py", content: tracingModule });
 
   for (const entity of entities) {
     files.push({
       path: `app/services/${toSnake(entity.name)}.py`,
-      content: pyGrpcEntityService(pkg, entity),
+      content: pyGrpcEntityService(protoPkg, entity),
     });
   }
   if (entities.length > 0) {
@@ -35,10 +44,42 @@ export function pyGrpcFiles(
   return files;
 }
 
-function pyGrpcPyproject(name: string, hasEntities: boolean): string {
+type PyGrpcObs = {
+  tracing: boolean;
+  prom: boolean;
+  sentry: boolean;
+  datadog: boolean;
+  // app/interceptors.py classes, in the same order as the REST middleware.
+  interceptors: string[];
+};
+
+function pyGrpcObservability(config: StackConfig): PyGrpcObs {
+  const prom = /prometheus|grafana/.test(config.monitoring);
+  return {
+    tracing: config.tracing,
+    prom,
+    sentry: /sentry/.test(config.monitoring),
+    datadog: /datadog/.test(config.monitoring),
+    interceptors: [
+      prom ? "MetricsInterceptor" : "",
+      config.rateLimit ? "RateLimitInterceptor" : "",
+      config.audit ? "AuditInterceptor" : "",
+    ].filter(Boolean),
+  };
+}
+
+function pyGrpcPyproject(name: string, hasEntities: boolean, o: PyGrpcObs): string {
   const extras = hasEntities
-    ? `"sqlalchemy>=2.0.36",\n    "asyncpg>=0.30.0",\n    `
+    ? `sqlalchemy = "^2.0.36"\nasyncpg = "^0.30.0"\n`
     : "";
+  const obs = [
+    o.prom ? `prometheus-client = "^0.21.0"` : "",
+    o.sentry ? `sentry-sdk = "^2.19.0"` : "",
+    o.datadog ? `ddtrace = "^2.14.0"` : "",
+    ...(o.tracing
+      ? [`opentelemetry-sdk = "~1.29.0"`, `opentelemetry-exporter-otlp-proto-http = "~1.29.0"`, `opentelemetry-instrumentation-grpc = "~0.50b0"`]
+      : []),
+  ].filter(Boolean).map((l) => `${l}\n`).join("");
   return `[tool.poetry]
 name = "${name}"
 version = "0.1.0"
@@ -52,7 +93,7 @@ grpcio-health-checking = "^1.68.0"
 grpcio-reflection = "^1.68.0"
 protobuf = "^5.28.3"
 ${extras}pydantic-settings = "^2.6.1"
-
+${obs}
 [tool.poetry.group.dev.dependencies]
 grpcio-tools = "^1.68.0"
 pytest = "^8.3.3"
@@ -104,18 +145,21 @@ CMD ["python", "-m", "app.main"]
 `;
 }
 
-function pyGrpcMain(pkg: string, entities: Entity[]): string {
-  const modulePath = `${pkg}.v1.service_pb2_grpc`;
+
+function pyGrpcMain(protoPkg: string, entities: Entity[], o: PyGrpcObs): string {
   const imports: string[] = [];
   const registrations: string[] = [];
   for (const entity of entities) {
     const snake = toSnake(entity.name);
     imports.push(`from app.services.${snake} import ${entity.name}Service`);
     registrations.push(
-      `    ${modulePath}.add_${entity.name}ServiceServicer_to_server(${entity.name}Service(), server)`
+      `    service_pb2_grpc.add_${entity.name}ServiceServicer_to_server(${entity.name}Service(), server)`
     );
   }
+  const interceptors = [o.tracing ? "server_interceptor()" : "", ...o.interceptors.map((c) => `${c}()`)].filter(Boolean);
   const importBlock = [
+    // ddtrace.auto must be the very first import: it patches grpc as it loads.
+    ...(o.datadog ? [`import ddtrace.auto  # noqa: F401 — must stay the first import`] : []),
     `import asyncio`,
     `import logging`,
     `import os`,
@@ -125,8 +169,13 @@ function pyGrpcMain(pkg: string, entities: Entity[]): string {
     `import grpc`,
     `from grpc_health.v1 import health, health_pb2, health_pb2_grpc`,
     `from grpc_reflection.v1alpha import reflection`,
+    ...(o.tracing ? [`from opentelemetry.instrumentation.grpc import server_interceptor`] : []),
+    ...(o.prom ? [`from prometheus_client import start_http_server`] : []),
+    ...(o.sentry ? [`import sentry_sdk`, `from sentry_sdk.integrations.grpc import GRPCIntegration`] : []),
     ``,
-    entities.length > 0 ? `from gen.python.${pkg}.v1 import service_pb2_grpc as ${pkg}_grpc  # noqa: E402` : `# no entity services defined`,
+    entities.length > 0 ? `from ${protoPkg}.v1 import service_pb2_grpc` : `# no entity services defined`,
+    ...(o.interceptors.length ? [`from app.interceptors import ${o.interceptors.join(", ")}`] : []),
+    ...(o.tracing ? [`from app.tracing import configure_tracing`] : []),
     ...imports,
   ].join("\n");
 
@@ -134,10 +183,15 @@ function pyGrpcMain(pkg: string, entities: Entity[]): string {
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 log = logging.getLogger(__name__)
-
+${o.sentry ? `
+# Initialised before grpc.server() so the integration can wrap it.
+sentry_sdk.init(dsn=os.environ.get("SENTRY_DSN"), traces_sample_rate=1.0, integrations=[GRPCIntegration()])
+` : ""}
 
 def serve() -> None:
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+${o.tracing ? "    configure_tracing()\n" : ""}    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),${interceptors.length ? `\n        interceptors=[${interceptors.join(", ")}],` : ""}
+    )
 
 ${registrations.length > 0 ? registrations.join("\n") : "    # No entity services defined — add them once entities exist in the builder."}
 
@@ -153,7 +207,10 @@ ${registrations.length > 0 ? registrations.join("\n") : "    # No entity service
         health.SERVICE_NAME,
     )
     reflection.enable_server_reflection(service_names, server)
-
+${o.prom ? `
+    # Prometheus scrapes this plain-HTTP listener; the gRPC port only speaks HTTP/2.
+    start_http_server(int(os.environ.get("METRICS_PORT", "9464")))
+` : ""}
     port = int(os.environ.get("PORT", "8080"))
     server.add_insecure_port(f"0.0.0.0:{port}")
     server.start()
@@ -179,6 +236,130 @@ if __name__ == "__main__":
 `;
 }
 
+// Interceptors for the cross-cutting flags. They wrap unary-unary handlers
+// (every generated RPC is unary); other handler kinds pass through.
+function pyGrpcInterceptors(o: PyGrpcObs): string {
+  const has = (c: string) => o.interceptors.includes(c);
+  const blocks: string[] = [];
+  if (has("MetricsInterceptor")) {
+    blocks.push(`_RPCS = Counter("grpc_server_handled_total", "RPCs completed on the server, by method and status code.", ["grpc_method", "grpc_code"])
+_SECONDS = Histogram("grpc_server_handling_seconds", "RPC latency on the server, by method.", ["grpc_method"])
+
+
+class MetricsInterceptor(grpc.ServerInterceptor):
+    """Per-RPC count + latency; app.main serves them on METRICS_PORT."""
+
+    def intercept_service(self, continuation, handler_call_details):
+        method = handler_call_details.method
+
+        def around(behavior, request, context):
+            start = time.perf_counter()
+            failed = False
+            try:
+                return behavior(request, context)
+            except Exception:
+                failed = True
+                raise
+            finally:
+                _SECONDS.labels(method).observe(time.perf_counter() - start)
+                _RPCS.labels(method, _status(context, failed)).inc()
+
+        return _wrap(continuation(handler_call_details), around)`);
+  }
+  if (has("RateLimitInterceptor")) {
+    blocks.push(`class RateLimitInterceptor(grpc.ServerInterceptor):
+    """Rejects RPCs with RESOURCE_EXHAUSTED past 60 / minute / client.
+
+    ponytail: in-memory fixed window, per process. Move the counters to Redis
+    if the limit must hold across replicas.
+    """
+
+    def __init__(self, limit: int = 60, window: float = 60.0):
+        self._limit = limit
+        self._window = window
+        self._hits: dict[str, tuple[int, float]] = {}
+        self._lock = threading.Lock()
+
+    def _allow(self, key: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            count, reset_at = self._hits.get(key, (0, now + self._window))
+            if reset_at < now:
+                count, reset_at = 0, now + self._window
+            if count >= self._limit:
+                return False
+            self._hits[key] = (count + 1, reset_at)
+            return True
+
+    def intercept_service(self, continuation, handler_call_details):
+        def around(behavior, request, context):
+            if not self._allow(_peer(context)):
+                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "rate_limited")
+            return behavior(request, context)
+
+        return _wrap(continuation(handler_call_details), around)`);
+  }
+  if (has("AuditInterceptor")) {
+    blocks.push(`class AuditInterceptor(grpc.ServerInterceptor):
+    """One structured log line per RPC."""
+
+    _log = logging.getLogger("audit")
+
+    def intercept_service(self, continuation, handler_call_details):
+        method = handler_call_details.method
+
+        def around(behavior, request, context):
+            failed = False
+            try:
+                return behavior(request, context)
+            except Exception:
+                failed = True
+                raise
+            finally:
+                self._log.info("audit", extra={
+                    "event": "audit",
+                    "method": method,
+                    "code": _status(context, failed),
+                    "peer": _peer(context),
+                })
+
+        return _wrap(continuation(handler_call_details), around)`);
+  }
+  const std = [
+    has("AuditInterceptor") ? "import logging" : "",
+    has("RateLimitInterceptor") ? "import threading" : "",
+    has("MetricsInterceptor") || has("RateLimitInterceptor") ? "import time" : "",
+  ].filter(Boolean);
+  const third = ["import grpc", has("MetricsInterceptor") ? "from prometheus_client import Counter, Histogram" : ""].filter(Boolean);
+  const imports = [...std, ...(std.length ? [""] : []), ...third].join("\n");
+  return `"""gRPC server interceptors: ${o.interceptors.join(", ")}."""
+${imports}
+
+
+def _wrap(handler, around):
+    """Run around(behavior, request, context) in place of a unary-unary handler."""
+    if handler is None or handler.unary_unary is None:
+        return handler
+    inner = handler.unary_unary
+    return handler._replace(unary_unary=lambda request, context: around(inner, request, context))
+
+
+def _peer(context) -> str:
+    """Client address without the port ("ipv4:10.0.0.1:5123" -> "ipv4:10.0.0.1")."""
+    return context.peer().rsplit(":", 1)[0]
+
+
+def _status(context, failed: bool) -> str:
+    code = context.code()
+    if code is not None:
+        return code.name
+    return "UNKNOWN" if failed else "OK"
+
+
+${blocks.join("\n\n\n")}
+`;
+}
+
 function pyGrpcEntityService(pkg: string, entity: Entity): string {
   const name = entity.name;
   return `# Handlers for ${name}Service. Each method is a stub that returns
@@ -187,7 +368,7 @@ function pyGrpcEntityService(pkg: string, entity: Entity): string {
 # Method signatures are fixed by the generated stubs; do not rename them.
 
 import grpc
-from gen.python.${pkg}.v1 import service_pb2, service_pb2_grpc
+from ${pkg}.v1 import service_pb2, service_pb2_grpc
 
 
 class ${name}Service(service_pb2_grpc.${name}ServiceServicer):

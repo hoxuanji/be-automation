@@ -1,7 +1,7 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { safeName, toKebab, toCamel } from "./types";
 import { tsGrpcFiles } from "./grpc/typescript";
-import { tsGraphqlFiles } from "./graphql/typescript";
+import { mountOnTsRest, tsGraphqlFiles } from "./graphql/typescript";
 import { isGraphqlSupported } from "./types";
 import { needsAuth } from "./auth/providers";
 import { tsPatternRoute, tsPatternImports, usesPrisma, hasRedisCache } from "./patterns/typescript";
@@ -33,10 +33,12 @@ export function typescriptFiles(
     return tRPCFiles(config, endpoints, entities);
   }
 
-  // GraphQL: emit a graphql-yoga server keyed off the framework. Same
-  // schema-first dispatch as gRPC — the SDL was already added in index.ts.
+  // GraphQL: graphql-yoga mounted on the REST server for the chosen framework
+  // (built with no routes), so its middleware and observability apply.
+  // NestJS uses the Express base — see tsGraphqlMount.
   if (config.api === "graphql" && isGraphqlSupported(config.language)) {
-    return tsGraphqlFiles(config, entities);
+    const framework = config.framework === "nestjs" ? "express" : config.framework;
+    return tsGraphqlFiles(config, entities, typescriptFiles({ ...config, api: "rest", framework }, [], []));
   }
 
   // gRPC mode replaces the framework-specific HTTP bootstrap with a @grpc/grpc-js
@@ -47,7 +49,13 @@ export function typescriptFiles(
     if (usesPrisma(config, entities)) {
       files.push(...prismaFiles(config, entities));
     }
-    files.push(...tsGrpcFiles(config, entities));
+    // Same instrumentation as the REST main.ts; tsGrpcFiles adds the interceptors.
+    const obsDeps = Object.fromEntries(
+      Object.entries(JSON.parse(pkgJson(safeName(config.name), config, false, false, endpoints)).dependencies as Record<string, string>)
+        .filter(([k]) => /^(@opentelemetry\/|prom-client$|@sentry\/node$|dd-trace$)/.test(k))
+    );
+    files.push(...tsGrpcFiles(config, entities, { preamble: tsInstrumentPreamble(config), deps: obsDeps }));
+    if (config.tracing) files.push({ path: "src/tracing.ts", content: tracingFile(safeName(config.name)) });
     return files;
   }
 
@@ -56,7 +64,7 @@ export function typescriptFiles(
   const anyProtected = endpoints.some((e) => e.auth);
   const withAuth = needsAuth(config, anyProtected);
 
-  files.push({ path: "package.json", content: pkgJson(name, config, usesPrisma(config, entities), withAuth) });
+  files.push({ path: "package.json", content: pkgJson(name, config, usesPrisma(config, entities), withAuth, endpoints) });
   files.push({ path: "tsconfig.json", content: tsconfig() });
   files.push({ path: "Dockerfile", content: tsDockerfile() });
   files.push({ path: "vitest.config.ts", content: vitestConfig() });
@@ -129,12 +137,13 @@ function tsInstrumentPreamble(c: StackConfig): string {
   ].filter(Boolean).map((l) => l + "\n").join("");
 }
 
-// Pattern handlers inline in main.ts need these clients.
+// Pattern handlers (inline in main.ts, or in the Nest AppController) need these clients + libs.
 function tsPatternClientImports(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): string {
   const patterns = endpoints.map((e) => e.pattern ?? "");
   const needsDb = usesPrisma(config, entities) && patterns.some((p) => /^(crud_|paginated_search|cache_read|health_check)/.test(p));
   const needsCache = hasRedis(config) && patterns.some((p) => p === "cache_read" || p === "health_check");
-  return `${needsDb ? `import { prisma } from "./db";\n` : ""}${needsCache ? `import { redis } from "./cache";\n` : ""}`;
+  const { needsBcrypt, needsJwt, needsCrypto } = tsPatternImports(endpoints);
+  return `${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${needsCrypto ? 'import crypto from "node:crypto";\n' : ""}${needsDb ? `import { prisma } from "./db";\n` : ""}${needsCache ? `import { redis } from "./cache";\n` : ""}`;
 }
 
 function entityCrudFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
@@ -629,8 +638,9 @@ function prismaType(t: FieldType): string {
   }
 }
 
-function pkgJson(name: string, config: StackConfig, withPrisma = false, withAuth = false) {
+function pkgJson(name: string, config: StackConfig, withPrisma: boolean, withAuth: boolean, endpoints: Endpoint[]) {
   const framework = config.framework;
+  const { needsBcrypt, needsJwt } = tsPatternImports(endpoints);
   const deps: Record<string, Record<string, string>> = {
     nestjs: {
       "@nestjs/common": "^10.4.0",
@@ -669,6 +679,8 @@ function pkgJson(name: string, config: StackConfig, withPrisma = false, withAuth
     ...(hasSentry(config) ? { "@sentry/node": "^8.42.0" } : {}),
     ...(hasDatadog(config) ? { "dd-trace": "^5.23.0" } : {}),
     ...(hasRedis(config) ? { ioredis: "^5.4.1" } : {}),
+    ...(needsBcrypt ? { bcrypt: "^5.1.1" } : {}),
+    ...(needsJwt ? { jsonwebtoken: "^9.0.2" } : {}),
     ...(config.tracing
       ? {
           "@opentelemetry/sdk-node": "^0.57.0",
@@ -714,6 +726,10 @@ function pkgJson(name: string, config: StackConfig, withPrisma = false, withAuth
           supertest: "^7.0.0",
           "@types/supertest": "^6.0.0",
           ...(framework === "express" ? { "@types/express": "^4.17.21", "@types/cors": "^2.8.17" } : {}),
+          // Nest pattern handlers take the underlying Express req/res.
+          ...(framework === "nestjs" && endpoints.some((e) => e.pattern) ? { "@types/express": "^4.17.21" } : {}),
+          ...(needsBcrypt ? { "@types/bcrypt": "^5.0.2" } : {}),
+          ...(needsJwt ? { "@types/jsonwebtoken": "^9.0.7" } : {}),
           ...(framework === "nestjs" ? { "@nestjs/testing": "^10.0.0" } : {}),
           ...(withPrisma ? { prisma: "^5.22.0" } : {}),
         },
@@ -1075,22 +1091,31 @@ describe("${pascal} routes", () => {
 }
 
 function nestjsFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
+  const anyProtected = endpoints.some((e) => e.auth);
+  const withAuth = needsAuth(config, anyProtected);
+  const hasPatterns = endpoints.some((e) => e.pattern);
+  // Pattern handlers reuse the Express bodies verbatim via @Req()/@Res()
+  // (Nest runs on platform-express), so both frameworks behave identically.
+  const guarded = (e: Endpoint) => e.pattern && e.auth && withAuth;
   const routes = endpoints
-    .map(
-      (e) => `  @${capMethod(e.method)}(${JSON.stringify(nestPath(e.path))})
+    .map((e) =>
+      e.pattern
+        ? `  @${capMethod(e.method)}(${JSON.stringify(nestPath(e.path))})
+${guarded(e) ? "  @UseGuards(JwtAuthGuard)\n" : ""}  async ${handlerName(e)}(@Req() req: Request, @Res() res: Response) {
+${tsPatternRoute(e, "nestjs", config, entities).replace(/^(?=.)/gm, "  ")}
+  }`
+        : `  @${capMethod(e.method)}(${JSON.stringify(nestPath(e.path))})
   ${handlerName(e)}() {
     return { ok: true, op: "${e.method} ${e.path}" };
   }`
     )
     .join("\n\n");
+  const nestCommon = ["Controller", "Get", "Post", "Put", "Patch", "Delete", ...(hasProm(config) ? ["Header"] : []), ...(hasPatterns ? ["Req", "Res"] : []), ...(endpoints.some(guarded) ? ["UseGuards"] : [])];
 
   const entityModuleImports = entities
     .map((e) => `import { ${e.name}Module } from "./modules/${toKebab(e.name)}/${toKebab(e.name)}.module";`)
     .join("\n");
   const entityModuleList = entities.map((e) => `${e.name}Module`).join(", ");
-
-  const anyProtected = endpoints.some((e) => e.auth);
-  const withAuth = needsAuth(config, anyProtected);
 
   return [
     {
@@ -1143,8 +1168,8 @@ export class AppModule {}
     },
     {
       path: "src/app.controller.ts",
-      content: `import { Controller, Get, Post, Put, Patch, Delete${hasProm(config) ? ", Header" : ""} } from "@nestjs/common";
-${hasProm(config) ? `import { register } from "prom-client";\n` : ""}
+      content: `import { ${nestCommon.join(", ")} } from "@nestjs/common";
+${hasPatterns ? `import type { Request, Response } from "express";\n` : ""}${endpoints.some(guarded) ? `import { JwtAuthGuard } from "./auth/jwt.guard";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}${hasProm(config) ? `import { register } from "prom-client";\n` : ""}
 @Controller()
 export class AppController {
   @Get("/health")
@@ -1242,7 +1267,6 @@ export class JwtAuthGuard implements CanActivate {
 }
 
 function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
-  const { needsBcrypt, needsJwt } = tsPatternImports(endpoints);
   const routes = endpoints
     .map((e) =>
       e.pattern
@@ -1265,7 +1289,7 @@ function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
 import helmet from "helmet";
 import cors from "cors";
 import pinoHttp from "pino-http";
-${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}${config.audit ? `import { auditLogger } from "./middleware/audit";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}import { authRequired } from "./middleware/auth";
+${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}${config.audit ? `import { auditLogger } from "./middleware/audit";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}import { authRequired } from "./middleware/auth";
 ${entityImports ? entityImports + "\n" : ""}
 // Comma-separated list of origins in ALLOWED_ORIGINS, e.g.
 // "https://app.example.com,https://admin.example.com". Omit to keep CORS
@@ -1584,8 +1608,6 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
 function tRPCFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
-  const name = safeName(config.name);
-
   const procedures = endpoints.map((e) => {
     const key = handlerName(e);
     const isQuery = e.method === "GET";
@@ -1610,35 +1632,16 @@ function tRPCFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[
     return `export type ${en.name} = {\n${fields}\n};`;
   }).join("\n\n");
 
+  // tRPC is served by the Express REST server (built with no routes), so the
+  // REST middleware and observability sit in front of /trpc.
+  const rest = typescriptFiles({ ...config, api: "rest", framework: "express" }, [], []);
   return [
-    {
-      path: "package.json",
-      content: JSON.stringify({
-        name,
-        version: "0.1.0",
-        private: true,
-        scripts: {
-          dev: "tsx watch src/server.ts",
-          start: "node dist/server.js",
-          build: "tsc -p tsconfig.json",
-          test: "vitest run",
-        },
-        dependencies: {
-          "@trpc/server": "^11.0.0",
-          express: "^4.21.0",
-          zod: "^3.24.1",
-          "pino-http": "^10.3.0",
-        },
-        devDependencies: {
-          "@types/express": "^4.17.21",
-          "@types/node": "^22.10.5",
-          tsx: "^4.19.0",
-          typescript: "^5.7.2",
-          vitest: "^2.0.0",
-        },
-      }, null, 2) + "\n",
-    },
-    { path: "tsconfig.json", content: tsconfig() },
+    ...mountOnTsRest(rest, {
+      imports: `import * as trpcExpress from "@trpc/server/adapters/express";\nimport { appRouter } from "./router";`,
+      mount: `app.use("/trpc", trpcExpress.createExpressMiddleware({ router: appRouter }));`,
+      // src/client.ts imports @trpc/client.
+      deps: { "@trpc/server": "^11.0.0", "@trpc/client": "^11.0.0" },
+    }),
     {
       path: "src/trpc.ts",
       content: `import { initTRPC } from "@trpc/server";
@@ -1667,27 +1670,6 @@ ${entityProcedures}
 });
 
 export type AppRouter = typeof appRouter;
-`,
-    },
-    {
-      path: "src/server.ts",
-      content: `import express from "express";
-import pinoHttp from "pino-http";
-import * as trpcExpress from "@trpc/server/adapters/express";
-import { appRouter } from "./router";
-
-const app = express();
-app.use(pinoHttp());
-app.use(
-  "/trpc",
-  trpcExpress.createExpressMiddleware({ router: appRouter })
-);
-app.get("/health", (_, res) => res.json({ ok: true }));
-
-const port = Number(process.env.PORT ?? 8080);
-app.listen(port, () =>
-  console.log(JSON.stringify({ level: "info", msg: "listening", port }))
-);
 `,
     },
     {

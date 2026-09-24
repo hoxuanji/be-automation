@@ -80,7 +80,7 @@ function rustFieldType(t: FieldType, sql: RustSql | null = null): string {
     case "uuid":    return sql?.mysql ? "String" : "uuid::Uuid";
     case "string":  return "String";
     case "text":    return "String";
-    case "number":  return "i64";
+    case "number":  return "f64"; // migrations use DOUBLE PRECISION / DOUBLE (db/sql.ts)
     case "boolean": return "bool";
     case "date":    return "chrono::DateTime<chrono::Utc>";
     case "json":    return "serde_json::Value";

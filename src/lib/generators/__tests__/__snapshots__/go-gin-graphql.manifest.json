@@ -31,8 +31,8 @@
   },
   {
     "path": "cmd/api/main.go",
-    "lines": 56,
-    "size": 1374
+    "lines": 43,
+    "size": 810
   },
   {
     "path": "cmd/migrate/main.go",
@@ -106,13 +106,13 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 14,
-    "size": 336
+    "lines": 15,
+    "size": 384
   },
   {
     "path": "go.mod",
-    "lines": 10,
-    "size": 172
+    "lines": 21,
+    "size": 660
   },
   {
     "path": "gqlgen.yml",
@@ -145,9 +145,59 @@
     "size": 1576
   },
   {
+    "path": "internal/cache/redis.go",
+    "lines": 28,
+    "size": 683
+  },
+  {
     "path": "internal/config/config.go",
     "lines": 22,
     "size": 476
+  },
+  {
+    "path": "internal/db/sql.go",
+    "lines": 58,
+    "size": 1600
+  },
+  {
+    "path": "internal/monitoring/metrics.go",
+    "lines": 13,
+    "size": 353
+  },
+  {
+    "path": "internal/server/graphql.go",
+    "lines": 23,
+    "size": 732
+  },
+  {
+    "path": "internal/server/health.go",
+    "lines": 36,
+    "size": 909
+  },
+  {
+    "path": "internal/server/middleware.go",
+    "lines": 35,
+    "size": 832
+  },
+  {
+    "path": "internal/server/ratelimit_test.go",
+    "lines": 21,
+    "size": 512
+  },
+  {
+    "path": "internal/server/ratelimit.go",
+    "lines": 54,
+    "size": 1341
+  },
+  {
+    "path": "internal/server/server.go",
+    "lines": 90,
+    "size": 2592
+  },
+  {
+    "path": "internal/tracing/tracing.go",
+    "lines": 51,
+    "size": 1901
   },
   {
     "path": "Makefile",

@@ -1,6 +1,7 @@
 import type { Entity, GeneratedFile, StackConfig } from "../types";
 import { safeName, toSnake } from "../types";
 import { primaryKey, pluralize } from "./schema";
+import { fwImport, goImports, type GoFw } from "../go";
 
 /**
  * Emits a Go GraphQL server skeleton built around gqlgen. We do NOT commit
@@ -12,17 +13,27 @@ import { primaryKey, pluralize } from "./schema";
  */
 export function goGraphqlFiles(
   config: StackConfig,
-  entities: Entity[]
+  entities: Entity[],
+  rest: GeneratedFile[]
 ): GeneratedFile[] {
   const name = safeName(config.name);
   const module = `github.com/your-username/${name}`;
-  const files: GeneratedFile[] = [];
+  const fw = (["gin", "fiber", "echo", "chi"].includes(config.framework) ? config.framework : "gin") as GoFw;
 
-  files.push({ path: "cmd/api/main.go", content: goGraphqlMain(module, entities) });
+  // `rest` is the REST tree built with no routes (cmd/api, config, server +
+  // middleware, tracing, monitoring). Mount GraphQL next to /health so every
+  // middleware in server.New (rate limit, audit, tracing, metrics) applies.
+  const health = /^\tr\.\w+\("\/health", s\.health\)$/m;
+  const files = rest.map((f) => {
+    if (f.path !== "internal/server/server.go") return f;
+    if (!health.test(f.content)) throw new Error("graphql/go: REST server.go has no /health route to mount GraphQL beside");
+    return { ...f, content: f.content.replace(health, "$&\n\tmountGraphQL(r)") };
+  });
+
+  files.push({ path: "internal/server/graphql.go", content: goGraphqlMount(module, fw) });
   files.push({ path: "graph/resolver.go", content: goGraphqlResolverRoot(entities) });
   files.push({ path: "graph/health.go", content: goGraphqlHealth() });
   files.push({ path: "gqlgen.yml", content: goGqlgenYaml(module) });
-  files.push({ path: "go.mod", content: goGraphqlMod(module) });
   files.push({ path: "Makefile", content: goGraphqlMakefile() });
 
   for (const entity of entities) {
@@ -35,20 +46,33 @@ export function goGraphqlFiles(
   return files;
 }
 
-function goGraphqlMod(module: string): string {
-  // Pinned versions match what's tested upstream as of late 2025. If the user
-  // bumps Go to 1.24+, gqlgen still works — only the toolchain directive
-  // needs updating.
-  return `module ${module}
+function goGraphqlMount(module: string, fw: GoFw): string {
+  const mount: Record<GoFw, string> = {
+    gin: `func mountGraphQL(r *gin.Engine) {\n\tr.Any("/graphql", gin.WrapH(graphQLHandler()))\n\tr.GET("/", gin.WrapH(playground.Handler("GraphQL", "/graphql")))\n}`,
+    fiber: `func mountGraphQL(r *fiber.App) {\n\tr.All("/graphql", adaptor.HTTPHandler(graphQLHandler()))\n\tr.Get("/", adaptor.HTTPHandler(playground.Handler("GraphQL", "/graphql")))\n}`,
+    echo: `func mountGraphQL(r *echo.Echo) {\n\tr.Any("/graphql", echo.WrapHandler(graphQLHandler()))\n\tr.GET("/", echo.WrapHandler(playground.Handler("GraphQL", "/graphql")))\n}`,
+    chi: `func mountGraphQL(r chi.Router) {\n\tr.Handle("/graphql", graphQLHandler())\n\tr.Handle("/", playground.Handler("GraphQL", "/graphql"))\n}`,
+  };
+  const code = `// graphQLHandler serves the gqlgen executable schema. Run \`make gql\` once
+// before \`go build\` so graph/generated.go and graph/models_gen.go exist.
+func graphQLHandler() http.Handler {
+\treturn handler.NewDefaultServer(graph.NewExecutableSchema(graph.Config{Resolvers: graph.NewResolver()}))
+}
 
-go 1.23
-
-require (
-\tgithub.com/99designs/gqlgen v0.17.55
-\tgithub.com/vektah/gqlparser/v2 v2.5.20
-\tgithub.com/google/uuid v1.6.0
-)
+// mountGraphQL is called from New, after the middleware chain is installed.
+${mount[fw]}
 `;
+  return `package server
+
+${goImports(code, [["http", "net/http"]], [
+    [fw, fwImport[fw]],
+    ["adaptor", "github.com/gofiber/fiber/v2/middleware/adaptor"],
+    ["handler", "github.com/99designs/gqlgen/graphql/handler"],
+    ["playground", "github.com/99designs/gqlgen/graphql/playground"],
+    ["graph", `${module}/graph`],
+  ])}
+
+${code}`;
 }
 
 function goGqlgenYaml(module: string): string {
@@ -105,72 +129,12 @@ run:
 `;
 }
 
-function goGraphqlMain(module: string, entities: Entity[]): string {
-  void entities;
-  return `package main
-
-// Bootstrap: compose a gqlgen handler around the generated executable schema
-// and serve it on /graphql. Run \`make gql\` once before \`go build\` so the
-// generated.go and models_gen.go files exist.
-
-import (
-\t"log"
-\t"net/http"
-\t"os"
-\t"os/signal"
-\t"syscall"
-\t"time"
-
-\t"${module}/graph"
-
-\t"github.com/99designs/gqlgen/graphql/handler"
-\t"github.com/99designs/gqlgen/graphql/playground"
-)
-
-func main() {
-\tport := os.Getenv("PORT")
-\tif port == "" {
-\t\tport = "4000"
-\t}
-
-\tsrv := handler.NewDefaultServer(graph.NewExecutableSchema(graph.Config{Resolvers: graph.NewResolver()}))
-
-\tmux := http.NewServeMux()
-\tmux.Handle("/graphql", srv)
-\tmux.Handle("/", playground.Handler("GraphQL", "/graphql"))
-\tmux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-\t\tw.Header().Set("Content-Type", "application/json")
-\t\t_, _ = w.Write([]byte(\`{"status":"ok"}\`))
-\t})
-
-\thttpSrv := &http.Server{
-\t\tAddr:              ":" + port,
-\t\tHandler:           mux,
-\t\tReadHeaderTimeout: 10 * time.Second,
-\t}
-
-\tgo func() {
-\t\tlog.Printf("GraphQL listening on :%s/graphql", port)
-\t\tif err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-\t\t\tlog.Fatalf("server: %v", err)
-\t\t}
-\t}()
-
-\tquit := make(chan os.Signal, 1)
-\tsignal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-\t<-quit
-\tlog.Println("shutting down...")
-\t_ = httpSrv.Close()
-}
-`;
-}
-
 function goGraphqlResolverRoot(entities: Entity[]): string {
   // The resolver root is what gqlgen attaches Query/Mutation methods to
   // (those live in the per-entity *.resolvers.go files). Per-entity stores
   // are sync.Map values keyed by primary key string.
   const stores = entities.length === 0
-    ? "// No entities — only the health resolver is defined."
+    ? "\t// No entities — only the health resolver is defined."
     : entities
         .map((e) => `\t${storeFieldName(e.name)} sync.Map // map[string]*${e.name}`)
         .join("\n");
@@ -181,9 +145,7 @@ function goGraphqlResolverRoot(entities: Entity[]): string {
 // Per-entity CRUD lives in <entity>.resolvers.go. We use sync.Map for the
 // in-memory store so resolver methods can be called concurrently without
 // extra locking. Replace these with real DB calls when wiring persistence.
-
-import "sync"
-
+${entities.length > 0 ? '\nimport "sync"\n' : ""}
 type Resolver struct {
 ${stores}
 }

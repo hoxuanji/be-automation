@@ -148,20 +148,20 @@ function ktorApplication(entities: Entity[], stubs: Endpoint[], withAuth: boolea
   const entityCalls = (indent: string) => entities.map((e) => `${indent}${toCamel(e.name)}Routes()`);
 
   const lines: string[] = [];
-  lines.push(...stubs.filter((e) => !(withAuth && e.auth)).map((e) => stub(e, "            ")));
+  lines.push(...stubs.filter((e) => !(withAuth && e.auth)).map((e) => stub(e, "        ")));
   if (withAuth) {
     const inner = [
-      ...stubs.filter((e) => e.auth).map((e) => stub(e, "                ")),
-      ...entityCalls("                "),
+      ...stubs.filter((e) => e.auth).map((e) => stub(e, "            ")),
+      ...entityCalls("            "),
     ];
     if (inner.length > 0) {
-      lines.push(`            authenticate("auth-jwt") {\n${inner.join("\n")}\n            }`);
+      lines.push(`        authenticate("auth-jwt") {\n${inner.join("\n")}\n        }`);
     }
   } else {
-    lines.push(...entityCalls("            "));
+    lines.push(...entityCalls("        "));
   }
   if (metrics) {
-    lines.push(`            get("/metrics") { call.respond(appMicrometerRegistry.scrape()) }`);
+    lines.push(`        get("/metrics") { call.respond(appMicrometerRegistry.scrape()) }`);
   }
   const routeCallsBlock = lines.length > 0 ? `\n${lines.join("\n")}` : "";
   const imports = [
@@ -169,8 +169,8 @@ function ktorApplication(entities: Entity[], stubs: Endpoint[], withAuth: boolea
     metrics ? "import io.ktor.server.metrics.micrometer.*\nimport io.micrometer.prometheus.PrometheusConfig\nimport io.micrometer.prometheus.PrometheusMeterRegistry" : "",
   ].filter(Boolean).map((l) => l + "\n").join("");
   const installs = [
-    withAuth ? "        configureAuth()" : "",
-    metrics ? "        install(MicrometerMetrics) { registry = appMicrometerRegistry }" : "",
+    withAuth ? "    configureAuth()" : "",
+    metrics ? "    install(MicrometerMetrics) { registry = appMicrometerRegistry }" : "",
   ].filter(Boolean).map((l) => l + "\n").join("");
 
   return `import io.ktor.serialization.kotlinx.json.*
@@ -184,14 +184,18 @@ ${imports}import kotlinx.serialization.json.Json
 ${metrics ? "\nval appMicrometerRegistry = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)\n" : ""}
 fun main() {
     initDatabase()
-    embeddedServer(Netty, port = System.getenv("PORT")?.toIntOrNull() ?: 8080) {
-        install(ContentNegotiation) {
-            json(Json { ignoreUnknownKeys = true; coerceInputValues = true })
-        }
-${installs}        routing {
-            get("/health") { call.respond(mapOf("ok" to true)) }${routeCallsBlock}
-        }
-    }.start(wait = true)
+    embeddedServer(Netty, port = System.getenv("PORT")?.toIntOrNull() ?: 8080, module = Application::module)
+        .start(wait = true)
+}
+
+// Plugins + routing live here so tests can load them via testApplication { application { module() } }.
+fun Application.module() {
+    install(ContentNegotiation) {
+        json(Json { ignoreUnknownKeys = true; coerceInputValues = true })
+    }
+${installs}    routing {
+        get("/health") { call.respond(mapOf("ok" to true)) }${routeCallsBlock}
+    }
 }
 `;
 }
@@ -292,7 +296,7 @@ function ktDataClassType(field: EntityField): string {
     case "uuid":    return "String";
     case "string":  return "String";
     case "text":    return "String";
-    case "number":  return "Long";
+    case "number":  return "Double";
     case "boolean": return "Boolean";
     case "date":    return "String"; // ISO-8601 string for serialization simplicity
     case "json":    return "String"; // stored as JSON string
@@ -305,10 +309,10 @@ function ktExposedColumn(field: EntityField): string {
     case "uuid":    return `uuid("${col}").autoGenerate()`;
     case "string":  return `varchar("${col}", 255)`;
     case "text":    return `text("${col}")`;
-    case "number":  return `long("${col}")`;
+    case "number":  return `double("${col}")`;
     case "boolean": return `bool("${col}")`;
     case "date":    return `timestamp("${col}")`;
-    case "json":    return `text("${col}") // JSON stored as text`;
+    case "json":    return `text("${col}")`;
   }
 }
 
@@ -344,6 +348,8 @@ function ktorModel(entity: Entity): string {
   const nonPkLines = nonPkFields.map((f) => {
     let line = `    val ${toCamel(f.name)} = ${ktExposedColumn(f)}`;
     if (f.unique) line += ".uniqueIndex()";
+    if (!f.required) line += ".nullable()"; // data class field is `T? = null`
+    if (f.type === "json") line += " // JSON stored as text";
     return line;
   });
 
@@ -361,7 +367,7 @@ function ktorModel(entity: Entity): string {
     const nullable = !f.required ? "?" : "";
     const defaultVal = !f.required ? " = null" : "";
     const comment = f.type === "json" ? " // JSON string" : "";
-    return `    val ${toCamel(f.name)}: ${type}${nullable},${comment}${defaultVal}`;
+    return `    val ${toCamel(f.name)}: ${type}${nullable}${defaultVal},${comment}`;
   });
 
   const dataClassFields = [pkClassField, ...nonPkClassFields].join("\n");
@@ -372,7 +378,7 @@ function ktorModel(entity: Entity): string {
     const nullable = !f.required ? "?" : "";
     const defaultVal = !f.required ? " = null" : "";
     const comment = f.type === "json" ? " // JSON string" : "";
-    return `    val ${toCamel(f.name)}: ${type}${nullable},${comment}${defaultVal}`;
+    return `    val ${toCamel(f.name)}: ${type}${nullable}${defaultVal},${comment}`;
   });
 
   // Build Update DTO (all non-PK fields are nullable with defaults)
@@ -561,12 +567,14 @@ import kotlin.test.*
 class ${pascal}RouteTest {
     @Test
     fun testList${pascal}s() = testApplication {
+        application { module() }
         val response = client.get("/${kebab}s")
         assertEquals(HttpStatusCode.OK, response.status)
     }
 
     @Test
     fun testCreate${pascal}() = testApplication {
+        application { module() }
         val response = client.post("/${kebab}s") {
             contentType(ContentType.Application.Json)
             setBody(${createBody})
@@ -651,7 +659,7 @@ function springKtFiles(
     // bean / wiring regression fails `gradle test` immediately.
     files.push({
       path: `src/test/kotlin/${pkgPath(pkg)}/${pascal}ControllerTest.kt`,
-      content: springKtControllerTest(pkg, pascal, kebab),
+      content: springKtControllerTest(pkg, pascal, kebab, withAuth),
     });
   }
 
@@ -683,6 +691,8 @@ function springKtBuildGradle(appName: string, withAuth = false, mysql = false, m
     // JWKS. Works with Clerk, Auth0, Cognito, Firebase, Keycloak, Supabase Auth.
     implementation("org.springframework.boot:spring-boot-starter-security")
     implementation("org.springframework.boot:spring-boot-starter-oauth2-resource-server")
+    // jwt() request post-processor for MockMvc tests of protected routes.
+    testImplementation("org.springframework.security:spring-security-test")
 `
     : "";
   return `plugins {
@@ -899,7 +909,7 @@ function springKtEntity(pkg: string, entity: Entity): string {
     const nullable = !f.required ? "?" : "";
     const defaultVal = !f.required ? " = null" : "";
     const columnAnnotation = f.unique ? `    @Column(unique = true)\n` : `    @Column\n`;
-    return `${columnAnnotation}    val ${toCamel(f.name)}: ${type}${nullable},${defaultVal}`;
+    return `${columnAnnotation}    val ${toCamel(f.name)}: ${type}${nullable}${defaultVal},`;
   });
 
   const allLines = [pkLine, ...fieldLines].join("\n");
@@ -921,7 +931,7 @@ function springKtFieldType(t: FieldType): string {
     case "uuid":    return "java.util.UUID";
     case "string":  return "String";
     case "text":    return "String";
-    case "number":  return "Long";
+    case "number":  return "Double";
     case "boolean": return "Boolean";
     case "date":    return "java.time.Instant";
     case "json":    return "String"; // stored as JSON string
@@ -995,15 +1005,15 @@ class ${pascal}Controller(private val ${camelRepo}: ${pascal}Repository) {
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
-function springKtControllerTest(pkg: string, pascal: string, kebab: string): string {
+function springKtControllerTest(pkg: string, pascal: string, kebab: string, withAuth = false): string {
   return `package ${pkg}
 
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
 import org.springframework.boot.test.context.SpringBootTest
-import org.springframework.http.MediaType
-import org.springframework.test.web.servlet.MockMvc
+${withAuth ? "import org.springframework.boot.test.mock.mockito.MockBean\n" : ""}import org.springframework.http.MediaType
+${withAuth ? "import org.springframework.security.oauth2.jwt.JwtDecoder\nimport org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt\n" : ""}import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
@@ -1014,17 +1024,22 @@ class ${pascal}ControllerTest {
 
     @Autowired
     lateinit var mvc: MockMvc
-
+${withAuth ? `
+    // Routes require a Bearer JWT; jwt() injects an authenticated principal and
+    // the mocked decoder keeps the context from needing a live JWKS endpoint.
+    @MockBean
+    lateinit var jwtDecoder: JwtDecoder
+` : ""}
     @Test
     fun \`list returns ok\`() {
-        mvc.perform(get("/${kebab}s"))
+        mvc.perform(get("/${kebab}s")${withAuth ? ".with(jwt())" : ""})
             .andExpect(status().isOk)
     }
 
     @Test
     fun \`create is reachable\`() {
         mvc.perform(
-            post("/${kebab}s")
+            post("/${kebab}s")${withAuth ? "\n                .with(jwt())" : ""}
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{}")
         ).andExpect(status().is4xxClientError) // empty body fails @NotNull validation; route is wired

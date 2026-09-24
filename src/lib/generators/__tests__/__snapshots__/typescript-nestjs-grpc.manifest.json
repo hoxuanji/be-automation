@@ -116,8 +116,8 @@
   },
   {
     "path": "package.json",
-    "lines": 24,
-    "size": 506
+    "lines": 28,
+    "size": 696
   },
   {
     "path": "prisma/schema.prisma",
@@ -155,9 +155,14 @@
     "size": 2175
   },
   {
+    "path": "src/interceptors.ts",
+    "lines": 71,
+    "size": 2443
+  },
+  {
     "path": "src/main.ts",
-    "lines": 41,
-    "size": 1399
+    "lines": 60,
+    "size": 2034
   },
   {
     "path": "src/proto-loader.ts",
@@ -173,6 +178,11 @@
     "path": "src/services/user.service.ts",
     "lines": 33,
     "size": 1087
+  },
+  {
+    "path": "src/tracing.ts",
+    "lines": 14,
+    "size": 650
   },
   {
     "path": "tests/api.contract.test.ts",

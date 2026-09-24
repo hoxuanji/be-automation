@@ -307,6 +307,37 @@ describe("Generator invariants", () => {
     assert.ok(!/\bself,\s*self\b/.test(sdk.content), "SDK methods must not declare `self` twice");
   });
 
+  // Optional entity fields used to emit `val x: T?, = null` (a Kotlin syntax error) and a
+  // non-nullable Exposed column, so every Kotlin repo with an optional field failed to build.
+  it("Kotlin optional entity fields are `T? = null` with a nullable column", () => {
+    const entities = [{
+      id: "e1", name: "Item", fields: [
+        { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+        { id: "f2", name: "score", type: "number" as const, required: false, unique: false },
+      ],
+    }];
+    for (const framework of ["ktor", "spring-kt"]) {
+      const config = { ...BASE_CONFIG, language: "kotlin" as const, framework, api: "rest" as const };
+      const kt = generate(config, [], entities).filter((f) => f.path.endsWith(".kt")).map((f) => f.content).join("\n");
+      assert.ok(!/\?,\s*=\s*null/.test(kt), `${framework}: default must precede the comma`);
+      assert.match(kt, /val score: Double\? = null,/, `${framework}: optional number field`);
+      if (framework === "ktor") assert.match(kt, /double\("score"\)\.nullable\(\)/, "ktor: optional column must be nullable");
+    }
+  });
+
+  // gin/chi response helpers don't return, so a cache hit used to fall through to the DB
+  // lookup and write a second response.
+  it("Go cache_read stops after a cache hit on every framework", () => {
+    const endpoints = [{ id: "1", method: "GET" as const, path: "/items/:id", summary: "Get", auth: false, pattern: "cache_read" }];
+    for (const framework of ["gin", "fiber", "echo", "chi"]) {
+      const config = { ...BASE_CONFIG, language: "go" as const, framework, api: "rest" as const, cache: "redis" };
+      const go = generate(config, endpoints).filter((f) => f.path.endsWith(".go")).map((f) => f.content).join("\n");
+      const hit = go.match(/jsonErr == nil \{\n\s*(.+)\n\s*(.+)/);
+      assert.ok(hit, `${framework}: cache hit branch not found`);
+      assert.ok(hit[1].startsWith("return") || hit[2].trim() === "return", `${framework}: cache hit must return`);
+    }
+  });
+
   it("generates with empty endpoints", () => {
     const config = { ...BASE_CONFIG, language: "typescript" as const, framework: "express", api: "rest" as const };
     const files = generate(config, []);
@@ -543,6 +574,100 @@ describe("Stack-option wiring", () => {
     assert.match(api, /auth\.FromContext/);
   });
 
+  it("Ktor tests load the application module (otherwise every route 404s)", () => {
+    const ktor = gen({ language: "kotlin", framework: "ktor" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const app = ktor.get("src/main/kotlin/Application.kt")!;
+    assert.match(app, /fun Application\.module\(\)[\s\S]*routing \{/);
+    assert.match(app, /embeddedServer\(Netty, .*module = Application::module\)/);
+    const test = ktor.get("src/test/kotlin/UserRouteTest.kt")!;
+    assert.equal(test.match(/application \{ module\(\) \}/g)?.length, test.match(/testApplication \{/g)?.length);
+  });
+
+  it("Spring tests authenticate with jwt() when routes are protected, and not otherwise", () => {
+    const cases: [string, string, string, string][] = [
+      ["java", "spring", "pom.xml", "src/test/java/dev/helios/app/UserControllerTest.java"],
+      ["kotlin", "spring-kt", "build.gradle.kts", "src/test/kotlin/dev/helios/test_app/UserControllerTest.kt"],
+    ];
+    for (const [language, framework, build, testPath] of cases) {
+      const secured = gen({ language, framework, auth: "clerk" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const test = secured.get(testPath)!;
+      // Every request must carry a JWT, or anyRequest().authenticated() answers 401.
+      assert.equal(test.match(/\.with\(jwt\(\)\)/g)?.length, test.match(/mvc\.perform/g)?.length, framework);
+      assert.ok(test.includes("JwtDecoder"), `${framework}: decoder must be mocked (no live JWKS in tests)`);
+      assert.ok(secured.get(build)!.includes("spring-security-test"), framework);
+      const open = gen({ language, framework, auth: "none" }, SAMPLE_ENDPOINTS.map((e) => ({ ...e, auth: false })), SAMPLE_ENTITIES);
+      assert.ok(!open.get(testPath)!.includes("jwt()"), `${framework}: no security on classpath without auth`);
+    }
+  });
+
+  it("Rust number fields decode the DOUBLE columns the migrations create", () => {
+    const ents = [{ id: "e", name: "Item", fields: [
+      { id: "1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "2", name: "price", type: "number" as const, required: true, unique: false },
+    ] }];
+    const rust = gen({ language: "rust", framework: "axum" }, SAMPLE_ENDPOINTS, ents);
+    const migration = rust.files.find((f) => f.path.includes("migrations/") && f.content.includes("price"))!;
+    assert.match(migration.content, /price DOUBLE PRECISION/);
+    const model = rust.files.find((f) => f.path.endsWith(".rs") && /pub price: /.test(f.content))!;
+    assert.match(model.content, /pub price: f64/);
+    assert.ok(!rust.files.some((f) => /price: (Option<)?i64/.test(f.content)), "i64 cannot decode DOUBLE PRECISION");
+  });
+
+  it("Python auth patterns match the token verifier auth_required uses, and every name they use is defined", () => {
+    const eps = ["auth_login", "auth_register", "auth_me", "auth_logout", "auth_refresh", "auth_change_password"].map((pattern, i) => ({
+      id: String(i), method: (pattern === "auth_me" ? "GET" : "POST") as "GET" | "POST", path: `/auth/${pattern.slice(5)}`, summary: pattern, auth: false, pattern,
+    }));
+    const users = [{ id: "u", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+      { id: "f3", name: "password_hash", type: "string" as const, required: false, unique: false },
+    ] }];
+    const py = (auth: string) => gen({ auth, language: "python", framework: "fastapi" }, eps, users);
+    // Self-managed: handlers mint HS256 tokens with JWT_SECRET, so auth_required must verify HS256 with the same secret.
+    const self = py("none");
+    assert.match(self.get("app/auth.py")!, /algorithms=\["HS256"\]/);
+    assert.match(self.get("app/auth.py")!, /JWT_SECRET/);
+    const main = self.get("app/main.py")!;
+    assert.ok(main.includes("create_access_token(") && !/passlib|from jose/.test(main));
+    // A name used in a handler signature/body but never imported or defined is a NameError at import time.
+    for (const name of ["Credentials", "RefreshRequest", "ChangePasswordRequest", "bcrypt", "verify_token", "auth_required", "get_db", "Session", "User", "_DUMMY_HASH"]) {
+      assert.match(main, new RegExp(`^(from \\S+ import .*\\b${name}\\b|import ${name}\\b|class ${name}\\b|${name} = )`, "m"), `${name} used but not defined`);
+    }
+    assert.match(self.get("pyproject.toml")!, /^bcrypt = /m);
+    // External provider: tokens come from the provider (JWKS); the service must not mint its own.
+    const clerk = py("clerk");
+    assert.match(clerk.get("app/auth.py")!, /PyJWKClient/);
+    const cmain = clerk.get("app/main.py")!;
+    assert.ok(cmain.includes('detail="handled_by_clerk"') && !cmain.includes("create_access_token"));
+    assert.match(cmain, /claims: dict = Depends\(auth_required\)/);
+  });
+
+  it("Python CRUD pattern handlers take the path parameter the route declares", () => {
+    // FastAPI binds {id} only to a parameter named id — anything else becomes a required query param (422).
+    const eps = (["GET", "PATCH", "DELETE"] as const).map((method, i) => ({
+      id: String(i), method, path: "/users/:id", summary: "x", auth: false, pattern: ({ GET: "crud_get", PATCH: "crud_update", DELETE: "crud_delete" } as const)[method],
+    }));
+    const main = gen({ language: "python", framework: "fastapi" }, eps, [SAMPLE_ENTITIES.find((e) => e.name === "User")!]).get("app/main.py")!;
+    for (const method of ["get", "patch", "delete"]) {
+      assert.match(main, new RegExp(`@app\\.${method}\\("/users/\\{id\\}"[^\\n]*\\)\\nasync def \\w+\\(id: str`), `${method} handler param`);
+    }
+    assert.ok(!main.includes("item_id"));
+  });
+
+  it("NestJS renders endpoint patterns with the same handler bodies as Express", () => {
+    const eps = [{ id: "1", method: "GET" as const, path: "/users/:id", summary: "Get", auth: true, pattern: "crud_get" }];
+    const users = [SAMPLE_ENTITIES.find((e) => e.name === "User")!];
+    const ctrl = gen({ language: "typescript", framework: "nestjs" }, eps, users).get("src/app.controller.ts")!;
+    const express = gen({ language: "typescript", framework: "express" }, eps, users).get("src/main.ts")!;
+    // A pattern must not degrade to the { ok: true } stub on Nest.
+    assert.ok(!ctrl.includes('op: "GET /users/:id"'));
+    assert.match(ctrl, /async getUsersById\(@Req\(\) req: Request, @Res\(\) res: Response\)/);
+    assert.ok(ctrl.includes("prisma.user.findUnique") && express.includes("prisma.user.findUnique"));
+    assert.ok(ctrl.includes('import { prisma } from "./db";'));
+    // Protected pattern routes are guarded just like Express mounts authRequired.
+    assert.match(ctrl, /@UseGuards\(JwtAuthGuard\)\n\s+async getUsersById/);
+  });
+
   it("Go migrate command matches the database driver and handles config errors", () => {
     const main = (database: string) => gen({ database }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("cmd/migrate/main.go")!;
     assert.match(main("postgres"), /migrate\/v4\/database\/postgres"/);
@@ -552,5 +677,118 @@ describe("Stack-option wiring", () => {
     assert.match(main("postgres"), /cfg, err := config\.Load\(\)/);
     // Pure-Go sqlite so CGO_ENABLED=0 Docker builds work.
     assert.ok(gen({ database: "sqlite" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("internal/db/gorm.go")!.includes("github.com/glebarez/sqlite"));
+  });
+});
+
+// ─── gRPC / GraphQL / tRPC honor the cross-cutting flags ────────────────────
+// These trees used to ignore rateLimit / audit / tracing / monitoring while
+// REST honored them, so the same builder toggles silently meant nothing.
+
+describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
+  const OFF = { rateLimit: false, audit: false, tracing: false, monitoring: "none" };
+
+  it("Go go.mod requires every external module the grpc/graphql code imports (else `go build` fails)", () => {
+    for (const api of ["grpc", "graphql"]) {
+      for (const framework of ["gin", "fiber", "echo", "chi"]) {
+        for (const monitoring of ["grafana", "sentry", "datadog"]) {
+          const { files, get } = gen({ api, framework, monitoring }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+          const required = [...get("go.mod")!.matchAll(/^\t(\S+) v/gm)].map((m) => m[1]);
+          for (const f of files.filter((x) => x.path.endsWith(".go"))) {
+            for (const [, path] of f.content.matchAll(/^\s*(?:[\w.]+\s+)?"([a-z0-9.-]+\.[a-z]{2,}\/[^"]+)"$/gm)) {
+              if (path.startsWith("github.com/your-username/")) continue;
+              assert.ok(required.some((m) => path === m || path.startsWith(m + "/")),
+                `${api}/${framework}/${monitoring}: ${f.path} imports ${path} but go.mod does not require it`);
+            }
+          }
+          assert.ok(required.includes("github.com/caarlos0/env/v11"), "internal/config imports caarlos0/env");
+          assert.ok(required.includes("github.com/golang-migrate/migrate/v4"), "cmd/migrate imports golang-migrate");
+        }
+      }
+    }
+  });
+
+  it("Go gRPC chains rate-limit + audit interceptors and otelgrpc only when the flags are on", () => {
+    const on = gen({ api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const main = on.get("cmd/api/main.go")!;
+    assert.match(main, /grpc\.ChainUnaryInterceptor\([\s\S]*grpcserver\.Metrics\(\)[\s\S]*grpcserver\.RateLimit\(\)[\s\S]*grpcserver\.Audit\(log\)/);
+    assert.match(main, /grpc\.StatsHandler\(otelgrpc\.NewServerHandler\(\)\)/);
+    assert.match(main, /tracing\.Init\(/);
+    assert.match(main, /promhttp\.Handler\(\)/, "Prometheus needs an HTTP listener; the gRPC port can't serve /metrics");
+    assert.match(on.get("internal/grpcserver/interceptors.go")!, /codes\.ResourceExhausted/);
+    assert.ok(on.get("internal/grpcserver/ratelimit_test.go"), "the limiter keeps its unit test");
+
+    const off = gen({ api: "grpc", ...OFF }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.ok(!off.get("internal/grpcserver/interceptors.go"));
+    assert.ok(!off.get("internal/tracing/tracing.go"));
+    assert.match(off.get("cmd/api/main.go")!, /grpcSrv := grpc\.NewServer\(\)/);
+  });
+
+  it("Go GraphQL is mounted on the REST router after its middleware chain", () => {
+    for (const framework of ["gin", "fiber", "echo", "chi"]) {
+      const server = gen({ api: "graphql", framework }).get("internal/server/server.go")!;
+      const use = server.indexOf("\tr.Use(");
+      assert.ok(use >= 0 && server.indexOf("mountGraphQL(r)") > use, `${framework}: GraphQL must be mounted after r.Use`);
+      assert.match(server.slice(use), /^\tr\.Use\([^\n]*tracing\.Middleware[^\n]*rateLimit\(\)[^\n]*auditLog\(log\)/);
+      assert.match(server, /monitoring\.MountMetrics\(r\)/);
+    }
+  });
+
+  it("TypeScript GraphQL and tRPC mount after the REST middleware, with tracing imported first", () => {
+    const cases: [string, string, string][] = [
+      ["graphql", "express", "app.use(yoga.graphqlEndpoint, yoga)"],
+      ["graphql", "nestjs", "app.use(yoga.graphqlEndpoint, yoga)"],
+      ["graphql", "fastify", "url: yoga.graphqlEndpoint"],
+      ["graphql", "hono", "yoga.fetch(c.req.raw)"],
+      ["trpc", "express", `app.use("/trpc"`],
+    ];
+    for (const [api, framework, mount] of cases) {
+      const g = gen({ language: "typescript", framework, api });
+      const main = g.get("src/main.ts")!;
+      const at = main.indexOf(mount);
+      assert.ok(main.startsWith(`import "./tracing";`), `${api}/${framework}: tracing must load before the framework`);
+      assert.ok(g.get("src/tracing.ts"));
+      assert.ok(at > 0, `${api}/${framework}: missing mount`);
+      const limiter = ["app.use(rateLimit)", "app.register(rateLimit", "rate_limited"].map((s) => main.indexOf(s)).find((i) => i >= 0);
+      assert.ok(limiter !== undefined && limiter < at, `${api}/${framework}: rate limit must run before the mount`);
+      assert.match(main.slice(0, at), /audit/, `${api}/${framework}: audit must run before the mount`);
+      assert.match(main, /\/metrics/);
+      assert.ok(JSON.parse(g.get("package.json")!).dependencies["@opentelemetry/sdk-node"]);
+    }
+  });
+
+  it("TypeScript gRPC installs interceptors and the REST instrumentation preamble", () => {
+    const g = gen({ language: "typescript", framework: "express", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const main = g.get("src/main.ts")!;
+    assert.ok(main.startsWith(`import "./tracing.js";`), "ESM needs the .js suffix and tracing must load first");
+    assert.match(main, /new grpc\.Server\(\{ interceptors \}\)/);
+    assert.match(main, /METRICS_PORT/);
+    assert.match(g.get("src/interceptors.ts")!, /\[metrics, rateLimit, audit\]/);
+    const deps = JSON.parse(g.get("package.json")!).dependencies;
+    assert.ok(deps["prom-client"] && deps["@opentelemetry/sdk-node"]);
+
+    const off = gen({ language: "typescript", framework: "express", api: "grpc", ...OFF }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.ok(!off.get("src/interceptors.ts") && !off.get("src/tracing.ts"));
+    assert.match(off.get("src/main.ts")!, /new grpc\.Server\(\)/);
+  });
+
+  it("Python GraphQL mounts Strawberry after the FastAPI middleware; Python gRPC wires interceptors", () => {
+    const main = gen({ language: "python", framework: "fastapi", api: "graphql" }).get("app/main.py")!;
+    const at = main.indexOf(`app.include_router(GraphQLRouter(schema)`);
+    for (const mw of ["SlowAPIMiddleware", "AuditMiddleware", "FastAPIInstrumentor.instrument_app", "Instrumentator().instrument(app)"]) {
+      const i = main.indexOf(mw);
+      assert.ok(i >= 0 && i < at, `${mw} must be wired before the GraphQL router`);
+    }
+
+    const g = gen({ language: "python", framework: "fastapi", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const grpcMain = g.get("app/main.py")!;
+    assert.match(grpcMain, /interceptors=\[server_interceptor\(\), MetricsInterceptor\(\), RateLimitInterceptor\(\), AuditInterceptor\(\)\]/);
+    assert.match(grpcMain, /start_http_server\(/);
+    assert.match(grpcMain, /from test_app\.v1 import service_pb2_grpc/, "stubs are importable from gen/python on PYTHONPATH");
+    assert.match(grpcMain, /service_pb2_grpc\.add_UserServiceServicer_to_server/);
+    assert.ok(g.get("app/tracing.py") && g.get("app/interceptors.py")!.includes("RESOURCE_EXHAUSTED"));
+    assert.match(g.get("pyproject.toml")!, /opentelemetry-instrumentation-grpc/);
+
+    const off = gen({ language: "python", framework: "fastapi", api: "grpc", ...OFF }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.ok(!off.get("app/interceptors.py") && !off.get("app/tracing.py"));
   });
 });

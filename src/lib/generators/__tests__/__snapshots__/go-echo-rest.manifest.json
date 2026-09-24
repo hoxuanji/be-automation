@@ -116,8 +116,8 @@
   },
   {
     "path": "internal/api/contract/contract_test.go",
-    "lines": 113,
-    "size": 2693
+    "lines": 139,
+    "size": 3264
   },
   {
     "path": "internal/auth/jwt.go",
