@@ -136,8 +136,8 @@
   },
   {
     "path": "src/app.controller.ts",
-    "lines": 38,
-    "size": 774
+    "lines": 43,
+    "size": 942
   },
   {
     "path": "src/app.module.ts",
@@ -146,8 +146,8 @@
   },
   {
     "path": "src/auth/jwt.guard.ts",
-    "lines": 44,
-    "size": 1761
+    "lines": 51,
+    "size": 2030
   },
   {
     "path": "src/cache.ts",
