@@ -46,8 +46,8 @@
   },
   {
     "path": "app/auth.py",
-    "lines": 66,
-    "size": 2220
+    "lines": 54,
+    "size": 1760
   },
   {
     "path": "app/cache.py",
@@ -60,14 +60,19 @@
     "size": 299
   },
   {
+    "path": "app/db.py",
+    "lines": 74,
+    "size": 2307
+  },
+  {
     "path": "app/logging_config.py",
     "lines": 51,
     "size": 1975
   },
   {
     "path": "app/main.py",
-    "lines": 33,
-    "size": 954
+    "lines": 101,
+    "size": 3040
   },
   {
     "path": "app/models.py",
