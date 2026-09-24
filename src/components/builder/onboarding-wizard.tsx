@@ -10,6 +10,7 @@ import { BrandIcon } from "@/components/shared/brand-icon";
 import { cn } from "@/lib/utils";
 
 const STORAGE_KEY = "helios:onboarded";
+const noopSubscribe = () => () => {};
 
 const LANGUAGES = [
   { id: "go", label: "Go", desc: "Fast, compiled, great for microservices" },
@@ -30,7 +31,7 @@ const DATABASES = [
 ];
 
 export function OnboardingWizard() {
-  const [open, setOpen] = React.useState(false);
+  const [dismissed, setDismissed] = React.useState(false);
   const [step, setStep] = React.useState(0);
   const [name, setName] = React.useState("");
   const [language, setLanguage] = React.useState("go");
@@ -38,15 +39,17 @@ export function OnboardingWizard() {
   const { patch } = useStackStore();
   const router = useRouter();
 
-  React.useEffect(() => {
-    if (typeof window === "undefined") return;
-    const done = localStorage.getItem(STORAGE_KEY);
-    if (!done) setOpen(true);
-  }, []);
+  // Server snapshot says "onboarded" so SSR/hydration render nothing.
+  const onboarded = React.useSyncExternalStore(
+    noopSubscribe,
+    () => !!localStorage.getItem(STORAGE_KEY),
+    () => true
+  );
+  const open = !onboarded && !dismissed;
 
   function dismiss() {
     localStorage.setItem(STORAGE_KEY, "1");
-    setOpen(false);
+    setDismissed(true);
   }
 
   function finish() {
@@ -56,12 +59,12 @@ export function OnboardingWizard() {
       database,
     });
     localStorage.setItem(STORAGE_KEY, "1");
-    setOpen(false);
+    setDismissed(true);
   }
 
   function goToTemplates() {
     localStorage.setItem(STORAGE_KEY, "1");
-    setOpen(false);
+    setDismissed(true);
     router.push("/templates");
   }
 

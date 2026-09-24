@@ -23,6 +23,14 @@ type Share = {
  * the surface area small and matches the way the rest of the product
  * already exposes membership.
  */
+async function fetchShareData(projectId: string): Promise<{ teams: Team[]; shares: Share[] }> {
+  const [teamsRes, sharesRes] = await Promise.all([
+    fetch("/api/teams").then((r) => r.json()),
+    fetch(`/api/projects/${projectId}/shares`).then((r) => r.json()),
+  ]);
+  return { teams: teamsRes.teams ?? [], shares: sharesRes.shares ?? [] };
+}
+
 export function ShareProjectDialog({
   projectId,
   projectName,
@@ -36,29 +44,40 @@ export function ShareProjectDialog({
 }) {
   const [teams, setTeams] = React.useState<Team[]>([]);
   const [shares, setShares] = React.useState<Share[]>([]);
-  const [loading, setLoading] = React.useState(false);
+  const [loading, setLoading] = React.useState(open);
   const [submitting, setSubmitting] = React.useState(false);
   const [selectedTeamId, setSelectedTeamId] = React.useState<string>("");
   const [permission, setPermission] = React.useState<"view" | "edit">("view");
 
-  const refresh = React.useCallback(async () => {
+  function applyShareData(d: { teams: Team[]; shares: Share[] }) {
+    setTeams(d.teams);
+    setShares(d.shares);
+  }
+
+  async function refresh() {
     setLoading(true);
     try {
-      const [teamsRes, sharesRes] = await Promise.all([
-        fetch("/api/teams").then((r) => r.json()),
-        fetch(`/api/projects/${projectId}/shares`).then((r) => r.json()),
-      ]);
-      setTeams(teamsRes.teams ?? []);
-      setShares(sharesRes.shares ?? []);
+      applyShareData(await fetchShareData(projectId));
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }
+
+  // Opening the dialog (or switching project while open): flag loading
+  // during render, fetch in the effect.
+  const loadKey = open ? projectId : null;
+  const [prevLoadKey, setPrevLoadKey] = React.useState(loadKey);
+  if (loadKey !== prevLoadKey) {
+    setPrevLoadKey(loadKey);
+    if (loadKey !== null) setLoading(true);
+  }
 
   React.useEffect(() => {
     if (!open) return;
-    void refresh();
-  }, [open, refresh]);
+    void fetchShareData(projectId)
+      .then(applyShareData)
+      .finally(() => setLoading(false));
+  }, [open, projectId]);
 
   async function addShare() {
     if (!selectedTeamId) return;

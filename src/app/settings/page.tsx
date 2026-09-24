@@ -25,12 +25,14 @@ export default function SettingsPage() {
   const [profileSaving, setProfileSaving] = React.useState(false);
   const [keySaving, setKeySaving] = React.useState(false);
 
-  React.useEffect(() => {
+  const [prevAuthUser, setPrevAuthUser] = React.useState(authUser);
+  if (authUser !== prevAuthUser) {
+    setPrevAuthUser(authUser);
     if (authUser) {
       setNameVal(authUser.name);
       setEmailVal(authUser.email);
     }
-  }, [authUser]);
+  }
 
   async function saveProfile(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -885,26 +887,16 @@ type TeamProject = { id: string; name: string; user_name: string; updated_at: nu
 
 function TeamProjectsSection({ teamId }: { teamId: string }) {
   const [projects, setProjects] = React.useState<TeamProject[]>([]);
-  const [loading, setLoading] = React.useState(false);
-  const [loaded, setLoaded] = React.useState(false);
+  const [loading, setLoading] = React.useState(true);
   const { loadProject } = useStackStore();
 
-  async function load() {
-    if (loaded) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/teams/${teamId}/projects`);
-      const d = await res.json() as { projects?: TeamProject[] };
-      setProjects(d.projects ?? []);
-      setLoaded(true);
-    } catch {
-      toast({ title: "Failed to load team projects", kind: "error" });
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  React.useEffect(() => { void load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  React.useEffect(() => {
+    fetch(`/api/teams/${teamId}/projects`)
+      .then((res) => res.json() as Promise<{ projects?: TeamProject[] }>)
+      .then((d) => setProjects(d.projects ?? []))
+      .catch(() => toast({ title: "Failed to load team projects", kind: "error" }))
+      .finally(() => setLoading(false));
+  }, [teamId]);
 
   if (loading) return <div className="px-4 py-3 flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> Loading projects…</div>;
   if (projects.length === 0) return <p className="px-4 py-3 text-xs text-muted-foreground">No shared projects yet.</p>;

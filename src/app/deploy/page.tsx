@@ -258,34 +258,53 @@ function RepoConnectForm({ onConnect }: { onConnect: (r: GithubRepo) => void }) 
   );
 }
 
+async function fetchWorkflowRuns(repo: { owner: string; repo: string }): Promise<WorkflowRun[] | null> {
+  const res = await fetch(
+    `/api/github/runs?owner=${repo.owner}&repo=${repo.repo}&per_page=8`
+  );
+  if (!res.ok) return null;
+  const d = (await res.json()) as { runs: WorkflowRun[] };
+  return d.runs;
+}
+
 function DeployHistoryCard() {
   const { githubRepo, setGithubRepo } = useStackStore();
   const [runs, setRuns] = React.useState<WorkflowRun[]>([]);
-  const [loading, setLoading] = React.useState(false);
+  const [loading, setLoading] = React.useState(!!githubRepo);
   const [lastRefresh, setLastRefresh] = React.useState<Date | null>(null);
 
   const hasLiveRun = runs.some((r) => r.status !== "completed");
 
+  function applyRuns(r: WorkflowRun[] | null) {
+    if (!r) return;
+    setRuns(r);
+    setLastRefresh(new Date());
+  }
+
+  // Manual refresh + polling: show the spinner for the duration of the fetch.
   const fetchRuns = React.useCallback(async () => {
     if (!githubRepo) return;
     setLoading(true);
     try {
-      const res = await fetch(
-        `/api/github/runs?owner=${githubRepo.owner}&repo=${githubRepo.repo}&per_page=8`
-      );
-      if (res.ok) {
-        const d = (await res.json()) as { runs: WorkflowRun[] };
-        setRuns(d.runs);
-        setLastRefresh(new Date());
-      }
+      applyRuns(await fetchWorkflowRuns(githubRepo));
     } finally {
       setLoading(false);
     }
   }, [githubRepo]);
 
+  // Initial load / repo change: flag loading during render, fetch in the effect.
+  const [prevRepo, setPrevRepo] = React.useState(githubRepo);
+  if (githubRepo !== prevRepo) {
+    setPrevRepo(githubRepo);
+    if (githubRepo) setLoading(true);
+  }
+
   React.useEffect(() => {
-    fetchRuns();
-  }, [fetchRuns]);
+    if (!githubRepo) return;
+    void fetchWorkflowRuns(githubRepo)
+      .then(applyRuns)
+      .finally(() => setLoading(false));
+  }, [githubRepo]);
 
   // Poll every 10s while a run is live
   React.useEffect(() => {
@@ -693,11 +712,13 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
   }, [provider]);
 
   // Re-init stage map when the provider changes.
-  React.useEffect(() => {
+  const [prevStagesList, setPrevStagesList] = React.useState(stagesList);
+  if (stagesList !== prevStagesList) {
+    setPrevStagesList(stagesList);
     setStages(initialStages(stagesList));
     setStageDetail({});
     setWarnings([]);
-  }, [stagesList]);
+  }
 
   async function deploy() {
     setPhase("deploying");
