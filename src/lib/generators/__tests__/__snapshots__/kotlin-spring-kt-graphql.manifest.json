@@ -157,7 +157,7 @@
   {
     "path": "src/main/kotlin/dev/helios/test_app/SecurityConfig.kt",
     "lines": 65,
-    "size": 2697
+    "size": 2696
   },
   {
     "path": "src/main/kotlin/dev/helios/test_app/User.kt",
@@ -190,13 +190,23 @@
     "size": 441
   },
   {
+    "path": "src/test/kotlin/dev/helios/test_app/ApiContractTest.kt",
+    "lines": 239,
+    "size": 8181
+  },
+  {
     "path": "src/test/kotlin/dev/helios/test_app/PostControllerTest.kt",
-    "lines": 44,
-    "size": 1601
+    "lines": 46,
+    "size": 1680
   },
   {
     "path": "src/test/kotlin/dev/helios/test_app/UserControllerTest.kt",
-    "lines": 44,
-    "size": 1601
+    "lines": 46,
+    "size": 1680
+  },
+  {
+    "path": "src/test/resources/application-test.properties",
+    "lines": 7,
+    "size": 251
   }
 ]
