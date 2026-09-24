@@ -877,4 +877,35 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
       assert.ok(!/"(bcrypt|jsonwebtoken)"/.test(clerk.get("package.json")!), `${fw}: unused bcrypt/jsonwebtoken deps`);
     }
   });
+
+  it("Litestar and Django serve the user's endpoints, protected by the same verifier as FastAPI", () => {
+    // Before, both ignored the endpoint list: users picking them got an app with only /health.
+    const eps = [
+      ...SAMPLE_ENDPOINTS,
+      { id: "p1", method: "GET" as const, path: "/users/search", summary: "Search", auth: false, pattern: "paginated_search" },
+      { id: "p2", method: "GET" as const, path: "/auth/me", summary: "Me", auth: true, pattern: "auth_me" },
+    ];
+    const ls = gen({ language: "python", framework: "litestar" }, eps, SAMPLE_ENTITIES);
+    const lsMain = ls.get("app/main.py")!;
+    assert.match(lsMain, /@get\("\/users\/\{id:str\}", guards=\[auth_guard\]\)\nasync def get_users_by_id\(id: str\)/);
+    assert.match(lsMain, /@delete\("\/users\/\{id:str\}", status_code=200, guards=\[auth_guard\]\)/);
+    assert.match(lsMain, /async def get_users_search\(db: Session, q: Optional\[str\] = Parameter\(default=None\)/, "pattern body reused, db injected");
+    assert.match(lsMain, /route_handlers=\[health, get_users, post_users, get_users_by_id, delete_users_by_id, get_users_search, get_auth_me,/);
+    assert.equal(lsMain.match(/@get\("\/health"\)/g)!.length, 1, "the app's own /health is not re-registered");
+    assert.match(ls.get("app/auth.py")!, /raise NotAuthorizedException\(detail="missing_or_malformed_token"\)/);
+    assert.doesNotMatch(ls.get("app/auth.py")!, /fastapi/, "fastapi isn't a Litestar dependency");
+    assert.ok(ls.get("app/db.py"), "pattern handlers need the SQLAlchemy session");
+
+    const dj = gen({ language: "python", framework: "django" }, eps, SAMPLE_ENTITIES);
+    const djMain = dj.get("app/main.py")!;
+    assert.match(djMain, /path\("users\/<str:id>", _route\(GET=get_users_by_id, DELETE=delete_users_by_id\)\)/);
+    assert.ok(djMain.indexOf(`path("users/search"`) < djMain.indexOf(`path("users/<str:id>"`), "static path must precede the converter that would swallow it");
+    assert.match(djMain, /@_endpoint\(auth=True\)\nasync def get_users_by_id\(request, id\):/);
+    assert.match(djMain, /@_endpoint\(claims=True\)\nasync def get_auth_me\(request, claims\):/);
+    assert.match(djMain, /except PermissionError as exc:\n\s+return JsonResponse\(\{"detail": str\(exc\)\}, status=401\)/);
+    assert.doesNotMatch(dj.get("app/auth.py")!, /fastapi/);
+
+    // Self-issued auth (auth "none" + auth_* patterns) now reaches these frameworks too.
+    assert.match(gen({ language: "python", framework: "django", auth: "none" }, eps, SAMPLE_ENTITIES).get("app/auth.py")!, /def create_access_token/);
+  });
 });

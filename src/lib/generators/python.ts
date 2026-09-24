@@ -3,7 +3,7 @@ import { toPascal, toSnake, toKebab } from "./types";
 import { pyGrpcFiles } from "./grpc/python";
 import { pythonGraphqlFiles } from "./graphql/python";
 import { isGraphqlSupported } from "./types";
-import { pyPatternRoute, pyPatternImports, pyHasRedis, pyAuthMode, type PyAuthMode } from "./patterns/python";
+import { pyPatternRoute, pyPatternImports, pyNativeRoutes, pyNativeImports, pyHasRedis, pyAuthMode, type PyAuthMode, type NativeRoute } from "./patterns/python";
 
 export function pythonFiles(
   config: StackConfig,
@@ -74,6 +74,8 @@ settings = Settings()
       });
     }
   } else if (hasEntities) {
+    // Litestar / Django pattern handlers use the same SQLAlchemy session helper.
+    if (!isMongo) files.push({ path: "app/db.py", content: dbFile(config) });
     files.push({ path: "app/models.py", content: sqlalchemyModels(config, entities) });
   }
 
@@ -83,7 +85,7 @@ settings = Settings()
   });
 
   if (withAuth) {
-    files.push({ path: "app/auth.py", content: authMode === "hs256" ? pyAuthHS256Module() : pyAuthModule() });
+    files.push({ path: "app/auth.py", content: authMode === "hs256" ? pyAuthHS256Module(config.framework) : pyAuthModule(config.framework) });
   }
 
   if (pyHasRedis(config)) {
@@ -455,7 +457,7 @@ build-backend = "poetry.core.masonry.api"
 `;
 }
 
-function pyAuthModule(): string {
+function pyAuthModule(fw: string): string {
   return `"""JWT verification for incoming requests.
 
 Uses PyJWT's built-in PyJWKClient which fetches and caches keys from the
@@ -469,8 +471,7 @@ import os
 from functools import lru_cache
 
 import jwt
-from fastapi import Header, HTTPException, status
-from jwt import PyJWKClient
+${pyAuthImports(fw)}from jwt import PyJWKClient
 
 
 @lru_cache(maxsize=1)
@@ -500,11 +501,49 @@ def _verify(token: str) -> dict:
     )
 
 
-${pyAuthRequired()}`;
+${pyAuthRequired(fw)}`;
+}
+
+function pyAuthImports(fw: string): string {
+  if (fw === "litestar") return "from litestar import Request\nfrom litestar.exceptions import InternalServerException, NotAuthorizedException\n";
+  return fw === "django" ? "" : "from fastapi import Header, HTTPException, status\n";
 }
 
 // auth_required body shared by the JWKS and HS256 modules; both expose _verify().
-function pyAuthRequired(): string {
+function pyAuthRequired(fw: string): string {
+  if (fw === "litestar") {
+    return `async def auth_required(request: Request) -> dict:
+    """Litestar dependency (app-level Provide) returning the verified Bearer JWT claims."""
+    authorization = request.headers.get("authorization")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise NotAuthorizedException(detail="missing_or_malformed_token")
+    token = authorization[len("Bearer "):].strip()
+    try:
+        return _verify(token)
+    except jwt.InvalidTokenError:
+        raise NotAuthorizedException(detail="invalid_token")
+    except RuntimeError as exc:
+        raise InternalServerException(detail=str(exc))
+
+
+async def auth_guard(connection, _handler) -> None:
+    """Route guard for endpoints marked auth: same check, claims discarded."""
+    await auth_required(connection)
+`;
+  }
+  if (fw === "django") {
+    return `def auth_required(request) -> dict:
+    """Verified claims of the request's Bearer JWT. Raises PermissionError(detail),
+    which main._endpoint answers with 401."""
+    authorization = request.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        raise PermissionError("missing_or_malformed_token")
+    try:
+        return _verify(authorization[len("Bearer "):].strip())
+    except jwt.InvalidTokenError:
+        raise PermissionError("invalid_token")
+`;
+  }
   return `async def auth_required(authorization: str | None = Header(default=None)) -> dict:
     """FastAPI dependency that enforces a valid Bearer JWT.
 
@@ -529,7 +568,7 @@ function pyAuthRequired(): string {
 `;
 }
 
-function pyAuthHS256Module(): string {
+function pyAuthHS256Module(fw: string): string {
   return `"""HS256 JWTs this service issues itself (auth "none" = self-managed).
 
 The login/register/refresh handlers sign with JWT_SECRET and auth_required
@@ -541,8 +580,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from fastapi import Header, HTTPException, status
-
+${pyAuthImports(fw)}
 
 def _secret() -> str:
     secret = os.environ.get("JWT_SECRET")
@@ -564,7 +602,7 @@ def verify_token(token: str) -> dict:
 _verify = verify_token
 
 
-${pyAuthRequired()}`;
+${pyAuthRequired(fw)}`;
 }
 
 function pyDockerfile() {
@@ -730,7 +768,7 @@ function appMain(config: StackConfig, endpoints: Endpoint[], entities: Entity[],
     const wiring = fastapiWiring(config);
     const routes = endpoints
       .map((e) => {
-        if (e.pattern) return pyPatternRoute(e, "fastapi", config, entities, authMode);
+        if (e.pattern) return pyPatternRoute(e, config, entities, authMode);
         const py = e.path.replace(/:([a-zA-Z0-9_]+)/g, "{$1}");
         const paramsDecl = (e.path.match(/:([a-zA-Z0-9_]+)/g) ?? [])
           .map((p) => `${p.slice(1)}: str`)
@@ -823,14 +861,28 @@ ${routes}
       config.tracing ? "OpenTelemetryConfig().middleware" : "",
       config.audit ? "AuditMiddleware" : "",
     ].filter(Boolean);
+    const routes = pyNativeRoutes("litestar", endpoints, config, entities, authMode);
+    const decorators = ["get", "post", "put", "patch", "delete"].filter((m) => m === "get" || routes.some((r) => r.method === m));
+    const deps = [
+      routes.some((r) => r.db) ? `"db": Provide(get_db)` : "",
+      routes.some((r) => r.claims) ? `"claims": Provide(auth_required)` : "",
+    ].filter(Boolean);
+    const authNames = [routes.some((r) => r.claims) ? "auth_required" : "", routes.some((r) => r.code.includes("guards=[auth_guard]")) ? "auth_guard" : ""].filter(Boolean);
+    const localImports = [
+      deps.length ? "from litestar.di import Provide\n" : "",
+      ...pyNativeImports(routes, "litestar", entities).map((l) => l + "\n"),
+      entities.length ? "from .db import engine\nfrom .models import Base\n" : "",
+      routes.some((r) => r.db) ? "from .db import get_db\n" : "",
+      authNames.length ? `from .auth import ${authNames.join(", ")}\n` : "",
+    ].join("");
     return `${ddtracePreamble(config)}from contextlib import asynccontextmanager
 
-from litestar import Litestar, get
+from litestar import Litestar, ${decorators.join(", ")}
 ${config.rateLimit ? "from litestar.middleware.rate_limit import RateLimitConfig\n" : ""}${prom ? "from litestar.contrib.prometheus import PrometheusConfig, PrometheusController\n" : ""}${config.tracing ? "from litestar.contrib.opentelemetry import OpenTelemetryConfig\n" : ""}
 from .logging_config import configure_logging
-${config.audit ? "from .audit import AuditMiddleware\n" : ""}${config.tracing ? "from .tracing import configure_tracing\n" : ""}
+${config.audit ? "from .audit import AuditMiddleware\n" : ""}${config.tracing ? "from .tracing import configure_tracing\n" : ""}${localImports}
 configure_logging()
-${config.tracing ? "configure_tracing()\n" : ""}${/sentry/.test(config.monitoring) ? `
+${config.tracing ? "configure_tracing()\n" : ""}${entities.length ? "Base.metadata.create_all(bind=engine)\n" : ""}${/sentry/.test(config.monitoring) ? `
 import os
 import sentry_sdk
 
@@ -848,11 +900,11 @@ async def lifespan(_app: Litestar):
 @get("/health")
 async def health() -> dict:
     return {"ok": True}
-
+${routes.map((r) => `\n\n${r.code}\n`).join("")}
 
 app = Litestar(
-    route_handlers=[health${prom ? ", PrometheusController" : ""}],
-    lifespan=[lifespan],
+    route_handlers=[health${routes.map((r) => ", " + r.name).join("")}${prom ? ", PrometheusController" : ""}],
+${deps.length ? `    dependencies={${deps.join(", ")}},\n` : ""}    lifespan=[lifespan],
     logging_config=None,  # keep the JSON root handler from configure_logging()
 ${middleware.length ? `    middleware=[${middleware.join(", ")}],\n` : ""})
 `;
@@ -865,6 +917,15 @@ ${middleware.length ? `    middleware=[${middleware.join(", ")}],\n` : ""})
     config.audit ? `"app.audit.AuditMiddleware"` : "",
     prom ? `"django_prometheus.middleware.PrometheusAfterMiddleware"` : "",
   ].filter(Boolean);
+  const routes = pyNativeRoutes("django", endpoints, config, entities, authMode);
+  // Django matches urlpatterns in order, so static paths ("users/search") go
+  // before converter paths ("users/<str:id>") that would otherwise swallow them.
+  const byPath = new Map<string, NativeRoute[]>();
+  for (const r of routes) byPath.set(r.path, [...(byPath.get(r.path) ?? []), r]);
+  const urls = [...byPath]
+    .sort(([a], [b]) => (a.match(/</g) ?? []).length - (b.match(/</g) ?? []).length)
+    .map(([p, rs]) => `    path(${JSON.stringify(p)}, _route(${rs.map((r) => `${r.method.toUpperCase()}=${r.name}`).join(", ")})),\n`)
+    .join("");
   return `${ddtracePreamble(config)}import os
 
 from django.conf import settings
@@ -888,19 +949,69 @@ settings.configure(
 )
 
 from django.core.asgi import get_asgi_application  # noqa: E402 — needs settings
-from django.http import JsonResponse  # noqa: E402
+from django.http import ${routes.length ? "HttpResponse, " : ""}JsonResponse  # noqa: E402
 from django.urls import ${prom ? "include, " : ""}path  # noqa: E402
-
+${djangoRoutes(routes, entities, withAuth)}
 
 def health(_):
     return JsonResponse({"ok": True})
-
+${routes.map((r) => `\n\n${r.code}\n`).join("")}
 
 urlpatterns = [
     path("health", health),
-${prom ? `    path("", include("django_prometheus.urls")),  # GET /metrics\n` : ""}]
+${urls}${prom ? `    path("", include("django_prometheus.urls")),  # GET /metrics\n` : ""}]
 
 app = get_asgi_application()
+`;
+}
+
+// Django wiring for pyNativeRoutes: imports + the _endpoint view adapter
+// (auth, SQLAlchemy session, HTTPException → JSON, dict → JsonResponse) and
+// _route, which dispatches one URL to its per-method views.
+function djangoRoutes(routes: NativeRoute[], entities: Entity[], withAuth: boolean): string {
+  if (!routes.length) return "";
+  const db = routes.some((r) => r.db);
+  const imports = [
+    ...pyNativeImports(routes, "django", entities),
+    ...(entities.length ? ["from .db import engine", "from .models import Base"] : []),
+    ...(db ? ["from .db import SessionLocal"] : []),
+    ...(withAuth ? ["from .auth import auth_required"] : []),
+  ];
+  return `${imports.join("\n")}
+${entities.length ? "\nBase.metadata.create_all(bind=engine)\n" : ""}
+
+def _endpoint(status=200${withAuth ? ", auth=False, claims=False" : ""}${db ? ", db=False" : ""}):
+    def wrap(view):
+        @functools.wraps(view)
+        async def inner(request, **kwargs):
+${withAuth ? `            if auth or claims:
+                try:
+                    token_claims = auth_required(request)
+                except PermissionError as exc:
+                    return JsonResponse({"detail": str(exc)}, status=401)
+                if claims:
+                    kwargs["claims"] = token_claims
+` : ""}${db ? `            if db:
+                kwargs["db"] = SessionLocal()
+` : ""}            try:
+                result = await view(request, **kwargs)
+            except HTTPException as exc:
+                return JsonResponse({"detail": exc.detail}, status=exc.status_code)
+${db ? `            finally:
+                if db:
+                    kwargs["db"].close()
+` : ""}            return result if isinstance(result, HttpResponse) else JsonResponse(result, status=status)
+        return inner
+    return wrap
+
+
+def _route(**views):
+    async def dispatch(request, **kwargs):
+        view = views.get(request.method)
+        if view is None:
+            return JsonResponse({"detail": "method_not_allowed"}, status=405)
+        return await view(request, **kwargs)
+    return dispatch
 `;
 }
 
