@@ -1,7 +1,8 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { safeName, toKebab, toCamel } from "./types";
 import { tsGrpcFiles } from "./grpc/typescript";
-import { mountOnTsRest, tsGraphqlFiles } from "./graphql/typescript";
+import { tsGraphqlFiles } from "./graphql/typescript";
+import { mountTrpcOnTsRest } from "./trpc/typescript";
 import { isGraphqlSupported } from "./types";
 import { needsAuth } from "./auth/providers";
 import { tsPatternRoute, tsPatternImports, usesPrisma, hasRedisCache } from "./patterns/typescript";
@@ -1632,16 +1633,10 @@ function tRPCFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[
     return `export type ${en.name} = {\n${fields}\n};`;
   }).join("\n\n");
 
-  // tRPC is served by the Express REST server (built with no routes), so the
-  // REST middleware and observability sit in front of /trpc.
-  const rest = typescriptFiles({ ...config, api: "rest", framework: "express" }, [], []);
+  // tRPC is served by the chosen framework's REST server (built with no routes),
+  // so the REST middleware and observability sit in front of /trpc.
   return [
-    ...mountOnTsRest(rest, {
-      imports: `import * as trpcExpress from "@trpc/server/adapters/express";\nimport { appRouter } from "./router";`,
-      mount: `app.use("/trpc", trpcExpress.createExpressMiddleware({ router: appRouter }));`,
-      // src/client.ts imports @trpc/client.
-      deps: { "@trpc/server": "^11.0.0", "@trpc/client": "^11.0.0" },
-    }),
+    ...mountTrpcOnTsRest(config.framework, (framework) => typescriptFiles({ ...config, api: "rest", framework }, [], [])),
     {
       path: "src/trpc.ts",
       content: `import { initTRPC } from "@trpc/server";

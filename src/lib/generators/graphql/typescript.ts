@@ -53,11 +53,12 @@ export function tsGraphqlFiles(
  */
 export function mountOnTsRest(
   rest: GeneratedFile[],
-  o: { imports: string; mount: string; deps: Record<string, string> }
+  o: { imports: string; mount: string; deps: Record<string, string>; anchor?: RegExp }
 ): GeneratedFile[] {
   return rest.map((f) => {
     if (f.path === "src/main.ts") {
-      const health = /^( *)app\.get\("\/health"/m;
+      // NestJS main.ts has no /health route (it lives in a controller), so callers pass their own anchor.
+      const health = o.anchor ?? /^( *)app\.get\("\/health"/m;
       const fwImport = /^import .* from "(express|fastify|hono|@nestjs\/core)";$/m;
       if (!health.test(f.content) || !fwImport.test(f.content)) {
         throw new Error("mountOnTsRest: REST main.ts has no /health route or framework import to anchor on");
