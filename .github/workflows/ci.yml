@@ -115,6 +115,14 @@ jobs:
           - { label: "ts-fastify-grpc-full", language: "typescript", framework: "fastify", profile: "full", api: "grpc" }
           - { label: "python-fastapi-graphql-full", language: "python", framework: "fastapi", profile: "full", api: "graphql" }
           - { label: "python-fastapi-grpc-full", language: "python", framework: "fastapi", profile: "full", api: "grpc" }
+          - { label: "ts-fastify-trpc-full", language: "typescript", framework: "fastify", profile: "full", api: "trpc" }
+          - { label: "ts-hono-trpc-full", language: "typescript", framework: "hono", profile: "full", api: "trpc" }
+          - { label: "ts-nestjs-trpc-full", language: "typescript", framework: "nestjs", profile: "full", api: "trpc" }
+          - { label: "ts-express-full-selfauth", language: "typescript", framework: "express", profile: "full", auth: "none" }
+          - { label: "ts-fastify-full-selfauth", language: "typescript", framework: "fastify", profile: "full", auth: "none" }
+          - { label: "ts-hono-full-selfauth", language: "typescript", framework: "hono", profile: "full", auth: "none" }
+          - { label: "python-litestar-full-selfauth", language: "python", framework: "litestar", profile: "full", auth: "none" }
+          - { label: "python-django-full-selfauth", language: "python", framework: "django", profile: "full", auth: "none" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
