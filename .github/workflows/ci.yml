@@ -66,6 +66,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      # Swagger UI's apidom namespaces attach `.refract` in refractor/registration.mjs side-effect
+      # modules; Turbopack drops them ("refract is not a function" on /api-builder). Fail if missing.
+      - name: Check Swagger UI apidom registration is bundled
+        run: |
+          grep -rqF '"objects","Callback","$visitor"' .next/static \
+            || { echo "::error::apidom refractor registration missing from client bundle (Swagger UI will break)"; exit 1; }
 
   smoke-build:
     name: Smoke build (${{ matrix.combo.label }})

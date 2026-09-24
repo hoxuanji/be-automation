@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint src",
     "test": "node --experimental-strip-types --no-warnings --import ./src/lib/generators/__tests__/loader.mjs --test ./src/lib/generators/__tests__/generate.test.ts",
