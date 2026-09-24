@@ -170,6 +170,11 @@
     "size": 791
   },
   {
+    "path": "src/test/kotlin/ApiContractTest.kt",
+    "lines": 232,
+    "size": 9484
+  },
+  {
     "path": "src/test/kotlin/ApplicationTest.kt",
     "lines": 30,
     "size": 905

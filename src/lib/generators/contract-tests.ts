@@ -1,6 +1,7 @@
 import type { Endpoint, Entity, GeneratedFile, StackConfig } from "./types";
 import { isGraphqlSupported, safeName, toPascal } from "./types";
 import { goAuthMode, goDbKind } from "./go";
+import { kotlinContractTestFiles } from "./kotlin";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -325,8 +326,10 @@ ${tests}
 export function contractTestFiles(
   config: StackConfig,
   endpoints: Endpoint[],
-  _entities: Entity[]
+  entities: Entity[]
 ): GeneratedFile[] {
+  // Kotlin covers entity CRUD routes too, so it doesn't need user endpoints.
+  if (config.language === "kotlin") return kotlinContractTestFiles(config, endpoints, entities);
   if (endpoints.length === 0) return [];
 
   switch (config.language) {
@@ -342,11 +345,6 @@ export function contractTestFiles(
       return [{ path: "tests/contract_tests.rs", content: rustContractTests(config, endpoints) }];
     case "java":
       return [{ path: `src/test/java/com/example/${safeName(config.name).replace(/-/g, "")}/ApiContractTest.java`, content: javaContractTests(config, endpoints) }];
-    case "kotlin":
-      // ponytail: skipped. The Ktor-style file never compiled (JVM names can't contain "/"),
-      // sent fake tokens, and is Ktor code in spring-kt projects too. kotlin.ts emits its own
-      // Ktor tests (in-memory DB + signed token); spring-kt has MockMvc tests.
-      return [];
     default:
       return [];
   }

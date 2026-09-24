@@ -923,8 +923,6 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
       // H2 has no INSERT ... RETURNING; the create route must not depend on it.
       assert.ok(!ktor.get("src/main/kotlin/routes/userRoutes.kt")!.includes("insertReturning"));
     }
-    assert.equal(gen({ language: "kotlin", framework: "ktor" }).files.filter((f) => f.path.endsWith("ApiContractTest.kt")).length, 0,
-      "the old contract test didn't compile (JVM names can't contain '/')");
   });
 
   it("Ktor tests authenticate with a locally signed JWT instead of the provider's JWKS", () => {
@@ -948,5 +946,49 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     const open = gen({ language: "kotlin", framework: "ktor", auth: "none" }, SAMPLE_ENDPOINTS.map((e) => ({ ...e, auth: false })), SAMPLE_ENTITIES);
     assert.ok(!open.get("src/test/kotlin/TestSupport.kt")!.includes("TestAuth"), "no JWT code without ktor-server-auth-jwt on the classpath");
     assert.ok(!open.get("src/test/kotlin/UserRouteTest.kt")!.includes("Authorization"));
+  });
+
+  it("Kotlin contract tests are native per framework, compile on the JVM, and assert auth both ways", () => {
+    const contract = (framework: string, endpoints = SAMPLE_ENDPOINTS, entities: typeof SAMPLE_ENTITIES = SAMPLE_ENTITIES) =>
+      gen({ language: "kotlin", framework, auth: "clerk" }, endpoints, entities).files.find((f) => f.path.endsWith("ApiContractTest.kt"))?.content;
+    const ktor = contract("ktor")!;
+    const spring = contract("spring-kt")!;
+    assert.ok(ktor && spring, "both frameworks emit ApiContractTest.kt");
+    // Each framework's own harness: Ktor's test module with a locally signed token, Spring's MockMvc + jwt().
+    assert.match(ktor, /application \{ testModule\(\) \}/);
+    assert.ok(!ktor.includes("MockMvc") && spring.includes("MockMvc"), "no Ktor code in Spring projects (or vice versa)");
+    assert.match(spring, /@ActiveProfiles\("test"\)/);
+    for (const kt of [ktor, spring]) {
+      const names = [...kt.matchAll(/fun `([^`]+)`/g)].map((m) => m[1]);
+      assert.ok(names.length > 0);
+      // The previous file never compiled: JVM method names can't contain / . ; [ ] < > :
+      for (const n of names) assert.doesNotMatch(n, /[/.;[\]<>:]/, n);
+      assert.equal(new Set(names).size, names.length, "test names must be unique");
+      // Every protected route is checked without a token (401) and with one (not 401).
+      const without = names.filter((n) => n.endsWith(" returns 401 without token")).map((n) => n.replace(/ returns 401 without token$/, ""));
+      const withToken = names.filter((n) => n.endsWith(" with token") && !n.includes("401"));
+      assert.ok(without.includes("GET users") && without.includes("POST users"), "entity CRUD sits behind auth");
+      for (const w of without) assert.ok(withToken.some((n) => n.startsWith(w + " ")), `${w}: missing authenticated case`);
+    }
+    // Create response shape: primary key + required fields.
+    assert.match(ktor, /listOf\("id", "name", "email", "active", "createdAt"\)/);
+    assert.ok(spring.includes('jsonPath("\\$.email").exists()'));
+    assert.match(gen({ language: "kotlin", framework: "spring-kt" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("src/test/resources/application-test.properties")!,
+      /jdbc:h2:mem:test;MODE=PostgreSQL[\s\S]*spring\.flyway\.enabled=false/);
+
+    // Without entities the stubs are tested. A public stub stays public in Spring
+    // unless its URL pattern would also open a protected route (fail closed).
+    const eps = [
+      { id: "1", method: "GET" as const, path: "/users", summary: "", auth: false },
+      { id: "2", method: "GET" as const, path: "/users/:id", summary: "", auth: true },
+      { id: "3", method: "GET" as const, path: "/users/search", summary: "", auth: false },
+    ];
+    const sec = gen({ language: "kotlin", framework: "spring-kt" }, eps, []).files.find((f) => f.path.endsWith("/SecurityConfig.kt"))!.content;
+    assert.match(sec, /requestMatchers\(HttpMethod\.GET, "\/users"\)\.permitAll\(\)/);
+    assert.ok(!sec.includes('"/users/search"'), "public /users/search is shadowed by protected /users/{id}: keep it protected");
+    const stubs = contract("spring-kt", eps, [])!;
+    assert.match(stubs, /fun `GET users returns 200`/);
+    assert.match(stubs, /fun `GET users by id returns 401 without token`/);
+    assert.match(contract("ktor", eps, [])!, /fun `GET users search returns 200`/);
   });
 });
