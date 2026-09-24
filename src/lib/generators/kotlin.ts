@@ -48,6 +48,11 @@ function ktorFiles(
   if (withAuth) {
     files.push({ path: "src/main/kotlin/Auth.kt", content: ktorAuth() });
   }
+  files.push({ path: "src/test/kotlin/TestSupport.kt", content: ktorTestSupport(withAuth, mysql) });
+  files.push({
+    path: "src/test/kotlin/ApplicationTest.kt",
+    content: ktorApplicationTest(entities, stubEndpoints(endpoints, entities), withAuth),
+  });
 
   for (const entity of entities) {
     files.push({
@@ -56,11 +61,11 @@ function ktorFiles(
     });
     files.push({
       path: `src/main/kotlin/routes/${toSnake(entity.name)}Routes.kt`,
-      content: ktorRoutes(entity, mysql),
+      content: ktorRoutes(entity),
     });
     files.push({
       path: `src/test/kotlin/${toPascal(entity.name)}RouteTest.kt`,
-      content: ktorTest(entity),
+      content: ktorTest(entity, withAuth),
     });
   }
 
@@ -113,6 +118,8 @@ dependencies {
     implementation("ch.qos.logback:logback-classic:1.5.8")
 ${authDeps}${metricsDeps}    testImplementation("io.ktor:ktor-server-test-host:\$ktor_version")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.0.21")
+    // In-memory stand-in for Postgres/MySQL so \`gradle test\` needs no services (see TestSupport.kt).
+    testImplementation("com.h2database:h2:2.3.232")
 }
 `;
 }
@@ -169,11 +176,11 @@ function ktorApplication(entities: Entity[], stubs: Endpoint[], withAuth: boolea
     metrics ? "import io.ktor.server.metrics.micrometer.*\nimport io.micrometer.prometheus.PrometheusConfig\nimport io.micrometer.prometheus.PrometheusMeterRegistry" : "",
   ].filter(Boolean).map((l) => l + "\n").join("");
   const installs = [
-    withAuth ? "    configureAuth()" : "",
+    withAuth ? "    configureAuth(jwtVerifier)" : "",
     metrics ? "    install(MicrometerMetrics) { registry = appMicrometerRegistry }" : "",
   ].filter(Boolean).map((l) => l + "\n").join("");
 
-  return `import io.ktor.serialization.kotlinx.json.*
+  return `${withAuth ? "import com.auth0.jwt.interfaces.JWTVerifier\n" : ""}import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
@@ -189,7 +196,7 @@ fun main() {
 }
 
 // Plugins + routing live here so tests can load them via testApplication { application { module() } }.
-fun Application.module() {
+${withAuth ? "// jwtVerifier = null verifies against the provider's JWKS (env); tests pass a local-key verifier.\nfun Application.module(jwtVerifier: JWTVerifier? = null) {" : "fun Application.module() {"}
     install(ContentNegotiation) {
         json(Json { ignoreUnknownKeys = true; coerceInputValues = true })
     }
@@ -235,9 +242,7 @@ fun initDatabase() {
         try {
             val ds = HikariDataSource(config)
             Database.connect(ds)
-            transaction {
-                SchemaUtils.createMissingTablesAndColumns(${schemaArg})
-            }
+            createSchema()
             return
         } catch (e: Throwable) {
             lastErr = e
@@ -248,6 +253,13 @@ fun initDatabase() {
     }
     throw IllegalStateException("db: could not connect after retries", lastErr)
 }
+
+/** Creates missing tables on the current connection. Shared with tests (TestSupport.kt). */
+fun createSchema() {
+    transaction {
+        SchemaUtils.createMissingTablesAndColumns(${schemaArg})
+    }
+}
 `;
 }
 
@@ -255,6 +267,7 @@ fun initDatabase() {
 
 function ktorAuth(): string {
   return `import com.auth0.jwk.JwkProviderBuilder
+import com.auth0.jwt.interfaces.JWTVerifier
 import io.ktor.server.application.*
 import io.ktor.server.auth.*
 import io.ktor.server.auth.jwt.*
@@ -265,21 +278,26 @@ import java.util.concurrent.TimeUnit
  * Verifies Bearer JWTs against the provider's JWKS (AUTH_JWKS_URL): signature,
  * exp, iss (AUTH_ISSUER) and — when set — aud (AUTH_AUDIENCE). Protected
  * routes sit inside \`authenticate("auth-jwt") { ... }\`.
+ *
+ * Pass \`jwtVerifier\` to trust a fixed key instead (tests do; see TestSupport.kt).
  */
-fun Application.configureAuth() {
-    val issuer = requireNotNull(System.getenv("AUTH_ISSUER")) { "AUTH_ISSUER must be set" }
-    val jwksUrl = requireNotNull(System.getenv("AUTH_JWKS_URL")) { "AUTH_JWKS_URL must be set" }
-    val audience = System.getenv("AUTH_AUDIENCE")?.takeIf { it.isNotBlank() }
-    val jwkProvider = JwkProviderBuilder(URI(jwksUrl).toURL())
-        .cached(10, 24, TimeUnit.HOURS)
-        .rateLimited(10, 1, TimeUnit.MINUTES)
-        .build()
-
+fun Application.configureAuth(jwtVerifier: JWTVerifier? = null) {
     install(Authentication) {
         jwt("auth-jwt") {
-            verifier(jwkProvider, issuer) {
-                acceptLeeway(3)
-                if (audience != null) withAudience(audience)
+            if (jwtVerifier != null) {
+                verifier(jwtVerifier)
+            } else {
+                val issuer = requireNotNull(System.getenv("AUTH_ISSUER")) { "AUTH_ISSUER must be set" }
+                val jwksUrl = requireNotNull(System.getenv("AUTH_JWKS_URL")) { "AUTH_JWKS_URL must be set" }
+                val audience = System.getenv("AUTH_AUDIENCE")?.takeIf { it.isNotBlank() }
+                val jwkProvider = JwkProviderBuilder(URI(jwksUrl).toURL())
+                    .cached(10, 24, TimeUnit.HOURS)
+                    .rateLimited(10, 1, TimeUnit.MINUTES)
+                    .build()
+                verifier(jwkProvider, issuer) {
+                    acceptLeeway(3)
+                    if (audience != null) withAudience(audience)
+                }
             }
             validate { credential -> JWTPrincipal(credential.payload) }
         }
@@ -437,7 +455,7 @@ ${rowExtractLines},
 
 // ─── routes/{snake}Routes.kt ──────────────────────────────────────────────────
 
-function ktorRoutes(entity: Entity, mysql = false): string {
+function ktorRoutes(entity: Entity): string {
   const pascal = toPascal(entity.name);
   const camelFn = toCamel(entity.name);
   const kebab = toKebab(entity.name);
@@ -448,16 +466,24 @@ function ktorRoutes(entity: Entity, mysql = false): string {
 
   const nonPkFields = entity.fields.filter((f) => !f.primaryKey);
 
+  // DTOs carry uuid/date as String; the columns want UUID/Instant.
+  const parse = (f: EntityField, v: string) =>
+    f.type === "uuid" ? `UUID.fromString(${v})` : f.type === "date" ? `java.time.Instant.parse(${v})` : v;
+  const needsParse = (f: EntityField) => f.type === "uuid" || f.type === "date";
+
   // Build insert body lines
   const insertLines = nonPkFields.map((f) => {
     const camelF = toCamel(f.name);
-    return `                    it[${camelF}] = body.${camelF}`;
+    const value = !needsParse(f) ? `body.${camelF}`
+      : f.required ? parse(f, `body.${camelF}`)
+      : `body.${camelF}?.let { v -> ${parse(f, "v")} }`;
+    return `                    it[${camelF}] = ${value}`;
   });
 
   // Build update body lines
   const updateLines = nonPkFields.map((f) => {
     const camelF = toCamel(f.name);
-    return `                    body.${camelF}?.let { v -> it[${camelF}] = v }`;
+    return `                    body.${camelF}?.let { v -> it[${camelF}] = ${parse(f, "v")} }`;
   });
 
   const insertBlock = insertLines.length > 0
@@ -474,6 +500,7 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import org.jetbrains.exposed.sql.*
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.util.UUID
 
@@ -497,9 +524,9 @@ fun Route.${camelFn}Routes() {
         post {
             val body = call.receive<Create${pascal}>()
             val item = transaction {
-                ${tableObj}.${mysql ? "insert" : "insertReturning"} {
+                ${tableObj}.insert {
 ${insertBlock}
-                }${mysql ? ".resultedValues!!" : ""}.single().to${pascal}() // MySQL has no RETURNING
+                }.resultedValues!!.single().to${pascal}() // no RETURNING: portable to MySQL and H2 (tests)
             }
             call.respond(HttpStatusCode.Created, item)
         }
@@ -541,22 +568,24 @@ function ktTestBody(entity: Entity): string {
   const pairs = nonPkRequired.slice(0, 4).map((f) => {
     const name = toCamel(f.name);
     switch (f.type as FieldType) {
-      case "string":  return `\\"${name}\\":\\"test\\"`;
-      case "text":    return `\\"${name}\\":\\"test\\"`;
-      case "number":  return `\\"${name}\\":1`;
-      case "boolean": return `\\"${name}\\":true`;
-      case "uuid":    return `\\"${name}\\":\\"00000000-0000-0000-0000-000000000001\\"`;
-      case "date":    return `\\"${name}\\":\\"2024-01-01T00:00:00Z\\"`;
-      case "json":    return `\\"${name}\\":\\"{}\\"`;
+      case "string":  return `"${name}":"test"`;
+      case "text":    return `"${name}":"test"`;
+      case "number":  return `"${name}":1`;
+      case "boolean": return `"${name}":true`;
+      case "uuid":    return `"${name}":"00000000-0000-0000-0000-000000000001"`;
+      case "date":    return `"${name}":"2024-01-01T00:00:00Z"`;
+      case "json":    return `"${name}":"{}"`;
     }
   });
   return `"""{${pairs.join(",")}}"""`;
 }
 
-function ktorTest(entity: Entity): string {
+function ktorTest(entity: Entity, withAuth: boolean): string {
   const pascal = toPascal(entity.name);
   const kebab = toKebab(entity.name);
   const createBody = ktTestBody(entity);
+  // Entity routes sit inside authenticate("auth-jwt") when auth is on.
+  const authHeader = withAuth ? "\n            header(HttpHeaders.Authorization, \"Bearer \${TestAuth.token()}\")" : "";
 
   return `import io.ktor.client.request.*
 import io.ktor.client.statement.*
@@ -567,21 +596,117 @@ import kotlin.test.*
 class ${pascal}RouteTest {
     @Test
     fun testList${pascal}s() = testApplication {
-        application { module() }
-        val response = client.get("/${kebab}s")
+        application { testModule() }
+        val response = client.get("/${kebab}s") {${authHeader}
+        }
         assertEquals(HttpStatusCode.OK, response.status)
     }
 
     @Test
     fun testCreate${pascal}() = testApplication {
-        application { module() }
-        val response = client.post("/${kebab}s") {
+        application { testModule() }
+        val response = client.post("/${kebab}s") {${authHeader}
             contentType(ContentType.Application.Json)
             setBody(${createBody})
         }
         assertEquals(HttpStatusCode.Created, response.status)
     }
 }
+`;
+}
+
+// ─── src/test/kotlin/TestSupport.kt + ApplicationTest.kt ─────────────────────
+
+function ktorTestSupport(withAuth: boolean, mysql: boolean): string {
+  const mode = mysql ? "MySQL" : "PostgreSQL";
+  const authImports = withAuth
+    ? `import com.auth0.jwt.JWT
+import com.auth0.jwt.algorithms.Algorithm
+import com.auth0.jwt.interfaces.JWTVerifier
+import java.security.KeyPairGenerator
+import java.security.interfaces.RSAPrivateKey
+import java.security.interfaces.RSAPublicKey
+import java.util.Date
+`
+    : "";
+  const authBlock = withAuth
+    ? `
+/** RS256 keypair generated per test run; the app trusts it instead of the provider's JWKS. */
+object TestAuth {
+    private const val ISSUER = "https://issuer.test"
+    private val keys = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+    private val algorithm = Algorithm.RSA256(keys.public as RSAPublicKey, keys.private as RSAPrivateKey)
+
+    val verifier: JWTVerifier = JWT.require(algorithm).withIssuer(ISSUER).build()
+
+    fun token(): String = JWT.create()
+        .withIssuer(ISSUER)
+        .withSubject("test-user")
+        .withExpiresAt(Date(System.currentTimeMillis() + 60_000))
+        .sign(algorithm)
+}
+`
+    : "";
+  return `${authImports}import io.ktor.server.application.*
+import org.jetbrains.exposed.sql.Database
+
+/**
+ * Tests run against in-memory H2 (${mode} mode) with the production schema,
+ * so \`gradle test\` needs no database${withAuth ? " and no network for JWKS" : ""}.
+ */
+fun initTestDatabase() {
+    Database.connect("jdbc:h2:mem:test;MODE=${mode};DB_CLOSE_DELAY=-1", driver = "org.h2.Driver")
+    createSchema()
+}
+
+/** The production module wired to test infrastructure. */
+fun Application.testModule() {
+    initTestDatabase()
+    ${withAuth ? "module(jwtVerifier = TestAuth.verifier)" : "module()"}
+}
+${authBlock}`;
+}
+
+function ktorApplicationTest(entities: Entity[], stubs: Endpoint[], withAuth: boolean): string {
+  // One protected route proves the token path end to end: 401 without, 200 with.
+  const stub = stubs.find((e) => e.auth);
+  const target = entities.length > 0
+    ? { method: "Get", path: `/${toKebab(entities[0].name)}s` }
+    : stub
+      ? { method: toPascal(stub.method.toLowerCase()), path: springPath(stub.path).replace(/\{[^}]+\}/g, "1") }
+      : null;
+  const authTests = withAuth && target
+    ? `
+    @Test
+    fun protectedRouteRejectsMissingToken() = testApplication {
+        application { testModule() }
+        val response = client.request("${target.path}") { method = HttpMethod.${target.method} }
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
+    }
+
+    @Test
+    fun protectedRouteAcceptsSignedToken() = testApplication {
+        application { testModule() }
+        val response = client.request("${target.path}") {
+            method = HttpMethod.${target.method}
+            header(HttpHeaders.Authorization, "Bearer \${TestAuth.token()}")
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+    }
+`
+    : "";
+  return `import io.ktor.client.request.*
+import io.ktor.http.*
+import io.ktor.server.testing.*
+import kotlin.test.*
+
+class ApplicationTest {
+    @Test
+    fun healthIsOk() = testApplication {
+        application { testModule() }
+        assertEquals(HttpStatusCode.OK, client.get("/health").status)
+    }
+${authTests}}
 `;
 }
 
