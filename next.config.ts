@@ -24,6 +24,8 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  // Stop `next dev` from appending its agent-rules block to CLAUDE.md on every start.
+  agentRules: false,
   serverExternalPackages: ["better-sqlite3"],
   async headers() {
     return [
