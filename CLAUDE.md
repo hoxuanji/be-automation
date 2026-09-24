@@ -6,7 +6,7 @@ Guidance for Claude Code (or any agent) working on this repo.
 
 **Helios** — an AI-native backend infrastructure generator. The user configures a stack visually; the backend emits a real, buildable repository as a zip. Claude Sonnet 4.6 powers an in-app copilot that audits the stack and explains trade-offs.
 
-The UI is Next.js 15 (App Router) + React 19 + Tailwind + Framer Motion + Zustand + Radix primitives. The generation backend is Node-runtime Next.js API routes using `archiver` for streaming zip output and `@anthropic-ai/sdk` for SSE chat.
+The UI is Next.js 16 (App Router) + React 19 + Tailwind + Framer Motion + Zustand + Radix primitives. The generation backend is Node-runtime Next.js API routes using `archiver` for streaming zip output and `@anthropic-ai/sdk` for SSE chat.
 
 ## Quick commands
 
@@ -40,7 +40,7 @@ Zustand store  ──┐
                  ├─▶ /api/projects, teams, …  → SQLite (src/lib/db.ts)
                  └─▶ /api/{railway,render,fly,vercel}/deploy → deploy pipeline (SSE progress)
 
-src/middleware.ts verifies the JWT and redirects protected routes to /login.
+src/proxy.ts (Next 16's renamed middleware) verifies the JWT and redirects protected routes to /login.
 ```
 
 The client is the source of truth for the in-progress `StackConfig` and `Endpoint[]`; generation is stateless. Saved projects, sessions and teams live in SQLite.

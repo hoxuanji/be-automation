@@ -10,7 +10,7 @@
 - **GitHub OAuth** — `GET /api/auth/github` → callback → creates or links a user keyed off `github_id`, issues a JWT, sets the `helios_token` cookie. The same route powers "connect GitHub to an existing session" via `?mode=connect`.
 - **Bitbucket OAuth** — `GET /api/auth/bitbucket` → callback → mirror of the GitHub flow, keyed off `bitbucket_id`. Tokens stored in a `bitbucket_token` cookie. State parameter is HMAC-signed with a `bb:` prefix so a state from one provider can't replay against the other's callback.
 - **No email/password flow** — signup, login, forgot-password and reset-password were removed. Helios is SSO-only: signing in with either provider on first use creates the account; subsequent sign-ins resolve by provider id (with email match as a fallback so users who connect both providers get a single account). No passwords stored, no reset emails to deliver.
-- **JWT middleware** — `src/middleware.ts` protects all workspace routes. Redirects unauthenticated users to `/login?returnTo=...`. The login page now renders only "Continue with GitHub" / "Continue with Bitbucket" buttons.
+- **JWT proxy** — `src/proxy.ts` (Next 16's renamed middleware) protects all workspace routes. Redirects unauthenticated users to `/login?returnTo=...`. The login page now renders only "Continue with GitHub" / "Continue with Bitbucket" buttons.
 - **Session invalidation** — sessions tracked in SQLite; `DELETE /api/auth/logout` deletes the session row.
 - **Stale-session auto-recovery** — `GET /api/auth/me` detects when a browser has a valid JWT cookie but no matching session row (e.g. after a DB wipe or server restart) and returns a `Set-Cookie` clear header. `loadAuth` in the Zustand store then redirects to `/login` when `user` is null on a protected route, preventing a state where the app loads but every API call returns 401.
 - **Topbar identity** — "Signed in as" dropdown shows the user's display name (populated from SSO provider on login) and email beneath it. The avatar renders initials; `??` is shown only transiently while `loadAuth` is in flight.
@@ -354,7 +354,7 @@ Test in order. Each section is a discrete flow. Use a fresh account unless noted
 - `src/lib/permissions.ts` — `getProjectAccess(projectId, userId)` is the only place project access is decided. `canRead`, `canWrite`, `canManage` wrap the rank check.
 - `src/lib/auth.ts` — `getCurrentUser(req)` extracts and verifies the JWT from the `helios_token` cookie.
 - `src/components/builder/ShareProjectDialog.tsx` — Radix Dialog for granting/revoking project shares (owner-only). Mounted from each saved-project card on the dashboard.
-- `src/middleware.ts` — Next.js middleware. Protects `/dashboard`, `/builder`, `/preview`, `/deploy`, `/settings`, `/from-repo`, etc.
+- `src/proxy.ts` — Next.js proxy (formerly middleware; renamed in Next 16). Protects `/dashboard`, `/builder`, `/preview`, `/deploy`, `/settings`, `/from-repo`, etc.
 
 ### Conventions
 - API routes validate input with Zod. Never trust `req.json()` directly.
