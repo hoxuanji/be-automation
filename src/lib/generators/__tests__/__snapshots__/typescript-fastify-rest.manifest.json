@@ -146,8 +146,13 @@
   },
   {
     "path": "src/main.ts",
-    "lines": 62,
-    "size": 2238
+    "lines": 63,
+    "size": 2408
+  },
+  {
+    "path": "src/middleware/auth.ts",
+    "lines": 42,
+    "size": 1611
   },
   {
     "path": "src/repositories/post.repository.ts",

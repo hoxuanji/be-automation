@@ -791,4 +791,33 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     const off = gen({ language: "python", framework: "fastapi", api: "grpc", ...OFF }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
     assert.ok(!off.get("app/interceptors.py") && !off.get("app/tracing.py"));
   });
+
+  it("TS auth patterns stay consistent with the token verifier authRequired uses", () => {
+    const eps = [
+      { id: "1", method: "POST" as const, path: "/auth/login", summary: "Login", auth: false, pattern: "auth_login" },
+      { id: "2", method: "GET" as const, path: "/auth/me", summary: "Me", auth: false, pattern: "auth_me" },
+    ];
+    const verifierPath = (fw: string) => (fw === "nestjs" ? "src/auth/jwt.guard.ts" : "src/middleware/auth.ts");
+    const code = (g: ReturnType<typeof gen>) => (g.get("src/app.controller.ts") ?? "") + g.get("src/main.ts");
+    for (const fw of ["express", "fastify", "hono", "nestjs"]) {
+      const ts = (auth: string) => gen({ language: "typescript", framework: fw, auth }, eps);
+      // Self-managed: login mints HS256 tokens with JWT_SECRET, so authRequired must verify exactly those.
+      const self = ts("none");
+      const selfVerifier = self.get(verifierPath(fw))!;
+      assert.ok(selfVerifier, `${fw}: auth "none" + auth patterns must emit a verifier`);
+      assert.match(selfVerifier, /algorithms: \["HS256"\]/, fw);
+      assert.match(selfVerifier, /process\.env\.JWT_SECRET/, fw);
+      assert.match(code(self), /jwt\.sign\(\{ sub: user!\.id \}, process\.env\.JWT_SECRET!/, fw);
+      // auth_me reads the caller from authRequired, so it must run behind it even without e.auth.
+      assert.match(code(self), fw === "nestjs" ? /@UseGuards\(JwtAuthGuard\)\n\s+async getAuthMe/ : fw === "fastify" ? /"\/auth\/me", \{ preHandler: authRequired \}/ : /"\/auth\/me", authRequired,/, fw);
+      assert.match(self.get("package.json")!, /"jsonwebtoken"/, fw);
+      // External provider: authRequired verifies provider JWKS tokens, so the service must not mint its own.
+      const clerk = ts("clerk");
+      assert.match(clerk.get(verifierPath(fw))!, /createRemoteJWKSet/, fw);
+      const c = code(clerk);
+      assert.ok(c.includes('error: "handled_by_clerk"') && !c.includes("jwt.sign") && !c.includes("JWT_SECRET"), fw);
+      assert.match(c, /\.claims/, `${fw}: auth_me must return the provider's verified claims`);
+      assert.ok(!/"(bcrypt|jsonwebtoken)"/.test(clerk.get("package.json")!), `${fw}: unused bcrypt/jsonwebtoken deps`);
+    }
+  });
 });
