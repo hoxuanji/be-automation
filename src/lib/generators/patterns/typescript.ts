@@ -1,5 +1,6 @@
 import type { Endpoint, Entity, StackConfig } from "../types";
 import type { PatternId } from "./index";
+import { authProviderSpec } from "../auth/providers";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -10,6 +11,25 @@ function inferTableName(path: string): string {
 }
 
 type TsFw = "express" | "fastify" | "hono";
+
+// How authRequired verifies bearer tokens — mirrors goAuthMode / pyAuthMode:
+//   jwks  — external provider configured: verify provider tokens via JWKS.
+//   hs256 — auth "none" but auth_* patterns are used: the service issues its
+//           own HS256 tokens (JWT_SECRET) and verifies exactly those.
+//   off   — nothing to verify.
+export type TsAuthMode = "jwks" | "hs256" | "off";
+export function tsAuthMode(config: StackConfig, endpoints: Endpoint[]): TsAuthMode {
+  const authPatterns = endpoints.some((e) => e.pattern?.startsWith("auth_"));
+  if (authProviderSpec(config)) return endpoints.some((e) => e.auth) || authPatterns ? "jwks" : "off";
+  return authPatterns ? "hs256" : "off";
+}
+
+// Routes that run behind authRequired: explicitly protected ones, plus the
+// patterns that read the caller's identity.
+export const tsGuarded = (e: Endpoint, mode: TsAuthMode) =>
+  mode !== "off" && (e.auth || e.pattern === "auth_me" || e.pattern === "auth_change_password");
+
+const CREDENTIAL_PATTERNS = ["auth_login", "auth_register", "auth_refresh", "auth_change_password"];
 
 // ── framework adapter ─────────────────────────────────────────────────────────
 
@@ -24,6 +44,7 @@ interface TsFwCtx {
   getBody: string; // variable name containing parsed body
   bindBody: string; // lines to parse body into `body`
   getCtxUser: () => string; // expression for authenticated user ID
+  getCtxClaims: string; // expression for the verified token payload
   logErr: (msg: string, err: string) => string;
 }
 
@@ -39,6 +60,7 @@ function tsCtx(fw: TsFw): TsFwCtx {
     getBody: "req.body",
     bindBody: "",
     getCtxUser: () => `(req as any).user?.sub`,
+    getCtxClaims: `(req as any).user?.claims`,
     logErr: (msg, err) => `console.error(${JSON.stringify(msg)}, ${err});`,
   };
 
@@ -53,6 +75,7 @@ function tsCtx(fw: TsFw): TsFwCtx {
     getBody: "request.body as any",
     bindBody: "",
     getCtxUser: () => `(request as any).user?.sub`,
+    getCtxClaims: `(request as any).user?.claims`,
     logErr: (msg, err) => `request.log.error({ err: ${err} }, ${JSON.stringify(msg)});`,
   };
 
@@ -66,7 +89,8 @@ function tsCtx(fw: TsFw): TsFwCtx {
     sendErr: (s, m) => `return c.json({ error: ${JSON.stringify(m)} }, ${s});`,
     getBody: "await c.req.json()",
     bindBody: "",
-    getCtxUser: () => `c.get("sub") as string`,
+    getCtxUser: () => `c.get("user")?.sub`,
+    getCtxClaims: `c.get("user")?.claims`,
     logErr: (msg, err) => `console.error(${JSON.stringify(msg)}, ${err});`,
   };
 }
@@ -265,8 +289,12 @@ function authRegister(fw: TsFw): string {
   }`;
 }
 
-function authMe(fw: TsFw): string {
+function authMe(fw: TsFw, mode: TsAuthMode): string {
   const x = tsCtx(fw);
+  if (mode === "jwks") return `  // Claims verified by authRequired against the provider's JWKS.
+  const claims = ${x.getCtxClaims};
+  if (!claims) { ${x.sendErr(401, "missing_or_invalid_token")} }
+  ${x.sendJSON(200, "claims")}`;
   return `  const sub = ${x.getCtxUser()};
   if (!sub) { ${x.sendErr(401, "missing_or_invalid_token")} }
   // Optional: fetch full user from DB
@@ -490,7 +518,8 @@ export function tsPatternRoute(
   e: Endpoint,
   target: TsFw | "nestjs",
   config: StackConfig,
-  entities: Entity[]
+  entities: Entity[],
+  mode: TsAuthMode
 ): string {
   // Nest runs on platform-express and its pattern methods take @Req()/@Res(),
   // so they share the Express handler bodies.
@@ -501,7 +530,13 @@ export function tsPatternRoute(
   const cache = hasRedisCache(config);
   let body: string;
 
-  switch (pattern) {
+  // Token design (mirrors Go/Python): with an external provider authRequired
+  // verifies provider-issued tokens via JWKS, so this service must not mint its
+  // own — credential endpoints answer 501 and auth_me reads the provider's claims.
+  if (mode === "jwks" && CREDENTIAL_PATTERNS.includes(pattern ?? "")) {
+    body = `  // Credentials are managed by ${config.auth}; tokens minted here would fail JWKS verification.
+  ${andReturn(tsCtx(fw).sendJSON(501, `{ error: "handled_by_${config.auth}" }`))}`;
+  } else switch (pattern) {
     case "crud_list":    body = crudList(fw, table, m); break;
     case "crud_get":     body = crudGet(fw, table, m); break;
     case "crud_create":  body = crudCreate(fw, table, m); break;
@@ -509,7 +544,7 @@ export function tsPatternRoute(
     case "crud_delete":  body = crudDelete(fw, table, m); break;
     case "auth_login":   body = authLogin(fw); break;
     case "auth_register":body = authRegister(fw); break;
-    case "auth_me":      body = authMe(fw); break;
+    case "auth_me":      body = authMe(fw, mode); break;
     case "auth_logout":  body = authLogout(fw); break;
     case "auth_refresh": body = authRefresh(fw); break;
     case "auth_change_password": body = authChangePassword(fw); break;
@@ -525,25 +560,28 @@ export function tsPatternRoute(
 
   const path = expressPath(e.path);
   const method = e.method.toLowerCase();
-  const auth = e.auth ? "authRequired, " : "";
+  const guarded = tsGuarded(e, mode);
 
   if (target === "nestjs") return body; // caller wraps in decorator + method
   if (fw === "express") {
-    return `app.${method}(${JSON.stringify(path)}, ${auth}async (req, res) => {\n${body}\n});`;
+    // Express keeps authRequired on protected routes even with auth "off" (fail closed).
+    return `app.${method}(${JSON.stringify(path)}, ${guarded || e.auth ? "authRequired, " : ""}async (req, res) => {\n${body}\n});`;
   }
   if (fw === "fastify") {
-    return `app.${method}(${JSON.stringify(path)}, async (request, reply) => {\n${body}\n});`;
+    return `app.${method}(${JSON.stringify(path)}, ${guarded ? "{ preHandler: authRequired }, " : ""}async (request, reply) => {\n${body}\n});`;
   }
-  return `app.${method}(${JSON.stringify(path)}, async (c) => {\n${body}\n});`;
+  return `app.${method}(${JSON.stringify(path)}, ${guarded ? "authRequired, " : ""}async (c) => {\n${body}\n});`;
 }
 
 /** Extra imports needed in main.ts when auth or bcrypt patterns are present. */
-export function tsPatternImports(endpoints: Endpoint[]): { needsBcrypt: boolean; needsJwt: boolean; needsCrypto: boolean } {
+export function tsPatternImports(config: StackConfig, endpoints: Endpoint[]): { needsBcrypt: boolean; needsJwt: boolean; needsCrypto: boolean } {
   const patterns = endpoints.map((e) => e.pattern ?? "");
+  // With an external provider the credential patterns are 501 stubs — no hashing or signing.
+  const selfIssued = tsAuthMode(config, endpoints) === "hs256";
   return {
-    needsBcrypt: patterns.some((p) => ["auth_login", "auth_register", "auth_change_password"].includes(p)),
+    needsBcrypt: selfIssued && patterns.some((p) => ["auth_login", "auth_register", "auth_change_password"].includes(p)),
     // Only login/register/refresh sign or verify tokens themselves.
-    needsJwt: patterns.some((p) => ["auth_login", "auth_register", "auth_refresh"].includes(p)),
+    needsJwt: selfIssued && patterns.some((p) => ["auth_login", "auth_register", "auth_refresh"].includes(p)),
     // crypto.createHmac (webhook) is node:crypto-only; the global is WebCrypto.
     needsCrypto: patterns.includes("webhook_receive"),
   };

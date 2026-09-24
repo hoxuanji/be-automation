@@ -32,18 +32,14 @@ function fnName(e: Endpoint): string {
   return (e.method.toLowerCase() + "_" + parts.join("_")).replace(/_+$/g, "");
 }
 
-type PyFw = "fastapi" | "django" | "litestar";
-
 // How auth_required verifies bearer tokens — mirrors goAuthMode:
 //   jwks  — external provider configured: verify provider tokens via JWKS.
 //   hs256 — auth "none" but auth_* patterns are used: the service issues its
 //           own HS256 tokens (JWT_SECRET) and verifies exactly those.
 //   off   — nothing to verify; no app/auth.py is emitted.
-// Only the FastAPI entrypoint renders pattern handlers, so patterns only
-// switch the mode there.
 export type PyAuthMode = "jwks" | "hs256" | "off";
 export function pyAuthMode(config: StackConfig, endpoints: Endpoint[]): PyAuthMode {
-  const authPatterns = config.framework === "fastapi" && endpoints.some((e) => e.pattern?.startsWith("auth_"));
+  const authPatterns = endpoints.some((e) => e.pattern?.startsWith("auth_"));
   if (authProviderSpec(config)) return endpoints.some((e) => e.auth) || authPatterns ? "jwks" : "off";
   return authPatterns ? "hs256" : "off";
 }
@@ -423,32 +419,125 @@ function patternBody(e: Endpoint, config: StackConfig, entities: Entity[], mode:
 
 export function pyPatternRoute(
   e: Endpoint,
-  fw: PyFw,
   config: StackConfig,
   entities: Entity[],
   mode: PyAuthMode = "off"
 ): string {
-  const table = inferTableName(e.path);
-  const pyPathStr = pyPath(e.path);
-  const params = pathParams(e.path);
   const method = e.method.toLowerCase();
+  const handlerBody = patternBody(e, config, entities, mode);
+  const auth = e.auth && mode !== "off" ? ", dependencies=[Depends(auth_required)]" : "";
+  const statusCode = method === "post" ? ", status_code=201" : method === "delete" ? ", status_code=204" : "";
+  const body = handlerBody.replace(/^async def handler/, `async def ${fnName(e)}`);
+  return `@app.${method}(${JSON.stringify(pyPath(e.path))}${statusCode}${auth})\n${body}`;
+}
 
-  if (fw === "fastapi") {
-    const handlerBody = patternBody(e, config, entities, mode);
-    const auth = e.auth && mode !== "off" ? ", dependencies=[Depends(auth_required)]" : "";
-    const statusCode = method === "post" ? ", status_code=201" : method === "delete" ? ", status_code=204" : "";
-    const body = handlerBody.replace(/^async def handler/, `async def ${fnName(e)}`);
-    return `@app.${method}(${JSON.stringify(pyPathStr)}${statusCode}${auth})\n${body}`;
+// ── Litestar / Django adapters ───────────────────────────────────────────────
+// The pattern bodies above are FastAPI handlers. For Litestar and Django the
+// body is kept and only the signature is translated: each parameter is
+// classified by its FastAPI annotation / default and re-expressed natively.
+
+type NativeFw = "litestar" | "django";
+type Param = { name: string; type: string; dflt?: string };
+
+function splitHandler(code: string): { params: Param[]; body: string } {
+  const m = code.match(/^async def handler\(([\s\S]*?)\):\n([\s\S]*)$/)!;
+  const params = m[1].split(/,(?![^()]*\))/).map((s) => s.trim()).filter(Boolean).map((s) => {
+    const p = s.match(/^(\w+): ([\w[\]]+)(?: = (.+))?$/)!;
+    return { name: p[1], type: p[2], dflt: p[3] };
+  });
+  return { params, body: m[2] };
+}
+
+export type NativeRoute = { name: string; method: string; path: string; code: string; db: boolean; claims: boolean };
+
+function nativeRoute(e: Endpoint, fw: NativeFw, config: StackConfig, entities: Entity[], mode: PyAuthMode): NativeRoute {
+  // logicCode is written against FastAPI; keep it visible but don't run it.
+  const code = e.logicCode
+    ? `async def handler():\n    # Custom logicCode targets FastAPI — port it to ${fw}:\n${e.logicCode.split("\n").map((l) => `    # ${l}`).join("\n")}\n    raise HTTPException(status_code=501, detail="not_implemented")`
+    : patternBody(e, config, entities, mode);
+  const { params, body } = splitHandler(code);
+  const pathArgs = pathParams(e.path);
+  const method = e.method.toLowerCase();
+  const name = fnName(e);
+  const sig: string[] = fw === "django" ? ["request", ...pathArgs] : pathArgs.map((p) => `${p}: str`);
+  const pre: string[] = [];
+  let db = false;
+  let claims = false;
+  for (const p of params) {
+    if (!p.dflt && pathArgs.includes(p.name)) continue;
+    const q = p.dflt?.match(/^Query\(([^,]+?)(?:, (.*))?\)$/);
+    if (q) {
+      const alias = q[2]?.match(/alias="(\w+)"/)?.[1];
+      const bounds = q[2]?.replace(/,? ?alias="\w+"/, "");
+      if (fw === "litestar") sig.push(`${p.name}: ${p.type} = Parameter(${alias ? `query="${alias}", ` : ""}${bounds ? bounds + ", " : ""}default=${q[1]})`);
+      else if (p.type === "int") pre.push(`${p.name} = _qint(request, "${alias ?? p.name}", ${q[1]}${bounds ? ", " + bounds : ""})`);
+      else pre.push(`${p.name} = request.GET.get("${alias ?? p.name}", ${q[1]})`);
+    } else if (p.dflt === "Depends(get_db)") {
+      db = true;
+      sig.push(fw === "litestar" ? `${p.name}: Session` : p.name);
+    } else if (p.dflt === "Depends(auth_required)") {
+      claims = true;
+      sig.push(fw === "litestar" ? `${p.name}: dict` : p.name);
+    } else if (p.type === "Request") {
+      if (fw === "litestar") sig.push("request: Request");
+    } else if (p.type === "UploadFile") {
+      if (fw === "litestar") {
+        sig.push("data: UploadFile = Body(media_type=RequestEncodingType.MULTI_PART)");
+        pre.push(`${p.name} = data`);
+      } else {
+        pre.push(`${p.name} = request.FILES.get("file")`, `if ${p.name} is None:`, `    raise HTTPException(status_code=400, detail="multipart field 'file' is required")`);
+      }
+    } else if (fw === "litestar") {
+      // Litestar always injects the parsed request body as `data`.
+      sig.push(`data: ${p.type}`);
+      pre.push(`${p.name} = data`);
+    } else {
+      pre.push(p.type === "dict" ? `${p.name} = _json_body(request)` : `${p.name} = _model_body(request, ${p.type})`);
+    }
   }
-
+  const prologue = pre.map((l) => `    ${l}\n`).join("");
+  const protect = e.auth && mode !== "off" && !claims; // a claims parameter already verifies the token
   if (fw === "litestar") {
-    const decorator = method === "get" ? "@get" : method === "post" ? "@post" : method === "put" ? "@put" : method === "patch" ? "@patch" : "@delete";
-    const fnName = `${method}_${table.replace(/-/g, "_")}`;
-    return `${decorator}(${JSON.stringify(pyPathStr)})\nasync def ${fnName}() -> dict:\n    # ${e.logic || e.summary || "TODO: implement"}\n    return {"ok": True}`;
+    const out = body
+      .replace(/\bResponse\(status_code=204\)/g, "Response(content=None, status_code=204)")
+      .replace(/\bJSONResponse\(/g, "Response(");
+    const path = e.path.replace(/:([a-zA-Z0-9_]+)/g, "{$1:str}");
+    // Python needs parameters without defaults first.
+    const ordered = [...sig.filter((s) => !s.includes(" = ")), ...sig.filter((s) => s.includes(" = "))];
+    // Litestar's DELETE default (204) rejects handlers that may return a body;
+    // crud_delete still answers 204 through its explicit Response.
+    const status = method === "delete" ? ", status_code=200" : "";
+    return { name, method, path, db, claims,
+      code: `@${method}(${JSON.stringify(path)}${status}${protect ? ", guards=[auth_guard]" : ""})\nasync def ${name}(${ordered.join(", ")}) -> Any:\n${prologue}${out}` };
   }
+  const out = body
+    .replace(/await request\.body\(\)/g, "request.body")
+    .replace(/await file\.read\(\)/g, "file.read()")
+    .replace(/\bfile\.filename\b/g, "file.name")
+    .replace(/\bResponse\(status_code=204\)/g, "HttpResponse(status=204)")
+    .replace(/\bJSONResponse\(status_code=([^,]+), content=(.*)\)$/gm, "JsonResponse($2, status=$1)");
+  const opts = [
+    method === "post" ? "status=201" : method === "delete" ? "status=204" : "",
+    protect ? "auth=True" : "",
+    claims ? "claims=True" : "",
+    db ? "db=True" : "",
+  ].filter(Boolean).join(", ");
+  const path = e.path.replace(/^\//, "").replace(/:([a-zA-Z0-9_]+)/g, "<str:$1>");
+  return { name, method, path, db, claims,
+    code: `@_endpoint(${opts})\nasync def ${name}(${sig.join(", ")}):\n${prologue}${out}` };
+}
 
-  // Django — function-based view stub
-  return `@api_view([${JSON.stringify(e.method)}])\ndef ${method}_${table.replace(/-/g, "_")}(request${params.length ? ", " + params.join(", ") : ""}):\n    # ${e.logic || e.summary || "TODO: implement"}\n    return Response({"ok": True})`;
+/** Every endpoint (plain or patterned) as a native Litestar / Django handler. Skips the app's own GET /health and repeated method+path pairs. */
+export function pyNativeRoutes(fw: NativeFw, endpoints: Endpoint[], config: StackConfig, entities: Entity[], mode: PyAuthMode): NativeRoute[] {
+  const seen = new Set(["GET /health"]);
+  return endpoints
+    .filter((e) => {
+      const key = `${e.method} ${e.path.replace(/\/+$/, "") || "/"}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map((e) => nativeRoute(e, fw, config, entities, mode));
 }
 
 /**
@@ -459,32 +548,61 @@ export function pyPatternRoute(
 export function pyPatternImports(endpoints: Endpoint[], config: StackConfig, entities: Entity[] = [], mode: PyAuthMode = "off"): string[] {
   const patterned = endpoints.filter((e) => e.pattern);
   if (!patterned.length) return [];
-  const code = patterned.map((e) => patternBody(e, config, entities, mode)).join("\n");
+  return importLines(patterned.map((e) => patternBody(e, config, entities, mode)).join("\n"), "fastapi", entities);
+}
+
+/** pyPatternImports for handlers rendered by pyNativeRoutes. */
+export function pyNativeImports(routes: NativeRoute[], fw: NativeFw, entities: Entity[]): string[] {
+  return routes.length ? importLines(routes.map((r) => r.code).join("\n"), fw, entities) : [];
+}
+
+const REQUEST_MODELS = ["Credentials", "RefreshRequest", "ChangePasswordRequest", "NotificationRequest"];
+
+function importLines(code: string, fw: "fastapi" | NativeFw, entities: Entity[]): string[] {
   const uses = (re: RegExp) => re.test(code);
-  const lines: string[] = [
-    // Names the handler signatures use as defaults / annotations — evaluated
-    // at import time, so they must exist in both FastAPI entrypoints.
-    "from typing import Optional",
-    "from fastapi import Query, Request, Response",
-    "from fastapi.responses import JSONResponse",
-  ];
-  if (uses(/\bget_db\b/)) lines.push("from sqlalchemy.orm import Session", "from .db import get_db");
+  // A request model is used as a FastAPI/Litestar annotation or a Django _model_body argument.
+  const usesModel = (n: string) => new RegExp(`: ${n}\\b|_model_body\\(request, ${n}\\)`).test(code);
+  const lines: string[] = [];
+  if (fw === "fastapi") {
+    lines.push(
+      // Names the handler signatures use as defaults / annotations — evaluated
+      // at import time, so they must exist in both FastAPI entrypoints.
+      "from typing import Optional",
+      "from fastapi import Query, Request, Response",
+      "from fastapi.responses import JSONResponse",
+    );
+    if (uses(/\bget_db\b/)) lines.push("from sqlalchemy.orm import Session", "from .db import get_db");
+  } else if (fw === "litestar") {
+    lines.push("from typing import Any");
+    const core = ["Request", "Response"].filter((n) => new RegExp(`\\b${n}\\b`).test(code));
+    if (core.length) lines.push(`from litestar import ${core.join(", ")}`);
+    if (uses(/\bHTTPException\(/)) lines.push("from litestar.exceptions import HTTPException");
+    const params = ["Body", "Parameter"].filter((n) => code.includes(n + "("));
+    if (params.length) lines.push(`from litestar.params import ${params.join(", ")}`);
+    if (uses(/\bUploadFile\b/)) lines.push("from litestar.datastructures import UploadFile", "from litestar.enums import RequestEncodingType");
+    if (uses(/: Session\b/)) lines.push("from sqlalchemy.orm import Session");
+  } else {
+    lines.push("import functools");
+    if (uses(/_model_body\(/)) lines.push("from pydantic import ValidationError");
+  }
+  // NotificationRequest declares an Optional field.
+  if (fw !== "fastapi" && (uses(/\bOptional\b/) || usesModel("NotificationRequest"))) lines.push("from typing import Optional");
   const models = entities.filter((en) => new RegExp(`\\b${en.name}\\b`).test(code)).map((en) => en.name);
   if (models.length) lines.push(`from .models import ${[...new Set(models)].join(", ")}`);
-  if (uses(/\b_row\(/)) lines.push("from fastapi.encoders import jsonable_encoder");
+  if (uses(/\b_row\(/)) lines.push(fw === "fastapi" ? "from fastapi.encoders import jsonable_encoder" : "import json");
   if (uses(/\bredis_client\b/)) lines.push("from .cache import redis_client");
-  if (uses(/\bjson\.loads\b/)) lines.push("import json");
+  if (uses(/\bjson\.loads\b|_json_body\(|_model_body\(/)) lines.push("import json");
   if (uses(/\bmath\./)) lines.push("import math");
   if (uses(/\btext\(/)) lines.push("from sqlalchemy import text");
   if (uses(/\bor_\(/)) lines.push("from sqlalchemy import or_");
   if (uses(/\bhmac_lib\b/)) lines.push("import hmac as hmac_lib", "import hashlib", "import os");
-  if (uses(/\bUploadFile\b/)) lines.push("from fastapi import UploadFile");
+  if (fw === "fastapi" && uses(/\bUploadFile\b/)) lines.push("from fastapi import UploadFile");
   if (uses(/\buuid4\(/)) lines.push("from uuid import uuid4");
   if (uses(/\bbcrypt\./)) lines.push("import bcrypt");
   if (uses(/\bjwt\./)) lines.push("import jwt");
   const authNames = ["create_access_token", "verify_token"].filter((n) => code.includes(n + "("));
   if (authNames.length) lines.push(`from .auth import ${authNames.join(", ")}`);
-  if (uses(/\bBaseModel\b|: (Credentials|RefreshRequest|ChangePasswordRequest|NotificationRequest)\b/)) lines.push("from pydantic import BaseModel");
+  if (uses(/\bBaseModel\b/) || REQUEST_MODELS.some(usesModel)) lines.push("from pydantic import BaseModel");
   if (uses(/\blogger\./)) lines.push("import logging", "", "logger = logging.getLogger(__name__)");
 
   // Request bodies + helpers, defined only when a handler references them.
@@ -492,28 +610,68 @@ export function pyPatternImports(endpoints: Endpoint[], config: StackConfig, ent
 
 def _row(item) -> dict:
     """ORM row → JSON-safe dict of its columns (password hashes never leave the service)."""
-    return jsonable_encoder({c.name: getattr(item, c.name) for c in item.__table__.columns if not c.name.startswith("password")})`);
+    return ${fw === "fastapi"
+      ? `jsonable_encoder({c.name: getattr(item, c.name) for c in item.__table__.columns if not c.name.startswith("password")})`
+      : `json.loads(json.dumps({c.name: getattr(item, c.name) for c in item.__table__.columns if not c.name.startswith("password")}, default=str))`}`);
   if (uses(/\b_DUMMY_HASH\b/)) lines.push(`
 _DUMMY_HASH = bcrypt.hashpw(b"timing-equaliser", bcrypt.gensalt())`);
-  if (uses(/: Credentials\b/)) lines.push(`
+  if (usesModel("Credentials")) lines.push(`
 
 class Credentials(BaseModel):
     email: str
     password: str`);
-  if (uses(/: RefreshRequest\b/)) lines.push(`
+  if (usesModel("RefreshRequest")) lines.push(`
 
 class RefreshRequest(BaseModel):
     refresh_token: str`);
-  if (uses(/: ChangePasswordRequest\b/)) lines.push(`
+  if (usesModel("ChangePasswordRequest")) lines.push(`
 
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str`);
-  if (uses(/: NotificationRequest\b/)) lines.push(`
+  if (usesModel("NotificationRequest")) lines.push(`
 
 class NotificationRequest(BaseModel):
     recipient: str
     channel: str
     message: Optional[str] = None`);
+  if (fw === "django") {
+    // Django has no HTTPException; _endpoint in main.py turns this one into a JSON error.
+    lines.push(`
+
+class HTTPException(Exception):
+    def __init__(self, status_code: int, detail: str = ""):
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail`);
+    if (uses(/_qint\(/)) lines.push(`
+
+def _qint(request, key: str, default: int, ge: int | None = None, le: int | None = None) -> int:
+    raw = request.GET.get(key)
+    try:
+        value = default if raw is None else int(raw)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"{key} must be an integer")
+    if (ge is not None and value < ge) or (le is not None and value > le):
+        raise HTTPException(status_code=422, detail=f"{key} is out of range")
+    return value`);
+    if (uses(/_json_body\(|_model_body\(/)) lines.push(`
+
+def _json_body(request) -> dict:
+    try:
+        data = json.loads(request.body or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="JSON object expected")
+    return data`);
+    if (uses(/_model_body\(/)) lines.push(`
+
+def _model_body(request, model):
+    try:
+        return model.model_validate(_json_body(request))
+    except ValidationError:
+        raise HTTPException(status_code=422, detail="invalid request body")`);
+  }
   return [...new Set(lines)];
 }

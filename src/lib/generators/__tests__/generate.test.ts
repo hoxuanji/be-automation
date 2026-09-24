@@ -791,4 +791,121 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     const off = gen({ language: "python", framework: "fastapi", api: "grpc", ...OFF }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
     assert.ok(!off.get("app/interceptors.py") && !off.get("app/tracing.py"));
   });
+
+  // The generated proto is all unary, but interceptors exist to protect
+  // user-added RPCs too: a streaming method must not bypass rate limit / audit / metrics.
+  it("gRPC servers apply the cross-cutting interceptors to streaming RPCs as well as unary", () => {
+    const go = gen({ api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const main = go.get("cmd/api/main.go")!;
+    assert.match(main, /grpc\.ChainStreamInterceptor\([\s\S]*grpcserver\.MetricsStream\(\)[\s\S]*grpcserver\.RateLimitStream\(\)[\s\S]*grpcserver\.AuditStream\(log\)/);
+    const ic = go.get("internal/grpcserver/interceptors.go")!;
+    assert.match(ic, /var limiter = newIPLimiter\(\)/, "unary and stream share one bucket per IP, else streams double a client's budget");
+    assert.equal((ic.match(/limiter\.allow\(/g) ?? []).length, 2);
+    const sentry = gen({ api: "grpc", monitoring: "sentry" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("cmd/api/main.go")!;
+    assert.match(sentry, /ChainStreamInterceptor\(\s*grpcserver\.SentryRecoverStream\(\)/, "a panicking stream must not crash the process");
+    const dd = gen({ api: "grpc", monitoring: "datadog" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("cmd/api/main.go")!;
+    assert.match(dd, /grpctrace\.StreamServerInterceptor\(/);
+    assert.ok(!gen({ api: "grpc", ...OFF }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("cmd/api/main.go")!.includes("ChainStreamInterceptor"));
+
+    // Python: every handler kind is wrapped; response streams as generators so
+    // audit/metrics see the final status instead of firing when the generator is created.
+    const py = gen({ language: "python", framework: "fastapi", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("app/interceptors.py")!;
+    for (const kind of ["unary_unary", "stream_unary", "unary_stream", "stream_stream"]) {
+      assert.match(py, new RegExp(`${kind}=handler\\.${kind} and `), `${kind} handlers must be intercepted`);
+    }
+    assert.match(py, /with around\(context\):\n\s+yield from inner\(request, context\)/);
+  });
+
+  // Picking Fastify/Hono/NestJS with tRPC used to silently ship an Express app
+  // while the README claimed the chosen framework.
+  it("tRPC is served by the chosen TS framework's own adapter, behind its middleware", () => {
+    const cases: [string, string, string, string][] = [
+      ["fastify", "fastify", "await app.register(fastifyTRPCPlugin", "app.register(rateLimit"],
+      ["hono", "hono", `app.use("/trpc/*", trpcServer({ router: appRouter }))`, "rate_limited"],
+      ["nestjs", "@nestjs/core", `app.use("/trpc", rateLimit, trpcExpress.createExpressMiddleware(`, "import { rateLimit }"],
+    ];
+    for (const [framework, fwModule, mount, limiter] of cases) {
+      const g = gen({ language: "typescript", framework, api: "trpc" });
+      const main = g.get("src/main.ts")!;
+      const at = main.indexOf(mount);
+      assert.ok(main.includes(`from "${fwModule}"`), `${framework}: must bootstrap ${framework}, not Express`);
+      assert.ok(!/from "express"/.test(main), `${framework}: must not fall back to an Express server`);
+      assert.ok(at > 0, `${framework}: missing tRPC mount`);
+      assert.ok(main.startsWith(`import "./tracing";`), `${framework}: tracing must load first`);
+      const lim = main.indexOf(limiter);
+      assert.ok(lim >= 0 && lim < at, `${framework}: rate limit must run before /trpc`);
+      assert.match(main.slice(0, at), /audit/i, `${framework}: audit must run before /trpc`);
+      const pkg = JSON.parse(g.get("package.json")!);
+      assert.ok(pkg.dependencies["@trpc/server"].startsWith("^11"), `${framework}: tRPC v11`);
+      assert.ok(pkg.dependencies[framework === "nestjs" ? "@nestjs/core" : framework]);
+      assert.ok(!pkg.dependencies.express, `${framework}: no stray Express dependency`);
+      assert.ok(!/express/i.test(g.get("README.md")!), `${framework}: README must not describe an Express app`);
+    }
+    assert.ok(JSON.parse(gen({ language: "typescript", framework: "hono", api: "trpc" }).get("package.json")!).dependencies["@hono/trpc-server"]);
+
+    // Flags off: NestJS gets no Express limiter, and the mount still anchors.
+    const off = gen({ language: "typescript", framework: "nestjs", api: "trpc", ...OFF });
+    assert.ok(!off.get("src/middleware/rate-limit.ts"));
+    assert.match(off.get("src/main.ts")!, /app\.use\("\/trpc", trpcExpress\.createExpressMiddleware\(/);
+  });
+
+  it("TS auth patterns stay consistent with the token verifier authRequired uses", () => {
+    const eps = [
+      { id: "1", method: "POST" as const, path: "/auth/login", summary: "Login", auth: false, pattern: "auth_login" },
+      { id: "2", method: "GET" as const, path: "/auth/me", summary: "Me", auth: false, pattern: "auth_me" },
+    ];
+    const verifierPath = (fw: string) => (fw === "nestjs" ? "src/auth/jwt.guard.ts" : "src/middleware/auth.ts");
+    const code = (g: ReturnType<typeof gen>) => (g.get("src/app.controller.ts") ?? "") + g.get("src/main.ts");
+    for (const fw of ["express", "fastify", "hono", "nestjs"]) {
+      const ts = (auth: string) => gen({ language: "typescript", framework: fw, auth }, eps);
+      // Self-managed: login mints HS256 tokens with JWT_SECRET, so authRequired must verify exactly those.
+      const self = ts("none");
+      const selfVerifier = self.get(verifierPath(fw))!;
+      assert.ok(selfVerifier, `${fw}: auth "none" + auth patterns must emit a verifier`);
+      assert.match(selfVerifier, /algorithms: \["HS256"\]/, fw);
+      assert.match(selfVerifier, /process\.env\.JWT_SECRET/, fw);
+      assert.match(code(self), /jwt\.sign\(\{ sub: user!\.id \}, process\.env\.JWT_SECRET!/, fw);
+      // auth_me reads the caller from authRequired, so it must run behind it even without e.auth.
+      assert.match(code(self), fw === "nestjs" ? /@UseGuards\(JwtAuthGuard\)\n\s+async getAuthMe/ : fw === "fastify" ? /"\/auth\/me", \{ preHandler: authRequired \}/ : /"\/auth\/me", authRequired,/, fw);
+      assert.match(self.get("package.json")!, /"jsonwebtoken"/, fw);
+      // External provider: authRequired verifies provider JWKS tokens, so the service must not mint its own.
+      const clerk = ts("clerk");
+      assert.match(clerk.get(verifierPath(fw))!, /createRemoteJWKSet/, fw);
+      const c = code(clerk);
+      assert.ok(c.includes('error: "handled_by_clerk"') && !c.includes("jwt.sign") && !c.includes("JWT_SECRET"), fw);
+      assert.match(c, /\.claims/, `${fw}: auth_me must return the provider's verified claims`);
+      assert.ok(!/"(bcrypt|jsonwebtoken)"/.test(clerk.get("package.json")!), `${fw}: unused bcrypt/jsonwebtoken deps`);
+    }
+  });
+
+  it("Litestar and Django serve the user's endpoints, protected by the same verifier as FastAPI", () => {
+    // Before, both ignored the endpoint list: users picking them got an app with only /health.
+    const eps = [
+      ...SAMPLE_ENDPOINTS,
+      { id: "p1", method: "GET" as const, path: "/users/search", summary: "Search", auth: false, pattern: "paginated_search" },
+      { id: "p2", method: "GET" as const, path: "/auth/me", summary: "Me", auth: true, pattern: "auth_me" },
+    ];
+    const ls = gen({ language: "python", framework: "litestar" }, eps, SAMPLE_ENTITIES);
+    const lsMain = ls.get("app/main.py")!;
+    assert.match(lsMain, /@get\("\/users\/\{id:str\}", guards=\[auth_guard\]\)\nasync def get_users_by_id\(id: str\)/);
+    assert.match(lsMain, /@delete\("\/users\/\{id:str\}", status_code=200, guards=\[auth_guard\]\)/);
+    assert.match(lsMain, /async def get_users_search\(db: Session, q: Optional\[str\] = Parameter\(default=None\)/, "pattern body reused, db injected");
+    assert.match(lsMain, /route_handlers=\[health, get_users, post_users, get_users_by_id, delete_users_by_id, get_users_search, get_auth_me,/);
+    assert.equal(lsMain.match(/@get\("\/health"\)/g)!.length, 1, "the app's own /health is not re-registered");
+    assert.match(ls.get("app/auth.py")!, /raise NotAuthorizedException\(detail="missing_or_malformed_token"\)/);
+    assert.doesNotMatch(ls.get("app/auth.py")!, /fastapi/, "fastapi isn't a Litestar dependency");
+    assert.ok(ls.get("app/db.py"), "pattern handlers need the SQLAlchemy session");
+
+    const dj = gen({ language: "python", framework: "django" }, eps, SAMPLE_ENTITIES);
+    const djMain = dj.get("app/main.py")!;
+    assert.match(djMain, /path\("users\/<str:id>", _route\(GET=get_users_by_id, DELETE=delete_users_by_id\)\)/);
+    assert.ok(djMain.indexOf(`path("users/search"`) < djMain.indexOf(`path("users/<str:id>"`), "static path must precede the converter that would swallow it");
+    assert.match(djMain, /@_endpoint\(auth=True\)\nasync def get_users_by_id\(request, id\):/);
+    assert.match(djMain, /@_endpoint\(claims=True\)\nasync def get_auth_me\(request, claims\):/);
+    assert.match(djMain, /except PermissionError as exc:\n\s+return JsonResponse\(\{"detail": str\(exc\)\}, status=401\)/);
+    assert.doesNotMatch(dj.get("app/auth.py")!, /fastapi/);
+
+    // Self-issued auth (auth "none" + auth_* patterns) now reaches these frameworks too.
+    assert.match(gen({ language: "python", framework: "django", auth: "none" }, eps, SAMPLE_ENTITIES).get("app/auth.py")!, /def create_access_token/);
+  });
 });

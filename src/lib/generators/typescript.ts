@@ -1,10 +1,10 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { safeName, toKebab, toCamel } from "./types";
 import { tsGrpcFiles } from "./grpc/typescript";
-import { mountOnTsRest, tsGraphqlFiles } from "./graphql/typescript";
+import { tsGraphqlFiles } from "./graphql/typescript";
+import { mountTrpcOnTsRest } from "./trpc/typescript";
 import { isGraphqlSupported } from "./types";
-import { needsAuth } from "./auth/providers";
-import { tsPatternRoute, tsPatternImports, usesPrisma, hasRedisCache } from "./patterns/typescript";
+import { tsPatternRoute, tsPatternImports, usesPrisma, hasRedisCache, tsAuthMode, tsGuarded, type TsAuthMode } from "./patterns/typescript";
 
 function tsMockField(name: string, type: FieldType): string {
   switch (type) {
@@ -61,8 +61,7 @@ export function typescriptFiles(
 
   const name = safeName(config.name);
   const files: GeneratedFile[] = [];
-  const anyProtected = endpoints.some((e) => e.auth);
-  const withAuth = needsAuth(config, anyProtected);
+  const withAuth = tsAuthMode(config, endpoints) !== "off";
 
   files.push({ path: "package.json", content: pkgJson(name, config, usesPrisma(config, entities), withAuth, endpoints) });
   files.push({ path: "tsconfig.json", content: tsconfig() });
@@ -142,7 +141,7 @@ function tsPatternClientImports(config: StackConfig, endpoints: Endpoint[], enti
   const patterns = endpoints.map((e) => e.pattern ?? "");
   const needsDb = usesPrisma(config, entities) && patterns.some((p) => /^(crud_|paginated_search|cache_read|health_check)/.test(p));
   const needsCache = hasRedis(config) && patterns.some((p) => p === "cache_read" || p === "health_check");
-  const { needsBcrypt, needsJwt, needsCrypto } = tsPatternImports(endpoints);
+  const { needsBcrypt, needsJwt, needsCrypto } = tsPatternImports(config, endpoints);
   return `${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${needsCrypto ? 'import crypto from "node:crypto";\n' : ""}${needsDb ? `import { prisma } from "./db";\n` : ""}${needsCache ? `import { redis } from "./cache";\n` : ""}`;
 }
 
@@ -640,7 +639,7 @@ function prismaType(t: FieldType): string {
 
 function pkgJson(name: string, config: StackConfig, withPrisma: boolean, withAuth: boolean, endpoints: Endpoint[]) {
   const framework = config.framework;
-  const { needsBcrypt, needsJwt } = tsPatternImports(endpoints);
+  const { needsBcrypt, needsJwt } = tsPatternImports(config, endpoints);
   const deps: Record<string, Record<string, string>> = {
     nestjs: {
       "@nestjs/common": "^10.4.0",
@@ -1090,22 +1089,55 @@ describe("${pascal} routes", () => {
 
 }
 
+// Module-level token verifier shared by every framework's authRequired. Must
+// accept exactly the tokens this service's auth story produces: provider JWTs
+// (JWKS) or the HS256 tokens the auth_* routes sign with JWT_SECRET.
+function tsTokenVerifier(mode: TsAuthMode): string {
+  if (mode === "hs256") return `import { jwtVerify, type JWTPayload } from "jose";
+
+// Tokens are self-issued by the auth_* routes (HS256, JWT_SECRET). Verify exactly
+// those — HS256 only, so "alg: none" or asymmetric tokens are rejected.
+const secret = process.env.JWT_SECRET ? new TextEncoder().encode(process.env.JWT_SECRET) : null;
+const unconfigured = secret ? null : "Set JWT_SECRET.";
+const verify = async (token: string): Promise<JWTPayload> =>
+  (await jwtVerify(token, secret!, { algorithms: ["HS256"], clockTolerance: 30 })).payload;
+`;
+  return `import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+
+// Lazy-initialized JWKS fetcher. \`jose\` caches keys internally and honors
+// the \`Cache-Control\` header on the JWKS response — no hand-rolled key
+// management. One JWKS instance is shared across all requests.
+const issuer = process.env.AUTH_ISSUER;
+const jwksUrl = process.env.AUTH_JWKS_URL;
+const audience = process.env.AUTH_AUDIENCE;
+
+const jwks = jwksUrl ? createRemoteJWKSet(new URL(jwksUrl)) : null;
+const unconfigured = jwks && issuer ? null : "Set AUTH_ISSUER and AUTH_JWKS_URL.";
+const verify = async (token: string): Promise<JWTPayload> =>
+  (await jwtVerify(token, jwks!, {
+    issuer,
+    audience, // undefined → jose skips the check
+    clockTolerance: 30,
+  })).payload;
+`;
+}
+
 function nestjsFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
-  const anyProtected = endpoints.some((e) => e.auth);
-  const withAuth = needsAuth(config, anyProtected);
+  const mode = tsAuthMode(config, endpoints);
   const hasPatterns = endpoints.some((e) => e.pattern);
   // Pattern handlers reuse the Express bodies verbatim via @Req()/@Res()
   // (Nest runs on platform-express), so both frameworks behave identically.
-  const guarded = (e: Endpoint) => e.pattern && e.auth && withAuth;
+  const guarded = (e: Endpoint) => tsGuarded(e, mode);
+  const guardLine = (e: Endpoint) => (guarded(e) ? "  @UseGuards(JwtAuthGuard)\n" : "");
   const routes = endpoints
     .map((e) =>
       e.pattern
         ? `  @${capMethod(e.method)}(${JSON.stringify(nestPath(e.path))})
-${guarded(e) ? "  @UseGuards(JwtAuthGuard)\n" : ""}  async ${handlerName(e)}(@Req() req: Request, @Res() res: Response) {
-${tsPatternRoute(e, "nestjs", config, entities).replace(/^(?=.)/gm, "  ")}
+${guardLine(e)}  async ${handlerName(e)}(@Req() req: Request, @Res() res: Response) {
+${tsPatternRoute(e, "nestjs", config, entities, mode).replace(/^(?=.)/gm, "  ")}
   }`
         : `  @${capMethod(e.method)}(${JSON.stringify(nestPath(e.path))})
-  ${handlerName(e)}() {
+${guardLine(e)}  ${handlerName(e)}() {
     return { ok: true, op: "${e.method} ${e.path}" };
   }`
     )
@@ -1212,17 +1244,16 @@ export function auditLogger(req: IncomingMessage & { user?: { sub?: string } }, 
           },
         ]
       : []),
-    ...(withAuth
+    ...(mode !== "off"
       ? [
           {
             path: "src/auth/jwt.guard.ts",
             content: `import { CanActivate, ExecutionContext, Injectable, UnauthorizedException, Logger } from "@nestjs/common";
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
-
+${tsTokenVerifier(mode)}
 /**
- * NestJS guard that verifies an \`Authorization: Bearer <jwt>\` header against
- * the configured issuer + JWKS. Attaches the decoded payload to
- * \`request.user.claims\` so controllers can reach for \`req.user.sub\` etc.
+ * NestJS guard that verifies an \`Authorization: Bearer <jwt>\` header and
+ * attaches the decoded payload to \`request.user\` so controllers can reach
+ * for \`req.user.sub\` / \`req.user.claims\`.
  *
  * Apply per-route or globally:
  *   @UseGuards(JwtAuthGuard)
@@ -1232,26 +1263,17 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
   private readonly log = new Logger(JwtAuthGuard.name);
-  private readonly issuer = process.env.AUTH_ISSUER;
-  private readonly audience = process.env.AUTH_AUDIENCE;
-  private readonly jwks = process.env.AUTH_JWKS_URL
-    ? createRemoteJWKSet(new URL(process.env.AUTH_JWKS_URL))
-    : null;
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
-    if (!this.jwks || !this.issuer) {
-      this.log.error("AUTH_ISSUER or AUTH_JWKS_URL not set");
+    if (unconfigured) {
+      this.log.error(unconfigured);
       throw new UnauthorizedException("auth_unconfigured");
     }
     const req = ctx.switchToHttp().getRequest<{ headers: Record<string, string>; user?: { sub: string; claims: JWTPayload } }>();
     const header = req.headers.authorization;
     if (!header?.startsWith("Bearer ")) throw new UnauthorizedException("missing_or_malformed_token");
     try {
-      const { payload } = await jwtVerify(header.slice(7).trim(), this.jwks, {
-        issuer: this.issuer,
-        audience: this.audience,
-        clockTolerance: 30,
-      });
+      const payload = await verify(header.slice(7).trim());
       req.user = { sub: String(payload.sub ?? ""), claims: payload };
       return true;
     } catch {
@@ -1267,10 +1289,11 @@ export class JwtAuthGuard implements CanActivate {
 }
 
 function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
+  const mode = tsAuthMode(config, endpoints);
   const routes = endpoints
     .map((e) =>
       e.pattern
-        ? tsPatternRoute(e, "express", config, entities)
+        ? tsPatternRoute(e, "express", config, entities, mode)
         : `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, ${e.auth ? "authRequired, " : ""}(req, res) => res.json({ ok: true, op: "${e.method} ${e.path}" }));`
     )
     .join("\n");
@@ -1345,18 +1368,10 @@ process.on("SIGINT", () => shutdown("SIGINT"));
     },
     {
       path: "src/middleware/auth.ts",
+      // Express always emits this file; with auth "off" it keeps the JWKS
+      // verifier so protected stubs fail closed (auth_unconfigured).
       content: `import type { Request, Response, NextFunction } from "express";
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
-
-// Lazy-initialized JWKS fetcher. \`jose\` caches keys internally and honors
-// the \`Cache-Control\` header on the JWKS response — no hand-rolled key
-// management. One JWKS instance is shared across all requests.
-const issuer = process.env.AUTH_ISSUER;
-const jwksUrl = process.env.AUTH_JWKS_URL;
-const audience = process.env.AUTH_AUDIENCE;
-
-const jwks = jwksUrl ? createRemoteJWKSet(new URL(jwksUrl)) : null;
-
+${tsTokenVerifier(mode === "hs256" ? "hs256" : "jwks")}
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
@@ -1367,8 +1382,8 @@ declare global {
 }
 
 export async function authRequired(req: Request, res: Response, next: NextFunction) {
-  if (!jwks || !issuer) {
-    return res.status(500).json({ error: "auth_unconfigured", hint: "Set AUTH_ISSUER and AUTH_JWKS_URL." });
+  if (unconfigured) {
+    return res.status(500).json({ error: "auth_unconfigured", hint: unconfigured });
   }
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) {
@@ -1376,11 +1391,7 @@ export async function authRequired(req: Request, res: Response, next: NextFuncti
   }
   const token = header.slice("Bearer ".length).trim();
   try {
-    const { payload } = await jwtVerify(token, jwks, {
-      issuer,
-      audience, // undefined → jose skips the check
-      clockTolerance: 30,
-    });
+    const payload = await verify(token);
     req.user = { sub: String(payload.sub ?? ""), claims: payload };
     next();
   } catch {
@@ -1446,11 +1457,12 @@ export function rateLimit(req: Request, res: Response, next: NextFunction) {
 }
 
 function fastifyFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
+  const mode = tsAuthMode(config, endpoints);
   const routes = endpoints
     .map((e) =>
       e.pattern
-        ? tsPatternRoute(e, "fastify", config, entities)
-        : `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, async () => ({ ok: true, op: "${e.method} ${e.path}" }));`
+        ? tsPatternRoute(e, "fastify", config, entities, mode)
+        : `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, ${tsGuarded(e, mode) ? "{ preHandler: authRequired }, " : ""}async () => ({ ok: true, op: "${e.method} ${e.path}" }));`
     )
     .join("\n");
 
@@ -1466,7 +1478,7 @@ function fastifyFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
       path: "src/main.ts",
       content: `${tsInstrumentPreamble(config)}import Fastify from "fastify";
 import helmet from "@fastify/helmet";
-${config.rateLimit ? `import rateLimit from "@fastify/rate-limit";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}${entityImports ? entityImports + "\n" : ""}
+${config.rateLimit ? `import rateLimit from "@fastify/rate-limit";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}${endpoints.some((e) => tsGuarded(e, mode)) ? `import { authRequired } from "./middleware/auth";\n` : ""}${entityImports ? entityImports + "\n" : ""}
 async function main() {
   // Fastify's built-in logger (pino) already emits JSON, so no extra config needed.
   const app = Fastify({ logger: true });
@@ -1516,15 +1528,48 @@ main().catch((err) => {
 });
 `,
     },
+    ...(mode !== "off"
+      ? [
+          {
+            path: "src/middleware/auth.ts",
+            content: `import type { FastifyReply, FastifyRequest } from "fastify";
+${tsTokenVerifier(mode)}
+declare module "fastify" {
+  interface FastifyRequest {
+    user?: { sub: string; claims: JWTPayload };
+  }
+}
+
+// Route-level preHandler: app.get(path, { preHandler: authRequired }, handler).
+export async function authRequired(request: FastifyRequest, reply: FastifyReply) {
+  if (unconfigured) {
+    return reply.status(500).send({ error: "auth_unconfigured", hint: unconfigured });
+  }
+  const header = request.headers.authorization;
+  if (!header?.startsWith("Bearer ")) {
+    return reply.status(401).send({ error: "missing_or_malformed_token" });
+  }
+  try {
+    const payload = await verify(header.slice("Bearer ".length).trim());
+    request.user = { sub: String(payload.sub ?? ""), claims: payload };
+  } catch {
+    return reply.status(401).send({ error: "invalid_token" });
+  }
+}
+`,
+          },
+        ]
+      : []),
   ];
 }
 
 function honoFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
+  const mode = tsAuthMode(config, endpoints);
   const routes = endpoints
     .map((e) =>
       e.pattern
-        ? tsPatternRoute(e, "hono", config, entities)
-        : `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, (c) => c.json({ ok: true, op: "${e.method} ${e.path}" }));`
+        ? tsPatternRoute(e, "hono", config, entities, mode)
+        : `app.${e.method.toLowerCase()}(${JSON.stringify(expressPath(e.path))}, ${tsGuarded(e, mode) ? "authRequired, " : ""}(c) => c.json({ ok: true, op: "${e.method} ${e.path}" }));`
     )
     .join("\n");
 
@@ -1540,7 +1585,7 @@ function honoFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[
       path: "src/main.ts",
       content: `${tsInstrumentPreamble(config)}import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-${config.rateLimit || config.audit ? `import { getConnInfo } from "@hono/node-server/conninfo";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}${entityImports ? entityImports + "\n" : ""}
+${config.rateLimit || config.audit ? `import { getConnInfo } from "@hono/node-server/conninfo";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}${endpoints.some((e) => tsGuarded(e, mode)) ? `import { authRequired } from "./middleware/auth";\n` : ""}${entityImports ? entityImports + "\n" : ""}
 const app = new Hono();
 ${config.rateLimit ? `
 // ponytail: in-memory fixed window (60 req / min / IP), per replica. Move the
@@ -1604,6 +1649,36 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 `,
     },
+    ...(mode !== "off"
+      ? [
+          {
+            path: "src/middleware/auth.ts",
+            content: `import type { MiddlewareHandler } from "hono";
+${tsTokenVerifier(mode)}
+declare module "hono" {
+  interface ContextVariableMap {
+    user: { sub: string; claims: JWTPayload };
+  }
+}
+
+// Route-level middleware: app.get(path, authRequired, handler). Handlers read c.get("user").
+export const authRequired: MiddlewareHandler = async (c, next) => {
+  if (unconfigured) return c.json({ error: "auth_unconfigured", hint: unconfigured }, 500);
+  const header = c.req.header("authorization");
+  if (!header?.startsWith("Bearer ")) return c.json({ error: "missing_or_malformed_token" }, 401);
+  let payload: JWTPayload;
+  try {
+    payload = await verify(header.slice("Bearer ".length).trim());
+  } catch {
+    return c.json({ error: "invalid_token" }, 401);
+  }
+  c.set("user", { sub: String(payload.sub ?? ""), claims: payload });
+  await next();
+};
+`,
+          },
+        ]
+      : []),
   ];
 }
 
@@ -1632,16 +1707,10 @@ function tRPCFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[
     return `export type ${en.name} = {\n${fields}\n};`;
   }).join("\n\n");
 
-  // tRPC is served by the Express REST server (built with no routes), so the
-  // REST middleware and observability sit in front of /trpc.
-  const rest = typescriptFiles({ ...config, api: "rest", framework: "express" }, [], []);
+  // tRPC is served by the chosen framework's REST server (built with no routes),
+  // so the REST middleware and observability sit in front of /trpc.
   return [
-    ...mountOnTsRest(rest, {
-      imports: `import * as trpcExpress from "@trpc/server/adapters/express";\nimport { appRouter } from "./router";`,
-      mount: `app.use("/trpc", trpcExpress.createExpressMiddleware({ router: appRouter }));`,
-      // src/client.ts imports @trpc/client.
-      deps: { "@trpc/server": "^11.0.0", "@trpc/client": "^11.0.0" },
-    }),
+    ...mountTrpcOnTsRest(config.framework, (framework) => typescriptFiles({ ...config, api: "rest", framework }, [], [])),
     {
       path: "src/trpc.ts",
       content: `import { initTRPC } from "@trpc/server";

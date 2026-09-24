@@ -31,7 +31,7 @@ The generated repo is not scaffolded — it is tailored. Your chosen language, f
 
 | Layer | Choice |
 | --- | --- |
-| Framework | Next.js 15 (App Router, React 19 server/client split) |
+| Framework | Next.js 16 (App Router, React 19 server/client split) |
 | Styling | TailwindCSS 3.4 + custom design tokens, glassmorphism, aurora gradients |
 | Primitives | Hand-rolled shadcn-style components on Radix primitives |
 | Animation | Framer Motion |
