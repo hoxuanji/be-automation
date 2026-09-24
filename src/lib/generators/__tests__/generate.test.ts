@@ -791,4 +791,37 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     const off = gen({ language: "python", framework: "fastapi", api: "grpc", ...OFF }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
     assert.ok(!off.get("app/interceptors.py") && !off.get("app/tracing.py"));
   });
+
+  // Picking Fastify/Hono/NestJS with tRPC used to silently ship an Express app
+  // while the README claimed the chosen framework.
+  it("tRPC is served by the chosen TS framework's own adapter, behind its middleware", () => {
+    const cases: [string, string, string, string][] = [
+      ["fastify", "fastify", "await app.register(fastifyTRPCPlugin", "app.register(rateLimit"],
+      ["hono", "hono", `app.use("/trpc/*", trpcServer({ router: appRouter }))`, "rate_limited"],
+      ["nestjs", "@nestjs/core", `app.use("/trpc", rateLimit, trpcExpress.createExpressMiddleware(`, "import { rateLimit }"],
+    ];
+    for (const [framework, fwModule, mount, limiter] of cases) {
+      const g = gen({ language: "typescript", framework, api: "trpc" });
+      const main = g.get("src/main.ts")!;
+      const at = main.indexOf(mount);
+      assert.ok(main.includes(`from "${fwModule}"`), `${framework}: must bootstrap ${framework}, not Express`);
+      assert.ok(!/from "express"/.test(main), `${framework}: must not fall back to an Express server`);
+      assert.ok(at > 0, `${framework}: missing tRPC mount`);
+      assert.ok(main.startsWith(`import "./tracing";`), `${framework}: tracing must load first`);
+      const lim = main.indexOf(limiter);
+      assert.ok(lim >= 0 && lim < at, `${framework}: rate limit must run before /trpc`);
+      assert.match(main.slice(0, at), /audit/i, `${framework}: audit must run before /trpc`);
+      const pkg = JSON.parse(g.get("package.json")!);
+      assert.ok(pkg.dependencies["@trpc/server"].startsWith("^11"), `${framework}: tRPC v11`);
+      assert.ok(pkg.dependencies[framework === "nestjs" ? "@nestjs/core" : framework]);
+      assert.ok(!pkg.dependencies.express, `${framework}: no stray Express dependency`);
+      assert.ok(!/express/i.test(g.get("README.md")!), `${framework}: README must not describe an Express app`);
+    }
+    assert.ok(JSON.parse(gen({ language: "typescript", framework: "hono", api: "trpc" }).get("package.json")!).dependencies["@hono/trpc-server"]);
+
+    // Flags off: NestJS gets no Express limiter, and the mount still anchors.
+    const off = gen({ language: "typescript", framework: "nestjs", api: "trpc", ...OFF });
+    assert.ok(!off.get("src/middleware/rate-limit.ts"));
+    assert.match(off.get("src/main.ts")!, /app\.use\("\/trpc", trpcExpress\.createExpressMiddleware\(/);
+  });
 });
