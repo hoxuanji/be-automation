@@ -20,10 +20,14 @@ export function Terminal({
   animate?: boolean;
 }) {
   const [visible, setVisible] = React.useState(animate ? 0 : lines.length);
+  const [prev, setPrev] = React.useState({ lines, animate });
+  if (prev.lines !== lines || prev.animate !== animate) {
+    setPrev({ lines, animate });
+    if (animate) setVisible(0);
+  }
 
   React.useEffect(() => {
     if (!animate) return;
-    setVisible(0);
     const t = setInterval(() => {
       setVisible((v) => {
         if (v >= lines.length) {

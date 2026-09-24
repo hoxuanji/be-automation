@@ -40,6 +40,7 @@ import { cn } from "@/lib/utils";
 import { ShareProjectDialog } from "@/components/builder/ShareProjectDialog";
 
 const ONBOARDED_KEY = "helios_onboarded";
+const noopSubscribe = () => () => {};
 
 const STARTER_LANGUAGES = [
   { id: "go", label: "Go", desc: "Fast, compiled, great for high-throughput APIs.", accent: "#00ADD8" },
@@ -51,19 +52,23 @@ const STARTER_LANGUAGES = [
 function OnboardingModal() {
   const { set } = useStackStore();
   const router = useRouter();
-  const [open, setOpen] = React.useState(false);
+  const [dismissed, setDismissed] = React.useState(false);
   const [step, setStep] = React.useState(0);
   const [pickedLang, setPickedLang] = React.useState<string | null>(null);
 
-  React.useEffect(() => {
-    try {
-      if (!localStorage.getItem(ONBOARDED_KEY)) setOpen(true);
-    } catch {}
-  }, []);
+  // Server snapshot says "onboarded" so SSR/hydration render nothing.
+  const onboarded = React.useSyncExternalStore(
+    noopSubscribe,
+    () => {
+      try { return !!localStorage.getItem(ONBOARDED_KEY); } catch { return true; }
+    },
+    () => true
+  );
+  const open = !onboarded && !dismissed;
 
   function dismiss() {
     try { localStorage.setItem(ONBOARDED_KEY, "1"); } catch {}
-    setOpen(false);
+    setDismissed(true);
   }
 
   function finish() {
@@ -717,12 +722,16 @@ function TeamProjectsSection() {
   const [teams, setTeams] = React.useState<Team[]>([]);
   const [projects, setProjects] = React.useState<Record<string, TeamProject[]>>({});
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
-  const [loading, setLoading] = React.useState(false);
+  const [loading, setLoading] = React.useState(!!authUser);
+  const [prevAuthUser, setPrevAuthUser] = React.useState(authUser);
+  if (authUser !== prevAuthUser) {
+    setPrevAuthUser(authUser);
+    if (authUser) setLoading(true);
+  }
   const router = useRouter();
 
   React.useEffect(() => {
     if (!authUser) return;
-    setLoading(true);
     fetch("/api/teams")
       .then((r) => r.json())
       .then((d: { teams?: Team[] }) => {
@@ -856,11 +865,15 @@ function SharedWithMeSection() {
   const { authUser } = useStackStore();
   const router = useRouter();
   const [projects, setProjects] = React.useState<SharedProjectSummary[]>([]);
-  const [loading, setLoading] = React.useState(false);
+  const [loading, setLoading] = React.useState(!!authUser);
+  const [prevAuthUser, setPrevAuthUser] = React.useState(authUser);
+  if (authUser !== prevAuthUser) {
+    setPrevAuthUser(authUser);
+    if (authUser) setLoading(true);
+  }
 
   React.useEffect(() => {
     if (!authUser) return;
-    setLoading(true);
     fetch("/api/shared-with-me")
       .then((r) => r.json())
       .then((d: { projects?: SharedProjectSummary[] }) => {

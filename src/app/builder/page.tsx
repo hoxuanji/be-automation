@@ -104,7 +104,11 @@ function MyProjectsMenu() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  React.useEffect(() => { setProjects(savedProjects); }, [savedProjects]);
+  const [prevSavedProjects, setPrevSavedProjects] = React.useState(savedProjects);
+  if (savedProjects !== prevSavedProjects) {
+    setPrevSavedProjects(savedProjects);
+    setProjects(savedProjects);
+  }
 
   async function handleRename(id: string) {
     const name = renameVal.trim();

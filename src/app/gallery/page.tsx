@@ -83,9 +83,16 @@ export default function GalleryPage() {
     return () => clearTimeout(t);
   }, [query]);
 
-  React.useEffect(() => {
+  // Reset the list as soon as the filters change; the effect below refetches.
+  const filterKey = `${language}\u0000${debouncedQ}`;
+  const [prevFilterKey, setPrevFilterKey] = React.useState(filterKey);
+  if (filterKey !== prevFilterKey) {
+    setPrevFilterKey(filterKey);
     setLoading(true);
     setStacks([]);
+  }
+
+  React.useEffect(() => {
     const params = new URLSearchParams();
     if (language) params.set("language", language);
     if (debouncedQ) params.set("q", debouncedQ);

@@ -193,7 +193,7 @@ export function EntityBuilder() {
                 removeEntity(entity.id);
                 toast({ title: `Removed ${entity.name}`, kind: "info" });
               }}
-              onAddField={() => handleAddField(entity.id)}
+              onAddField={handleAddField}
               onRemoveField={(fid) => removeEntityField(entity.id, fid)}
               onUpdateField={(fid, updates) => updateEntityField(entity.id, fid, updates)}
             />
@@ -226,7 +226,7 @@ function EntityCard({
   collapsed: boolean;
   onToggle: () => void;
   onRemove: () => void;
-  onAddField: () => void;
+  onAddField: (entityId: string) => void;
   onRemoveField: (id: string) => void;
   onUpdateField: (id: string, updates: Partial<EntityField>) => void;
 }) {
@@ -289,7 +289,7 @@ function EntityCard({
           <div className="px-4 py-2 border-t border-white/[0.04]">
             <button
               type="button"
-              onClick={onAddField}
+              onClick={() => onAddField(entity.id)}
               className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-brand-300 transition-colors"
             >
               <Plus className="h-3 w-3" /> Add field

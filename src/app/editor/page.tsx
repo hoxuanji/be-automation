@@ -195,7 +195,7 @@ function CommitPanel({
 }) {
   const { gitConfig } = useStackStore();
   const prefix = gitConfig.branchNaming.feature.split("/")[0] ?? "feat";
-  const [branch, setBranch] = React.useState(`${prefix}/helios-edit-${Date.now().toString(36)}`);
+  const [branch, setBranch] = React.useState(() => `${prefix}/helios-edit-${Date.now().toString(36)}`);
   const [message, setMessage] = React.useState("chore: edit via Helios");
   const [committing, setCommitting] = React.useState(false);
   const [useSameBranch, setUseSameBranch] = React.useState(false);
