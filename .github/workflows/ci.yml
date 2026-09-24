@@ -81,7 +81,7 @@ jobs:
           - { label: "rust-axum", language: "rust", framework: "axum" }
           - { label: "java-spring", language: "java", framework: "spring", javaVersion: "21" }
           - { label: "java-quarkus", language: "java", framework: "quarkus", javaVersion: "21" }
-          - { label: "kotlin-ktor", language: "kotlin", framework: "ktor", javaVersion: "21" }
+          - { label: "kotlin-ktor", language: "kotlin", framework: "ktor", javaVersion: "21", runTests: true }
           - { label: "kotlin-spring-kt", language: "kotlin", framework: "spring-kt", javaVersion: "21" }
           # "full" profile: every flag on (tracing, rateLimit, audit, auth, k8s/helm) + an entity,
           # across frameworks and databases, so the code behind those options is actually compiled.
@@ -100,7 +100,7 @@ jobs:
           - { label: "rust-actix-full", language: "rust", framework: "actix", profile: "full" }
           - { label: "java-spring-full-mysql", language: "java", framework: "spring", profile: "full", database: "mysql", javaVersion: "21" }
           - { label: "java-quarkus-full", language: "java", framework: "quarkus", profile: "full", javaVersion: "21" }
-          - { label: "kotlin-ktor-full", language: "kotlin", framework: "ktor", profile: "full", javaVersion: "21" }
+          - { label: "kotlin-ktor-full", language: "kotlin", framework: "ktor", profile: "full", javaVersion: "21", runTests: true }
           - { label: "kotlin-spring-kt-full", language: "kotlin", framework: "spring-kt", profile: "full", javaVersion: "21" }
           # Self-issued auth (auth: none + auth_* patterns → HS256 JWT_SECRET) is a separate code path.
           - { label: "go-gin-full-selfauth", language: "go", framework: "gin", profile: "full", auth: "none" }
@@ -222,6 +222,8 @@ jobs:
           gradle --version | grep -E "^Gradle"
           if [ -x ./gradlew ]; then GRADLE=./gradlew; else GRADLE=gradle; fi
           $GRADLE compileKotlin -q 2>&1 | tee -a /tmp/smoke.log
+          # Ktor: generated tests must pass with no external services (in-memory DB, test-signed JWTs).
+          if [ "${{ matrix.combo.runTests }}" = "true" ]; then $GRADLE test 2>&1 | tee -a /tmp/smoke.log; fi
 
       - name: Setup Rust
         if: matrix.combo.language == 'rust'
