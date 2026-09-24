@@ -236,8 +236,9 @@ if __name__ == "__main__":
 `;
 }
 
-// Interceptors for the cross-cutting flags. They wrap unary-unary handlers
-// (every generated RPC is unary); other handler kinds pass through.
+// Interceptors for the cross-cutting flags. They wrap all four handler kinds:
+// the generated RPCs are unary, but user-added streaming methods must not
+// bypass rate limiting / audit / metrics.
 function pyGrpcInterceptors(o: PyGrpcObs): string {
   const has = (c: string) => o.interceptors.includes(c);
   const blocks: string[] = [];
@@ -252,11 +253,12 @@ class MetricsInterceptor(grpc.ServerInterceptor):
     def intercept_service(self, continuation, handler_call_details):
         method = handler_call_details.method
 
-        def around(behavior, request, context):
+        @contextmanager
+        def around(context):
             start = time.perf_counter()
             failed = False
             try:
-                return behavior(request, context)
+                yield
             except Exception:
                 failed = True
                 raise
@@ -292,10 +294,12 @@ class MetricsInterceptor(grpc.ServerInterceptor):
             return True
 
     def intercept_service(self, continuation, handler_call_details):
-        def around(behavior, request, context):
+        # ponytail: one hit per RPC (a stream counts once), not per message.
+        @contextmanager
+        def around(context):
             if not self._allow(_peer(context)):
                 context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "rate_limited")
-            return behavior(request, context)
+            yield
 
         return _wrap(continuation(handler_call_details), around)`);
   }
@@ -308,10 +312,11 @@ class MetricsInterceptor(grpc.ServerInterceptor):
     def intercept_service(self, continuation, handler_call_details):
         method = handler_call_details.method
 
-        def around(behavior, request, context):
+        @contextmanager
+        def around(context):
             failed = False
             try:
-                return behavior(request, context)
+                yield
             except Exception:
                 failed = True
                 raise
@@ -329,6 +334,7 @@ class MetricsInterceptor(grpc.ServerInterceptor):
     has("AuditInterceptor") ? "import logging" : "",
     has("RateLimitInterceptor") ? "import threading" : "",
     has("MetricsInterceptor") || has("RateLimitInterceptor") ? "import time" : "",
+    "from contextlib import contextmanager",
   ].filter(Boolean);
   const third = ["import grpc", has("MetricsInterceptor") ? "from prometheus_client import Counter, Histogram" : ""].filter(Boolean);
   const imports = [...std, ...(std.length ? [""] : []), ...third].join("\n");
@@ -337,11 +343,32 @@ ${imports}
 
 
 def _wrap(handler, around):
-    """Run around(behavior, request, context) in place of a unary-unary handler."""
-    if handler is None or handler.unary_unary is None:
-        return handler
-    inner = handler.unary_unary
-    return handler._replace(unary_unary=lambda request, context: around(inner, request, context))
+    """Run the handler inside the around(context) context manager, whatever its kind.
+
+    Response-streaming handlers are wrapped as generators so around() spans the
+    whole stream (final status, full latency), not just the call that creates it.
+    """
+    if handler is None:
+        return None
+
+    def unary(inner):
+        def call(request, context):
+            with around(context):
+                return inner(request, context)
+        return call
+
+    def streaming(inner):
+        def call(request, context):
+            with around(context):
+                yield from inner(request, context)
+        return call
+
+    return handler._replace(
+        unary_unary=handler.unary_unary and unary(handler.unary_unary),
+        stream_unary=handler.stream_unary and unary(handler.stream_unary),
+        unary_stream=handler.unary_stream and streaming(handler.unary_stream),
+        stream_stream=handler.stream_stream and streaming(handler.stream_stream),
+    )
 
 
 def _peer(context) -> str:

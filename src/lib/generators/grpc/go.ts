@@ -67,8 +67,9 @@ function goGrpcObservability(config: StackConfig): GoGrpcObs {
   };
 }
 
-// Unary interceptors for the cross-cutting flags. Streaming RPCs are not
-// intercepted — the generated services are all unary.
+// Unary + stream interceptors for the cross-cutting flags. The generated proto
+// is all unary; the stream variants cover RPCs users add later. Tracing needs
+// no interceptor: the otelgrpc stats handler already spans every RPC kind.
 function goGrpcInterceptors(config: StackConfig, o: GoGrpcObs): string {
   const parts: string[] = [];
   if (config.rateLimit || config.audit) {
@@ -88,14 +89,28 @@ func peerIP(ctx context.Context) string {
   if (config.rateLimit) {
     parts.push(`${GO_IP_LIMITER}
 
+// limiter is shared so unary calls and stream opens draw from one bucket per IP.
+var limiter = newIPLimiter()
+
 // RateLimit rejects RPCs with ResourceExhausted once a client IP exceeds its bucket.
 func RateLimit() grpc.UnaryServerInterceptor {
-\tl := newIPLimiter()
 \treturn func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-\t\tif !l.allow(peerIP(ctx)) {
+\t\tif !limiter.allow(peerIP(ctx)) {
 \t\t\treturn nil, status.Error(codes.ResourceExhausted, "rate_limited")
 \t\t}
 \t\treturn handler(ctx, req)
+\t}
+}
+
+// RateLimitStream is RateLimit for streaming RPCs.
+// ponytail: charges one token per stream open, not per message; wrap
+// grpc.ServerStream.RecvMsg if long-lived streams need per-message limits.
+func RateLimitStream() grpc.StreamServerInterceptor {
+\treturn func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+\t\tif !limiter.allow(peerIP(ss.Context())) {
+\t\t\treturn status.Error(codes.ResourceExhausted, "rate_limited")
+\t\t}
+\t\treturn handler(srv, ss)
 \t}
 }`);
   }
@@ -106,6 +121,15 @@ func Audit(log *slog.Logger) grpc.UnaryServerInterceptor {
 \t\tresp, err := handler(ctx, req)
 \t\tlog.Info("audit", "method", info.FullMethod, "code", status.Code(err).String(), "ip", peerIP(ctx))
 \t\treturn resp, err
+\t}
+}
+
+// AuditStream logs one line when a streaming RPC ends, with its final status.
+func AuditStream(log *slog.Logger) grpc.StreamServerInterceptor {
+\treturn func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+\t\terr := handler(srv, ss)
+\t\tlog.Info("audit", "method", info.FullMethod, "code", status.Code(err).String(), "ip", peerIP(ss.Context()))
+\t\treturn err
 \t}
 }`);
   }
@@ -131,6 +155,17 @@ func Metrics() grpc.UnaryServerInterceptor {
 \t\trpcSeconds.WithLabelValues(info.FullMethod).Observe(time.Since(start).Seconds())
 \t\treturn resp, err
 \t}
+}
+
+// MetricsStream is Metrics for streaming RPCs; latency is the stream's lifetime.
+func MetricsStream() grpc.StreamServerInterceptor {
+\treturn func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+\t\tstart := time.Now()
+\t\terr := handler(srv, ss)
+\t\trpcsHandled.WithLabelValues(info.FullMethod, status.Code(err).String()).Inc()
+\t\trpcSeconds.WithLabelValues(info.FullMethod).Observe(time.Since(start).Seconds())
+\t\treturn err
+\t}
 }`);
   }
   if (o.monitoring === "sentry") {
@@ -145,6 +180,19 @@ func SentryRecover() grpc.UnaryServerInterceptor {
 \t\t\t}
 \t\t}()
 \t\treturn handler(ctx, req)
+\t}
+}
+
+// SentryRecoverStream is SentryRecover for streaming RPCs.
+func SentryRecoverStream() grpc.StreamServerInterceptor {
+\treturn func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+\t\tdefer func() {
+\t\t\tif r := recover(); r != nil {
+\t\t\t\tsentry.CurrentHub().Recover(r)
+\t\t\t\terr = status.Error(codes.Internal, "internal error")
+\t\t\t}
+\t\t}()
+\t\treturn handler(srv, ss)
 \t}
 }`);
   }
@@ -179,9 +227,18 @@ function goGrpcMain(module: string, pkgPath: string, config: StackConfig, entiti
     config.rateLimit ? "grpcserver.RateLimit()" : "",
     config.audit ? "grpcserver.Audit(log)" : "",
   ].filter(Boolean);
+  // Same chain for streaming RPCs, so user-added stream methods are covered.
+  const stream = [
+    o.monitoring === "sentry" ? "grpcserver.SentryRecoverStream()" : "",
+    o.monitoring === "datadog" ? "grpctrace.StreamServerInterceptor(grpctrace.WithServiceName(cfg.AppName))" : "",
+    o.monitoring === "prometheus" ? "grpcserver.MetricsStream()" : "",
+    config.rateLimit ? "grpcserver.RateLimitStream()" : "",
+    config.audit ? "grpcserver.AuditStream(log)" : "",
+  ].filter(Boolean);
   const opts = [
     o.tracing ? "\t\tgrpc.StatsHandler(otelgrpc.NewServerHandler()), // one span per RPC" : "",
     unary.length ? `\t\tgrpc.ChainUnaryInterceptor(\n${unary.map((u) => `\t\t\t${u},`).join("\n")}\n\t\t),` : "",
+    stream.length ? `\t\tgrpc.ChainStreamInterceptor(\n${stream.map((u) => `\t\t\t${u},`).join("\n")}\n\t\t),` : "",
   ].filter(Boolean);
   const newServer = opts.length ? `grpc.NewServer(\n${opts.join("\n")}\n\t)` : "grpc.NewServer()";
 

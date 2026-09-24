@@ -222,7 +222,9 @@ ${prom ? "    metricsServer.close();\n" : ""}    server.tryShutdown((err) => {
 `;
 }
 
-// Server interceptors for the cross-cutting flags (grpc-js >= 1.10).
+// Server interceptors for the cross-cutting flags (grpc-js >= 1.10). grpc-js
+// runs these for every call kind (unary, client/server/bidi streaming), so
+// user-added streaming methods are covered without per-handler wrapping.
 function tsGrpcInterceptors(config: StackConfig, prom: boolean): string {
   const blocks: string[] = [];
   const names: string[] = [];

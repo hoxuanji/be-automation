@@ -41,8 +41,8 @@
   },
   {
     "path": "cmd/api/main.go",
-    "lines": 108,
-    "size": 3100
+    "lines": 113,
+    "size": 3232
   },
   {
     "path": "cmd/migrate/main.go",
@@ -136,8 +136,8 @@
   },
   {
     "path": "internal/grpcserver/interceptors.go",
-    "lines": 106,
-    "size": 3276
+    "lines": 140,
+    "size": 4757
   },
   {
     "path": "internal/grpcserver/post_service.go",

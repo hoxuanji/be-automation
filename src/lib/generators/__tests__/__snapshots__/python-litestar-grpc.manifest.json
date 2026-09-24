@@ -41,8 +41,8 @@
   },
   {
     "path": "app/interceptors.py",
-    "lines": 112,
-    "size": 3857
+    "lines": 138,
+    "size": 4584
   },
   {
     "path": "app/main.py",

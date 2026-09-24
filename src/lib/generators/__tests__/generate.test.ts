@@ -791,4 +791,28 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     const off = gen({ language: "python", framework: "fastapi", api: "grpc", ...OFF }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
     assert.ok(!off.get("app/interceptors.py") && !off.get("app/tracing.py"));
   });
+
+  // The generated proto is all unary, but interceptors exist to protect
+  // user-added RPCs too: a streaming method must not bypass rate limit / audit / metrics.
+  it("gRPC servers apply the cross-cutting interceptors to streaming RPCs as well as unary", () => {
+    const go = gen({ api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const main = go.get("cmd/api/main.go")!;
+    assert.match(main, /grpc\.ChainStreamInterceptor\([\s\S]*grpcserver\.MetricsStream\(\)[\s\S]*grpcserver\.RateLimitStream\(\)[\s\S]*grpcserver\.AuditStream\(log\)/);
+    const ic = go.get("internal/grpcserver/interceptors.go")!;
+    assert.match(ic, /var limiter = newIPLimiter\(\)/, "unary and stream share one bucket per IP, else streams double a client's budget");
+    assert.equal((ic.match(/limiter\.allow\(/g) ?? []).length, 2);
+    const sentry = gen({ api: "grpc", monitoring: "sentry" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("cmd/api/main.go")!;
+    assert.match(sentry, /ChainStreamInterceptor\(\s*grpcserver\.SentryRecoverStream\(\)/, "a panicking stream must not crash the process");
+    const dd = gen({ api: "grpc", monitoring: "datadog" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("cmd/api/main.go")!;
+    assert.match(dd, /grpctrace\.StreamServerInterceptor\(/);
+    assert.ok(!gen({ api: "grpc", ...OFF }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("cmd/api/main.go")!.includes("ChainStreamInterceptor"));
+
+    // Python: every handler kind is wrapped; response streams as generators so
+    // audit/metrics see the final status instead of firing when the generator is created.
+    const py = gen({ language: "python", framework: "fastapi", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("app/interceptors.py")!;
+    for (const kind of ["unary_unary", "stream_unary", "unary_stream", "stream_stream"]) {
+      assert.match(py, new RegExp(`${kind}=handler\\.${kind} and `), `${kind} handlers must be intercepted`);
+    }
+    assert.match(py, /with around\(context\):\n\s+yield from inner\(request, context\)/);
+  });
 });
