@@ -289,7 +289,9 @@ jobs:
           grep -E '\.go:[0-9]+:[0-9]+:|^error(\[E[0-9]+\])?:|^ *--> |error TS[0-9]+|\[ERROR\] .*\.(java|kt)|COMPILATION ERROR|^e: |What went wrong|undefined name|missing go.sum|Could not resolve|Cannot resolve|CMake Error|failed to run custom build command|Tests run:.*Failures: [1-9]|Caused by: ' /tmp/smoke.clean.log 2>/dev/null \
             | grep -vE '^\s*(Compiling|Checking|Downloaded|Downloading)' | head -30 | while IFS= read -r l; do echo "::error::$l"; done
           # Cargo build-script failures print the real cause under "--- stderr".
-          grep -A25 -- '--- stderr' /tmp/smoke.clean.log 2>/dev/null | grep -vE '^\s*$' | head -25 | while IFS= read -r l; do echo "::error::$l"; done
+          grep -A400 -- '--- stderr' /tmp/smoke.clean.log 2>/dev/null \
+            | grep -iE 'error|fatal|could not find|not found|no such file|undefined reference' | grep -viE 'deprecation' \
+            | head -25 | while IFS= read -r l; do echo "::error::$l"; done
           find /tmp/smoke-repo \( -path '*test-results*' -o -path '*surefire-reports*' \) -name '*.xml' 2>/dev/null \
             | xargs -r grep -hoE '<testcase [^>]*name="[^"]*"|<(failure|error) [^>]*message="[^"]{0,300}' | grep -B1 -E '<(failure|error)' | head -20 \
             | while IFS= read -r l; do echo "::error::$l"; done
