@@ -5,6 +5,7 @@ import { goGraphqlFiles } from "./graphql/go";
 import { isGraphqlSupported } from "./types";
 import { authProviderSpec } from "./auth/providers";
 import { goApiHandlersFile, goHandlerMethodName } from "./patterns/go";
+import { goQueueConfigField, goQueueFiles, goQueueKind, type GoQueueKind } from "./queue/go";
 
 export function goFiles(
   config: StackConfig,
@@ -33,7 +34,7 @@ export function goFiles(
   if (config.api === "graphql" && isGraphqlSupported(config.language)) {
     const rest = goFiles({ ...config, api: "rest" }, [], [])
       .filter((f) => f.path !== "go.mod")
-      .map((f) => (f.path === "Dockerfile" ? { ...f, content: goDockerfile("graphql") } : f));
+      .map((f) => (f.path === "Dockerfile" ? { ...f, content: goDockerfile("graphql", !!goQueueKind(config.queue)) } : f));
     const files = goGraphqlFiles(config, entities, rest);
     // gqlgen's generated code (graph/generated.go, not in the zip) imports gqlparser.
     files.push({ path: "go.mod", content: goMod(module, files, [...migrate, "github.com/vektah/gqlparser/v2"]) });
@@ -59,11 +60,12 @@ export function goFiles(
     : /datadog/.test(config.monitoring) ? "datadog"
     : "none";
 
-  const deps: GoDeps = { fw, kind, isSQL, needsGorm, docStore, withRedis, withTracing, monitoring, api };
+  const queue = goQueueKind(config.queue);
+  const deps: GoDeps = { fw, kind, isSQL, needsGorm, docStore, withRedis, withTracing, monitoring, api, queue };
 
-  files.push({ path: "Dockerfile", content: goDockerfile(config.api) });
+  files.push({ path: "Dockerfile", content: goDockerfile(config.api, !!queue) });
   files.push({ path: "cmd/api/main.go", content: goMain(module) });
-  files.push({ path: "internal/config/config.go", content: goConfig(kind === "mongo") });
+  files.push({ path: "internal/config/config.go", content: goConfig(kind === "mongo", goQueueConfigField(queue)) });
   files.push({ path: "internal/server/server.go", content: goServer(module, config, endpoints, entities, deps) });
   files.push({ path: "internal/server/middleware.go", content: goMiddleware(config, module, withAuth) });
   files.push({ path: "internal/server/health.go", content: goHealth(fw) });
@@ -117,6 +119,7 @@ export function goFiles(
   if (withRedis) {
     files.push({ path: "internal/cache/redis.go", content: goRedis() });
   }
+  if (queue) files.push(...goQueueFiles(module, queue));
 
   if (monitoring === "prometheus") {
     files.push({ path: "internal/monitoring/metrics.go", content: goPrometheusMetrics(fw) });
@@ -159,7 +162,8 @@ type GoDeps = {
   withRedis: boolean;
   withTracing: boolean;
   monitoring: GoMonitoring;
-  api: { usesDb: boolean; usesRdb: boolean } | null;
+  api: { usesDb: boolean; usesRdb: boolean; usesMq: boolean } | null;
+  queue: GoQueueKind | null;
 };
 
 export function goDbKind(database: string): GoDbKind {
@@ -1727,6 +1731,9 @@ ${mysql ? `\tdsn, err := MySQLDSN(dsn)
 // exactly the modules the emitted code imports (see goMod).
 const GO_MODULE_VERSIONS: [string, string][] = [
   ["github.com/99designs/gqlgen", "v0.17.55"],
+  ["github.com/aws/aws-sdk-go-v2", "v1.32.2"],
+  ["github.com/aws/aws-sdk-go-v2/config", "v1.28.0"],
+  ["github.com/aws/aws-sdk-go-v2/service/sqs", "v1.36.2"],
   ["github.com/caarlos0/env/v11", "v11.2.2"],
   ["github.com/gin-gonic/gin", "v1.10.0"],
   ["github.com/go-chi/chi/v5", "v5.1.0"],
@@ -1739,8 +1746,11 @@ const GO_MODULE_VERSIONS: [string, string][] = [
   ["github.com/jackc/pgx/v5", "v5.7.1"],
   ["github.com/labstack/echo/v4", "v4.12.0"],
   ["github.com/lestrrat-go/jwx/v2", "v2.1.1"],
+  ["github.com/nats-io/nats.go", "v1.37.0"],
   ["github.com/prometheus/client_golang", "v1.20.4"],
+  ["github.com/rabbitmq/amqp091-go", "v1.10.0"],
   ["github.com/redis/go-redis/v9", "v9.7.0"],
+  ["github.com/segmentio/kafka-go", "v0.4.47"],
   ["github.com/vektah/gqlparser/v2", "v2.5.20"],
   ["go.mongodb.org/mongo-driver", "v1.17.1"],
   ["go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin", "v0.56.0"],
@@ -1885,7 +1895,7 @@ function buildGORMTags(f: { type: FieldType; primaryKey?: boolean; unique: boole
 
 // gRPC and GraphQL code (gen/go, graph/generated.go) isn't shipped in the zip, so the
 // image build must generate it before `go build` — same as `make proto` / `make gql`.
-function goDockerfile(api: StackConfig["api"] = "rest") {
+function goDockerfile(api: StackConfig["api"] = "rest", worker = false) {
   const codegen =
     api === "grpc"
       ? "COPY --from=bufbuild/buf:1.47.2 /usr/local/bin/buf /usr/local/bin/buf\nRUN buf generate\n"
@@ -1899,10 +1909,11 @@ COPY go.mod ./
 RUN go mod download
 COPY . .
 ${codegen}RUN CGO_ENABLED=0 GOFLAGS=-mod=mod go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
-
+${worker ? `RUN CGO_ENABLED=0 GOFLAGS=-mod=mod go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
+` : ""}
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/api /api
-USER nonroot:nonroot
+${worker ? "# Queue consumer: run the same image with `entrypoint: [\"/worker\"]`.\nCOPY --from=build /out/worker /worker\n" : ""}USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/api"]
 `;
@@ -1954,7 +1965,7 @@ func main() {
 `;
 }
 
-export function goConfig(withMongo = false) {
+export function goConfig(withMongo = false, queueField = "") {
   return `package config
 
 import env "github.com/caarlos0/env/v11"
@@ -1967,7 +1978,7 @@ type Config struct {
 \tDatabaseURL string \`env:"DATABASE_URL"\`
 ${withMongo ? "\tMongoURI    string `env:\"MONGODB_URI\"`\n" : ""}\tRedisURL    string \`env:"REDIS_URL"\`
 \tJWTSecret   string \`env:"JWT_SECRET"\`
-}
+${queueField ? `\n${queueField}` : ""}}
 
 func Load() (*Config, error) {
 \tc := &Config{}
@@ -2109,6 +2120,13 @@ function goServerDeps(config: StackConfig, entities: Entity[], d: GoDeps): strin
 \t\tcacheErr := err
 \t\ts.checks["cache"] = func(context.Context) error { return cacheErr }
 \t}`);
+  if (d.queue) out.push(`\tq, err := queue.Open(context.Background(), cfg)
+\tif err != nil {
+\t\tlog.Error("queue", "err", err)
+\t\tos.Exit(1)
+\t}
+\ts.checks["queue"] = q.Ping
+\ts.closers = append(s.closers, func(context.Context) error { return q.Close() })`);
   void entities;
   return out.join("\n");
 }
@@ -2155,6 +2173,7 @@ function goServer(module: string, config: StackConfig, endpoints: Endpoint[], en
   const apiArgs = ["log"];
   if (d.api?.usesDb) apiArgs.push(d.needsGorm ? "gormDB" : "nil");
   if (d.api?.usesRdb) apiArgs.push(d.withRedis ? "rdb" : "nil");
+  if (d.api?.usesMq) apiArgs.push(d.queue ? "q" : "nil");
   const apiHSetup = hasPatterns ? `\tapiH := handlers.NewAPIHandlers(${apiArgs.join(", ")})\n` : "";
 
   const mws = ["recoverer(log)"];
@@ -2228,6 +2247,7 @@ ${goImports(code, [["context", "context"], ["json", "encoding/json"], ["errors",
     ["db", `${module}/internal/db`],
     ["handlers", `${module}/internal/handlers`],
     ["monitoring", `${module}/internal/monitoring`],
+    ["queue", `${module}/internal/queue`],
     ["tracing", `${module}/internal/tracing`],
   ])}
 

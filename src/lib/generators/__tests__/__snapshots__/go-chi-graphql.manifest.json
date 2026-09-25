@@ -40,6 +40,11 @@
     "size": 2170
   },
   {
+    "path": "cmd/worker/main.go",
+    "lines": 67,
+    "size": 1754
+  },
+  {
     "path": "DEPLOY.md",
     "lines": 79,
     "size": 2387
@@ -106,13 +111,13 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 15,
-    "size": 384
+    "lines": 18,
+    "size": 590
   },
   {
     "path": "go.mod",
-    "lines": 21,
-    "size": 644
+    "lines": 22,
+    "size": 684
   },
   {
     "path": "gqlgen.yml",
@@ -151,8 +156,8 @@
   },
   {
     "path": "internal/config/config.go",
-    "lines": 22,
-    "size": 476
+    "lines": 24,
+    "size": 518
   },
   {
     "path": "internal/db/sql.go",
@@ -163,6 +168,11 @@
     "path": "internal/monitoring/metrics.go",
     "lines": 13,
     "size": 344
+  },
+  {
+    "path": "internal/queue/queue.go",
+    "lines": 119,
+    "size": 3201
   },
   {
     "path": "internal/server/graphql.go",
@@ -191,8 +201,8 @@
   },
   {
     "path": "internal/server/server.go",
-    "lines": 94,
-    "size": 2718
+    "lines": 102,
+    "size": 2994
   },
   {
     "path": "internal/tracing/tracing.go",
