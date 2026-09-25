@@ -21,20 +21,24 @@ const languageMeta: Record<
 };
 
 // Languages whose generators wire tracing (OTLP), rate limiting and the
-// selected monitoring SDK into the app. Rust/Java/Kotlin only get what their
-// own generators emit (Prometheus metrics for `grafana`), so the README must
-// not claim more for them.
-const hasAppObservability = (l: StackConfig["language"]) => l === "go" || l === "typescript" || l === "python";
+// selected monitoring SDK into the app. Java only gets what java.ts emits
+// (Prometheus metrics for `grafana`), so the README must not claim more for it.
+const hasAppObservability = (l: StackConfig["language"]) =>
+  l === "go" || l === "typescript" || l === "python" || l === "rust" || l === "kotlin";
 
 // Whether the app exports OTLP traces. Go also turns tracing on when OTel is the
 // monitoring choice (go.ts: withTracing).
 const emitsOtel = (c: StackConfig) =>
-  hasAppObservability(c.language) && (c.tracing || (c.language === "go" && c.monitoring === "otel"));
+  hasAppObservability(c.language) &&
+  (c.tracing ||
+    (c.language === "go" && c.monitoring === "otel") ||
+    // rust.ts turns tracing on for otel, and ships Datadog traces over OTLP to the agent.
+    (c.language === "rust" && (c.monitoring === "otel" || c.monitoring === "datadog")));
 
-// Only the Go HTTP server implements /health?ready=1 (dependency pings); every
-// other stack answers readiness with plain /health.
+// REST servers ping their dependencies (DB, cache, queue) on /health?ready=1; gRPC/GraphQL
+// trees and Java answer readiness with plain /health.
 const readyPath = (c: StackConfig) =>
-  c.language === "go" && c.api !== "grpc" && c.api !== "graphql" ? "/health?ready=1" : "/health";
+  c.api === "rest" && c.language !== "java" ? "/health?ready=1" : "/health";
 
 // Self-managed auth (no provider): pattern login/register endpoints sign JWTs with JWT_SECRET.
 const selfIssuesJwt = (c: StackConfig, endpoints: Endpoint[]) =>
@@ -391,7 +395,11 @@ function observabilityClaims(config: StackConfig): string[] {
       }
       break;
     case "datadog":
-      out.push(full
+      out.push(lang === "rust"
+        ? "- Datadog: traces are exported via OTLP to the Datadog Agent; agent setup in `SETUP_MONITORING.md`."
+        : lang === "kotlin"
+        ? "- Datadog: metrics are shipped via Micrometer's Datadog registry (no traces); agent setup in `SETUP_MONITORING.md`."
+        : full
         ? "- Datadog tracer initialised at startup; agent setup in `SETUP_MONITORING.md`."
         : "- Datadog: agent config and setup steps in `SETUP_MONITORING.md` — the tracer is not wired into the code yet.");
       break;
@@ -415,7 +423,7 @@ function observabilityClaims(config: StackConfig): string[] {
   if (config.rateLimit) {
     out.push(full ? "- Per-client rate limiting is enabled." : `- Rate limiting: not generated for ${langEmoji[lang]} yet.`);
   }
-  if (config.audit && (lang === "go" || lang === "typescript")) {
+  if (config.audit && lang !== "java") {
     out.push("- Audit logs are emitted for every mutating request.");
   }
   return out.length > 0 ? out : ["- No monitoring provider selected."];

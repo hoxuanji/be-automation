@@ -487,14 +487,18 @@ describe("Stack-option wiring", () => {
   });
 
   it("README only claims tracing/rate limiting where the language implements it", () => {
-    for (const [language, framework] of [["rust", "axum"], ["java", "quarkus"], ["kotlin", "ktor"]]) {
-      const readme = gen({ language, framework }).get("README.md")!;
-      assert.ok(!readme.includes("traces are exported via OTLP"), `${language} README over-claims tracing`);
-      assert.ok(!readme.includes("rate limiting is enabled"), `${language} README over-claims rate limiting`);
+    // Java doesn't wire tracing / rate limiting (java.ts), so its README must not claim them.
+    const java = gen({ language: "java", framework: "quarkus" });
+    assert.ok(!java.get("README.md")!.includes("traces are exported via OTLP"), "java README over-claims tracing");
+    assert.ok(!java.get("README.md")!.includes("rate limiting is enabled"), "java README over-claims rate limiting");
+    assert.ok(!java.get(".env.example")!.includes("OTEL_EXPORTER_OTLP_ENDPOINT"));
+    // Every other language implements both, so the README says so and .env.example documents the endpoint.
+    for (const [language, framework] of [["go", "gin"], ["typescript", "express"], ["python", "fastapi"], ["rust", "axum"], ["kotlin", "ktor"]]) {
+      const g = gen({ language, framework });
+      assert.ok(g.get("README.md")!.includes("traces are exported via OTLP"), `${language} README should claim tracing`);
+      assert.ok(g.get("README.md")!.includes("rate limiting is enabled"), `${language} README should claim rate limiting`);
+      assert.ok(g.get(".env.example")!.includes("OTEL_EXPORTER_OTLP_ENDPOINT="), `${language}: OTEL endpoint documented`);
     }
-    assert.ok(gen({}).get("README.md")!.includes("traces are exported via OTLP"));
-    assert.ok(gen({}).get(".env.example")!.includes("OTEL_EXPORTER_OTLP_ENDPOINT="));
-    assert.ok(!gen({ language: "rust", framework: "axum" }).get(".env.example")!.includes("OTEL_EXPORTER_OTLP_ENDPOINT"));
   });
 
   it("otel monitoring ships a collector the api exports to", () => {
@@ -1660,5 +1664,25 @@ describe("Every deployment target gets a real CI deploy job", () => {
     const deps = gen({ language: "python", framework: "fastapi", queue: "bullmq", cache: "redis" }).get("pyproject.toml")!;
     assert.match(deps, /^redis = "\^7\.4\.1"$/m);
     assert.match(gen({ language: "python", framework: "fastapi", queue: "kafka", cache: "redis" }).get("pyproject.toml")!, /^redis = "\^5\.2\.0"$/m);
+  });
+  // A queue is only useful if something consumes it: docker compose must run the worker
+  // each language generates, from the api image with the api's env — and no worker without one.
+  it("docker compose runs the generated queue worker next to the api", () => {
+    const cases: [string, string, RegExp][] = [
+      ["go", "gin", /entrypoint: \["\/worker"\]/],
+      ["typescript", "express", /command: \["node", "dist\/worker\.js"\]/],
+      ["python", "fastapi", /command: \["python", "-m", "app\.worker"\]/],
+      ["rust", "axum", /entrypoint: \["\/worker"\]/],
+      ["kotlin", "ktor", /entrypoint: \["java", "-cp", "app\.jar", "WorkerKt"\]/],
+    ];
+    for (const [language, framework, start] of cases) {
+      const compose = gen({ language, framework, queue: "kafka" }).get("docker-compose.yml")!;
+      const worker = compose.match(/^  worker:\n[\s\S]*?^    restart: unless-stopped$/m)?.[0];
+      assert.ok(worker, `${language}: compose has a worker service`);
+      assert.match(worker!, start, `${language}: worker starts the generated consumer`);
+      assert.match(worker!, /KAFKA_BROKERS: "kafka:29092"/, `${language}: worker gets the broker address`);
+      assert.doesNotMatch(worker!, /ports:/, `${language}: worker publishes no ports`);
+    }
+    assert.doesNotMatch(gen({ language: "go", framework: "gin", api: "grpc", queue: "kafka" }).get("docker-compose.yml")!, /^  worker:/m);
   });
 });

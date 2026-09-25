@@ -161,8 +161,8 @@
   },
   {
     "path": "docker-compose.yml",
-    "lines": 60,
-    "size": 1439
+    "lines": 77,
+    "size": 1876
   },
   {
     "path": "Dockerfile",
@@ -201,8 +201,8 @@
   },
   {
     "path": "README.md",
-    "lines": 64,
-    "size": 2159
+    "lines": 65,
+    "size": 2212
   },
   {
     "path": "sdk/test_app_client.py",

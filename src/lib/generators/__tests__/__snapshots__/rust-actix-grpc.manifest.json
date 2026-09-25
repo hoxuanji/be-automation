@@ -6,8 +6,8 @@
   },
   {
     "path": ".env.example",
-    "lines": 37,
-    "size": 1977
+    "lines": 43,
+    "size": 2284
   },
   {
     "path": ".github/workflows/ci.yml",
@@ -91,8 +91,8 @@
   },
   {
     "path": "deploy/k8s/secrets.example.env",
-    "lines": 20,
-    "size": 442
+    "lines": 22,
+    "size": 490
   },
   {
     "path": "deploy/k8s/service.yaml",
@@ -101,8 +101,8 @@
   },
   {
     "path": "docker-compose.yml",
-    "lines": 60,
-    "size": 1439
+    "lines": 77,
+    "size": 1860
   },
   {
     "path": "Dockerfile",
@@ -121,13 +121,13 @@
   },
   {
     "path": "QUICKSTART.md",
-    "lines": 104,
-    "size": 2352
+    "lines": 106,
+    "size": 2529
   },
   {
     "path": "README.md",
-    "lines": 63,
-    "size": 2171
+    "lines": 64,
+    "size": 2258
   },
   {
     "path": "sdk/test_app_client.py",

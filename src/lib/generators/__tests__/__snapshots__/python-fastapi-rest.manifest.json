@@ -127,7 +127,7 @@
   {
     "path": "deploy/helm/templates/deployment.yaml",
     "lines": 28,
-    "size": 702
+    "size": 710
   },
   {
     "path": "deploy/helm/templates/hpa.yaml",
@@ -147,7 +147,7 @@
   {
     "path": "deploy/k8s/deployment.yaml",
     "lines": 63,
-    "size": 2039
+    "size": 2047
   },
   {
     "path": "deploy/k8s/hpa.yaml",
@@ -176,8 +176,8 @@
   },
   {
     "path": "docker-compose.yml",
-    "lines": 60,
-    "size": 1439
+    "lines": 77,
+    "size": 1876
   },
   {
     "path": "Dockerfile",
@@ -211,8 +211,8 @@
   },
   {
     "path": "README.md",
-    "lines": 59,
-    "size": 1961
+    "lines": 60,
+    "size": 2014
   },
   {
     "path": "sdk/test_app_client.py",

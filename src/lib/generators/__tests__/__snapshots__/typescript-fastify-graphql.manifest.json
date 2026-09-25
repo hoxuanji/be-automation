@@ -96,8 +96,8 @@
   },
   {
     "path": "docker-compose.yml",
-    "lines": 60,
-    "size": 1439
+    "lines": 77,
+    "size": 1872
   },
   {
     "path": "Dockerfile",

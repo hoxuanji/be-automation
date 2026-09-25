@@ -83,9 +83,35 @@ export function generate(
   // Contract tests — one test file per endpoint, covering status codes + content-type.
   files.push(...contractTestFiles(config, endpoints, entities));
 
+  addComposeWorker(files);
+
   // Stable sort for deterministic zip contents
   files.sort((a, b) => a.path.localeCompare(b.path));
   return files;
+}
+
+// Queue consumers each language emits, and how to start one from the api image.
+// Keyed on the generated file so the worker service exists exactly when a worker does.
+const WORKER_ENTRY: Record<string, string> = {
+  "cmd/worker/main.go": `entrypoint: ["/worker"]`,
+  "src/worker.ts": `command: ["node", "dist/worker.js"]`,
+  "app/worker.py": `command: ["python", "-m", "app.worker"]`,
+  "src/bin/worker.rs": `entrypoint: ["/worker"]`,
+  "src/main/kotlin/Worker.kt": `entrypoint: ["java", "-cp", "app.jar", "WorkerKt"]`,
+};
+
+// docker compose runs the queue consumer next to the api: same image, env and dependencies, no ports.
+function addComposeWorker(files: GeneratedFile[]): void {
+  const compose = files.find((f) => f.path === "docker-compose.yml");
+  const start = files.map((f) => WORKER_ENTRY[f.path]).find(Boolean);
+  if (!compose || !start) return;
+  const api = compose.content.match(/^  api:\n[\s\S]*?^    restart: unless-stopped$/m);
+  if (!api) throw new Error("docker-compose.yml: api service not found"); // fail loudly, never ship a half-wired compose
+  const worker = api[0]
+    .replace(/^  api:$/m, "  worker:")
+    .replace(/^    ports:\n(?:^      - .*\n)+/m, "")
+    .replace(/^    build: \.$/m, `    build: .\n    ${start}`);
+  compose.content = compose.content.replace(api[0], `${api[0]}\n\n${worker}`);
 }
 
 export type { GeneratedFile } from "./types";
