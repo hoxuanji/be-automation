@@ -2,6 +2,10 @@ import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConf
 import { toPascal, toSnake, toKebab, toCamel } from "./types";
 import { needsAuth } from "./auth/providers";
 import { springPath, methodAnnotation, handlerMethodName } from "./java";
+import {
+  ktInfra, type KtInfra, ktorInfraDeps, ktorWorkerTask, ktorModuleParams, ktorModuleInstalls, ktorModuleTail, ktorHealthRoute,
+  ktorInfraFiles, ktorTestFakes, springKtInfraDeps, springKtInfraProps, springKtInfraTestProps, springKtInfraFiles, springKtInfraTestFiles,
+} from "./kotlin-infra";
 
 const isMysql = (db: string) => /mysql|planetscale/.test(db);
 
@@ -36,22 +40,24 @@ function ktorFiles(
   const withAuth = needsAuth(config, endpoints.some((e) => e.auth));
   const mysql = isMysql(config.database);
   const metrics = config.monitoring === "grafana";
+  const infra = ktInfra(config);
 
-  files.push({ path: "build.gradle.kts", content: ktorBuildGradle(safe, withAuth, mysql, metrics) });
+  files.push({ path: "build.gradle.kts", content: ktorBuildGradle(safe, withAuth, mysql, metrics, infra) });
   files.push({ path: "settings.gradle.kts", content: `rootProject.name = "${safe}"\n` });
   files.push({ path: "Dockerfile", content: ktorDockerfile() });
   files.push({
     path: "src/main/kotlin/Application.kt",
-    content: ktorApplication(entities, stubEndpoints(endpoints, entities), withAuth, metrics),
+    content: ktorApplication(entities, stubEndpoints(endpoints, entities), withAuth, metrics, infra),
   });
+  files.push(...ktorInfraFiles(infra, safe, withAuth));
   files.push({ path: "src/main/kotlin/Database.kt", content: ktorDatabase(safe, entities, mysql) });
   if (withAuth) {
     files.push({ path: "src/main/kotlin/Auth.kt", content: ktorAuth() });
   }
-  files.push({ path: "src/test/kotlin/TestSupport.kt", content: ktorTestSupport(withAuth, mysql) });
+  files.push({ path: "src/test/kotlin/TestSupport.kt", content: ktorTestSupport(withAuth, mysql, infra) });
   files.push({
     path: "src/test/kotlin/ApplicationTest.kt",
-    content: ktorApplicationTest(entities, stubEndpoints(endpoints, entities), withAuth),
+    content: ktorApplicationTest(entities, stubEndpoints(endpoints, entities), withAuth, infra),
   });
 
   for (const entity of entities) {
@@ -61,7 +67,7 @@ function ktorFiles(
     });
     files.push({
       path: `src/main/kotlin/routes/${toSnake(entity.name)}Routes.kt`,
-      content: ktorRoutes(entity),
+      content: ktorRoutes(entity, infra),
     });
     files.push({
       path: `src/test/kotlin/${toPascal(entity.name)}RouteTest.kt`,
@@ -74,7 +80,7 @@ function ktorFiles(
 
 // ─── build.gradle.kts ────────────────────────────────────────────────────────
 
-function ktorBuildGradle(safeName: string, withAuth = false, mysql = false, metrics = false): string {
+function ktorBuildGradle(safeName: string, withAuth: boolean, mysql: boolean, metrics: boolean, infra: KtInfra): string {
   void safeName;
   const authDeps = withAuth
     ? `    // JWT verification against the provider's JWKS (see Auth.kt).
@@ -116,12 +122,12 @@ dependencies {
     implementation("${mysql ? "com.mysql:mysql-connector-j:8.4.0" : "org.postgresql:postgresql:42.7.4"}")
     implementation("com.zaxxer:HikariCP:5.1.0")
     implementation("ch.qos.logback:logback-classic:1.5.8")
-${authDeps}${metricsDeps}    testImplementation("io.ktor:ktor-server-test-host:\$ktor_version")
+${authDeps}${metricsDeps}${ktorInfraDeps(infra)}    testImplementation("io.ktor:ktor-server-test-host:\$ktor_version")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.0.21")
     // In-memory stand-in for Postgres/MySQL so \`gradle test\` needs no services (see TestSupport.kt).
     testImplementation("com.h2database:h2:2.3.232")
 }
-`;
+${ktorWorkerTask(infra)}`;
 }
 
 // ─── Dockerfile ──────────────────────────────────────────────────────────────
@@ -147,12 +153,13 @@ ENTRYPOINT ["java", "-jar", "app.jar"]
 
 // ─── Application.kt ──────────────────────────────────────────────────────────
 
-function ktorApplication(entities: Entity[], stubs: Endpoint[], withAuth: boolean, metrics: boolean): string {
+function ktorApplication(entities: Entity[], stubs: Endpoint[], withAuth: boolean, metrics: boolean, infra: KtInfra): string {
   const stub = (e: Endpoint, indent: string) => {
     const fn = ["get", "post", "put", "patch", "delete"].includes(e.method.toLowerCase()) ? e.method.toLowerCase() : "get";
     return `${indent}${fn}(${JSON.stringify(springPath(e.path))}) { call.respond(mapOf("op" to "${e.method} ${e.path}")) }`;
   };
-  const entityCalls = (indent: string) => entities.map((e) => `${indent}${toCamel(e.name)}Routes()`);
+  const routeArgs = [infra.redis && "cache", infra.queue && "queue"].filter(Boolean).join(", ");
+  const entityCalls = (indent: string) => entities.map((e) => `${indent}${toCamel(e.name)}Routes(${routeArgs})`);
 
   const lines: string[] = [];
   lines.push(...stubs.filter((e) => !(withAuth && e.auth)).map((e) => stub(e, "        ")));
@@ -176,11 +183,15 @@ function ktorApplication(entities: Entity[], stubs: Endpoint[], withAuth: boolea
     metrics ? "import io.ktor.server.metrics.micrometer.*\nimport io.micrometer.prometheus.PrometheusConfig\nimport io.micrometer.prometheus.PrometheusMeterRegistry" : "",
   ].filter(Boolean).map((l) => l + "\n").join("");
   const installs = [
+    ...ktorModuleInstalls(infra),
     withAuth ? "    configureAuth(jwtVerifier)" : "",
     metrics ? "    install(MicrometerMetrics) { registry = appMicrometerRegistry }" : "",
   ].filter(Boolean).map((l) => l + "\n").join("");
 
-  return `${withAuth ? "import com.auth0.jwt.interfaces.JWTVerifier\n" : ""}import io.ktor.serialization.kotlinx.json.*
+  const params = [withAuth && "jwtVerifier: JWTVerifier? = null", ...ktorModuleParams(infra)].filter(Boolean).join(", ");
+  const tail = ktorModuleTail(infra);
+  return `${withAuth ? "import com.auth0.jwt.interfaces.JWTVerifier\n" : ""}import io.ktor.http.*
+import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
@@ -196,14 +207,14 @@ fun main() {
 }
 
 // Plugins + routing live here so tests can load them via testApplication { application { module() } }.
-${withAuth ? "// jwtVerifier = null verifies against the provider's JWKS (env); tests pass a local-key verifier.\nfun Application.module(jwtVerifier: JWTVerifier? = null) {" : "fun Application.module() {"}
+${withAuth ? "// jwtVerifier = null verifies against the provider's JWKS (env); tests pass a local-key verifier.\n" : ""}${infra.redis || infra.queue ? "// cache / queue default to the real clients (env); tests pass in-memory fakes (TestSupport.kt).\n" : ""}fun Application.module(${params}) {
     install(ContentNegotiation) {
         json(Json { ignoreUnknownKeys = true; coerceInputValues = true })
     }
 ${installs}    routing {
-        get("/health") { call.respond(mapOf("ok" to true)) }${routeCallsBlock}
+${ktorHealthRoute(infra)}${routeCallsBlock}
     }
-}
+${tail ? tail + "\n" : ""}}
 `;
 }
 
@@ -253,6 +264,9 @@ fun initDatabase() {
     }
     throw IllegalStateException("db: could not connect after retries", lastErr)
 }
+
+/** Readiness check: the database answers a trivial query. */
+fun dbReady(): Boolean = runCatching { transaction { exec("SELECT 1") } }.isSuccess
 
 /** Creates missing tables on the current connection. Shared with tests (TestSupport.kt). */
 fun createSchema() {
@@ -455,7 +469,7 @@ ${rowExtractLines},
 
 // ─── routes/{snake}Routes.kt ──────────────────────────────────────────────────
 
-function ktorRoutes(entity: Entity): string {
+function ktorRoutes(entity: Entity, infra: KtInfra): string {
   const pascal = toPascal(entity.name);
   const camelFn = toCamel(entity.name);
   const kebab = toKebab(entity.name);
@@ -494,17 +508,41 @@ function ktorRoutes(entity: Entity): string {
     ? updateLines.join("\n")
     : `                    // no fields`;
 
+  const cache = infra.redis;
+  const params = [cache && "cache: Cache", infra.queue && "queue: JobQueue"].filter(Boolean).join(", ");
+  const cacheKey = `"${kebab}s:$id"`;
+  const getById = cache
+    ? `            // Cache-aside: serve from Redis, else read the DB and populate it (60s TTL; writes evict).
+            cache.get(${cacheKey})?.let { return@get call.respondText(it, ContentType.Application.Json) }
+            val item = transaction {
+                ${tableObj}.selectAll().where { ${tableObj}.${pkCol} eq id }.singleOrNull()?.to${pascal}()
+            }
+            if (item == null) call.respond(HttpStatusCode.NotFound)
+            else {
+                cache.set(${cacheKey}, Json.encodeToString(item))
+                call.respond(item)
+            }`
+    : `            val item = transaction {
+                ${tableObj}.selectAll().where { ${tableObj}.${pkCol} eq id }.singleOrNull()?.to${pascal}()
+            }
+            if (item == null) call.respond(HttpStatusCode.NotFound)
+            else call.respond(item)`;
+  const publish = infra.queue
+    ? `\n            queue.publish("""{"event":"${kebab}.created","id":"\${item.${pkCol}}"}""")`
+    : "";
+  const evict = cache ? `\n            cache.delete(${cacheKey})` : "";
+
   return `import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import org.jetbrains.exposed.sql.*
+${cache ? "import kotlinx.serialization.encodeToString\nimport kotlinx.serialization.json.Json\n" : ""}import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.util.UUID
 
-fun Route.${camelFn}Routes() {
+fun Route.${camelFn}Routes(${params}) {
     route("/${kebab}s") {
         get {
             val items = transaction { ${tableObj}.selectAll().map { it.to${pascal}() } }
@@ -514,11 +552,7 @@ fun Route.${camelFn}Routes() {
         get("/{id}") {
             val id = call.parameters["id"]?.runCatching { UUID.fromString(this) }?.getOrNull()
                 ?: return@get call.respond(HttpStatusCode.BadRequest)
-            val item = transaction {
-                ${tableObj}.selectAll().where { ${tableObj}.${pkCol} eq id }.singleOrNull()?.to${pascal}()
-            }
-            if (item == null) call.respond(HttpStatusCode.NotFound)
-            else call.respond(item)
+${getById}
         }
 
         post {
@@ -527,7 +561,7 @@ fun Route.${camelFn}Routes() {
                 ${tableObj}.insert {
 ${insertBlock}
                 }.resultedValues!!.single().to${pascal}() // no RETURNING: portable to MySQL and H2 (tests)
-            }
+            }${publish}
             call.respond(HttpStatusCode.Created, item)
         }
 
@@ -541,7 +575,7 @@ ${updateBlock}
                 }
                 if (count == 0) null
                 else ${tableObj}.selectAll().where { ${tableObj}.${pkCol} eq id }.single().to${pascal}()
-            }
+            }${evict}
             if (updated == null) call.respond(HttpStatusCode.NotFound)
             else call.respond(updated)
         }
@@ -549,7 +583,7 @@ ${updateBlock}
         delete("/{id}") {
             val id = call.parameters["id"]?.runCatching { UUID.fromString(this) }?.getOrNull()
                 ?: return@delete call.respond(HttpStatusCode.BadRequest)
-            val deleted = transaction { ${tableObj}.deleteWhere { ${tableObj}.${pkCol} eq id } }
+            val deleted = transaction { ${tableObj}.deleteWhere { ${tableObj}.${pkCol} eq id } }${evict}
             if (deleted == 0) call.respond(HttpStatusCode.NotFound)
             else call.respond(HttpStatusCode.NoContent)
         }
@@ -617,7 +651,9 @@ class ${pascal}RouteTest {
 
 // ─── src/test/kotlin/TestSupport.kt + ApplicationTest.kt ─────────────────────
 
-function ktorTestSupport(withAuth: boolean, mysql: boolean): string {
+function ktorTestSupport(withAuth: boolean, mysql: boolean, infra: KtInfra): string {
+  const fakes = ktorTestFakes(infra);
+  const moduleArgs = [withAuth && "jwtVerifier = TestAuth.verifier", ...fakes.args].filter(Boolean).join(", ");
   const mode = mysql ? "MySQL" : "PostgreSQL";
   const authImports = withAuth
     ? `import com.auth0.jwt.JWT
@@ -647,12 +683,12 @@ object TestAuth {
 }
 `
     : "";
-  return `${authImports}import io.ktor.server.application.*
+  return `${authImports}${fakes.imports}import io.ktor.server.application.*
 import org.jetbrains.exposed.sql.Database
 
 /**
  * Tests run against in-memory H2 (${mode} mode) with the production schema,
- * so \`gradle test\` needs no database${withAuth ? " and no network for JWKS" : ""}.
+ * so \`gradle test\` needs no database${withAuth ? " and no network for JWKS" : ""}${fakes.args.length ? " (cache / queue are in-memory fakes below)" : ""}.
  */
 fun initTestDatabase() {
     Database.connect("jdbc:h2:mem:test;MODE=${mode};DB_CLOSE_DELAY=-1", driver = "org.h2.Driver")
@@ -662,12 +698,12 @@ fun initTestDatabase() {
 /** The production module wired to test infrastructure. */
 fun Application.testModule() {
     initTestDatabase()
-    ${withAuth ? "module(jwtVerifier = TestAuth.verifier)" : "module()"}
+    module(${moduleArgs})
 }
-${authBlock}`;
+${authBlock}${fakes.body}`;
 }
 
-function ktorApplicationTest(entities: Entity[], stubs: Endpoint[], withAuth: boolean): string {
+function ktorApplicationTest(entities: Entity[], stubs: Endpoint[], withAuth: boolean, infra: KtInfra): string {
   // One protected route proves the token path end to end: 401 without, 200 with.
   const stub = stubs.find((e) => e.auth);
   const target = entities.length > 0
@@ -695,18 +731,71 @@ function ktorApplicationTest(entities: Entity[], stubs: Endpoint[], withAuth: bo
     }
 `
     : "";
+  const auth = withAuth ? `\n            header(HttpHeaders.Authorization, "Bearer \${TestAuth.token()}")` : "";
+  const entity = entities[0];
+  const base = entity ? `/${toKebab(entity.name)}s` : "";
+  const create = entity
+    ? `val created = client.post("${base}") {${auth}
+            contentType(ContentType.Application.Json)
+            setBody(${ktContractBody(entity)})
+        }
+        assertEquals(HttpStatusCode.Created, created.status)`
+    : "";
+  const infraTests = [
+    `
+    @Test
+    fun readinessChecksDependencies() = testApplication {
+        application { testModule() }
+        val response = client.get("/health?ready=1")
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertTrue("\\"db\\":true" in response.bodyAsText())
+    }
+`,
+    infra.rateLimit && `
+    @Test
+    fun rateLimitRejectsTheSixtyFirstRequestPerMinute() = testApplication {
+        application { testModule() }
+        repeat(60) { assertEquals(HttpStatusCode.OK, client.get("/health").status) }
+        assertEquals(HttpStatusCode.TooManyRequests, client.get("/health").status)
+    }
+`,
+    infra.queue && entity && `
+    @Test
+    fun createPublishesAnEvent() = testApplication {
+        application { testModule() }
+        ${create}
+        val id = Json.parseToJsonElement(created.bodyAsText()).jsonObject["${toCamel(entity.fields.find((f) => f.primaryKey)?.name ?? "id")}"]!!.jsonPrimitive.content
+        assertTrue(TestQueue.published.any { "\\"${toKebab(entity.name)}.created\\"" in it && id in it })
+    }
+`,
+    infra.redis && entity && `
+    @Test
+    fun getByIdPopulatesTheCache() = testApplication {
+        application { testModule() }
+        ${create}
+        val id = Json.parseToJsonElement(created.bodyAsText()).jsonObject["${toCamel(entity.fields.find((f) => f.primaryKey)?.name ?? "id")}"]!!.jsonPrimitive.content
+        assertEquals(HttpStatusCode.OK, client.get("${base}/$id") {${auth}
+        }.status)
+        assertNotNull(TestCache.get("${toKebab(entity.name)}s:$id"), "first read is cached")
+    }
+`,
+  ].filter(Boolean).join("");
+  const needsJson = (infra.queue || infra.redis) && entity;
   return `import io.ktor.client.request.*
+import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.server.testing.*
-import kotlin.test.*
+${needsJson ? "import kotlinx.serialization.json.*\n" : ""}import kotlin.test.*
 
-class ApplicationTest {
+class ApplicationTest {${needsJson ? `
+    private fun unique() = "test-" + java.util.UUID.randomUUID()
+` : ""}
     @Test
     fun healthIsOk() = testApplication {
         application { testModule() }
         assertEquals(HttpStatusCode.OK, client.get("/health").status)
     }
-${authTests}}
+${authTests}${infraTests}}
 `;
 }
 
@@ -724,8 +813,10 @@ function springKtFiles(
   const withAuth = needsAuth(config, anyProtected);
   const mysql = isMysql(config.database);
   const metrics = config.monitoring === "grafana";
+  const infra = ktInfra(config);
+  const dir = `src/main/kotlin/${pkgPath(pkg)}`;
 
-  files.push({ path: "build.gradle.kts", content: springKtBuildGradle(safe, withAuth, mysql, metrics) });
+  files.push({ path: "build.gradle.kts", content: springKtBuildGradle(safe, withAuth, mysql, metrics, infra) });
   files.push({ path: "settings.gradle.kts", content: `rootProject.name = "${safe}"\n` });
   files.push({ path: "Dockerfile", content: springKtDockerfile() });
   files.push({
@@ -753,8 +844,10 @@ function springKtFiles(
   // that wires the OAuth2 resource server when auth is enabled.
   files.push({
     path: "src/main/resources/application.properties",
-    content: springKtAppProperties(safe, withAuth, mysql, metrics),
+    content: springKtAppProperties(safe, withAuth, mysql, metrics, infra),
   });
+  files.push(...springKtInfraFiles(infra, pkg, dir));
+  files.push(...springKtInfraTestFiles(infra, pkg, `src/test/kotlin/${pkgPath(pkg)}`, withAuth));
 
   if (withAuth) {
     files.push({
@@ -769,15 +862,15 @@ function springKtFiles(
 
     files.push({
       path: `src/main/kotlin/${pkgPath(pkg)}/${pascal}.kt`,
-      content: springKtEntity(pkg, entity),
+      content: springKtEntity(pkg, entity, infra.redis),
     });
     files.push({
       path: `src/main/kotlin/${pkgPath(pkg)}/${pascal}Repository.kt`,
-      content: springKtRepository(pkg, pascal),
+      content: springKtRepository(pkg, entity, infra.redis),
     });
     files.push({
       path: `src/main/kotlin/${pkgPath(pkg)}/${pascal}Controller.kt`,
-      content: springKtController(pkg, pascal, kebab, entity),
+      content: springKtController(pkg, pascal, kebab, entity, !!infra.queue),
     });
     // Per-entity smoke test mirrors what the Spring (Java) path emits —
     // wires up MockMvc against the auto-loaded Spring context so a missing
@@ -790,7 +883,7 @@ function springKtFiles(
 
   // Tests activate the "test" profile: in-memory H2, schema from the entities, no Flyway,
   // so `gradle test` needs no database.
-  files.push({ path: "src/test/resources/application-test.properties", content: springKtTestProperties(mysql) });
+  files.push({ path: "src/test/resources/application-test.properties", content: springKtTestProperties(mysql, infra) });
 
   const stubs = stubEndpoints(endpoints, entities);
   if (stubs.length > 0) {
@@ -811,7 +904,7 @@ function pkgPath(pkg: string): string {
   return pkg.replace(/\./g, "/");
 }
 
-function springKtBuildGradle(appName: string, withAuth = false, mysql = false, metrics = false): string {
+function springKtBuildGradle(appName: string, withAuth: boolean, mysql: boolean, metrics: boolean, infra: KtInfra): string {
   const metricsDeps = metrics
     ? `    // Prometheus metrics at /actuator/prometheus.
     implementation("org.springframework.boot:spring-boot-starter-actuator")
@@ -849,7 +942,7 @@ dependencies {
     implementation("org.flywaydb:${mysql ? "flyway-mysql" : "flyway-database-postgresql"}")
     // JSON logging — logstash-logback-encoder hooks into Spring's Logback.
     implementation("net.logstash.logback:logstash-logback-encoder:8.0")
-${authDeps}${metricsDeps}    runtimeOnly("${mysql ? "com.mysql:mysql-connector-j" : "org.postgresql:postgresql:42.7.4"}")
+${authDeps}${metricsDeps}${springKtInfraDeps(infra, metrics)}    runtimeOnly("${mysql ? "com.mysql:mysql-connector-j" : "org.postgresql:postgresql:42.7.4"}")
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("com.h2database:h2")
 }
@@ -865,7 +958,7 @@ tasks.withType<Test> { useJUnitPlatform() }
 `;
 }
 
-function springKtAppProperties(appName: string, withAuth = false, mysql = false, metrics = false): string {
+function springKtAppProperties(appName: string, withAuth: boolean, mysql: boolean, metrics: boolean, infra: KtInfra): string {
   const metricsProps = metrics
     ? `
 # Prometheus scrape endpoint: /actuator/prometheus
@@ -894,19 +987,19 @@ spring.datasource.hikari.connection-timeout=10000
 
 spring.flyway.enabled=true
 spring.flyway.baseline-on-migrate=true
-${authProps}${metricsProps}
+${authProps}${metricsProps}${springKtInfraProps(infra)}
 server.port=\${PORT:8080}
 `;
 }
 
-function springKtTestProperties(mysql: boolean): string {
+function springKtTestProperties(mysql: boolean, infra: KtInfra): string {
   return `spring.datasource.url=jdbc:h2:mem:test;MODE=${mysql ? "MySQL" : "PostgreSQL"};DB_CLOSE_DELAY=-1
 spring.datasource.driver-class-name=org.h2.Driver
 spring.datasource.username=sa
 spring.datasource.password=
 spring.jpa.hibernate.ddl-auto=create-drop
 spring.flyway.enabled=false
-`;
+${springKtInfraTestProps(infra)}`;
 }
 
 function springKtApiController(pkg: string, endpoints: Endpoint[]): string {
@@ -1031,7 +1124,7 @@ fun main(args: Array<String>) {
 `;
 }
 
-function springKtEntity(pkg: string, entity: Entity): string {
+function springKtEntity(pkg: string, entity: Entity, cached = false): string {
   const pascal = toPascal(entity.name);
   const tableName = toSnake(entity.name) + "s";
 
@@ -1068,7 +1161,7 @@ import jakarta.persistence.*
 @Table(name = "${tableName}")
 data class ${pascal}(
 ${allLines}
-)
+)${cached ? " : java.io.Serializable // cached in Redis (JDK serialization)" : ""}
 `;
 }
 
@@ -1084,13 +1177,38 @@ function springKtFieldType(t: FieldType): string {
   }
 }
 
-function springKtRepository(pkg: string, pascal: string): string {
-  return `package ${pkg}
+function springKtRepository(pkg: string, entity: Entity, cached = false): string {
+  const pascal = toPascal(entity.name);
+  if (!cached) {
+    return `package ${pkg}
 
 import org.springframework.data.jpa.repository.JpaRepository
 import java.util.UUID
 
 interface ${pascal}Repository : JpaRepository<${pascal}, UUID>
+`;
+  }
+  const cacheName = `${toKebab(entity.name)}s`;
+  const pk = toCamel(entity.fields.find((f) => f.primaryKey)?.name ?? "id");
+  return `package ${pkg}
+
+import org.springframework.cache.annotation.CacheEvict
+import org.springframework.cache.annotation.Cacheable
+import org.springframework.data.jpa.repository.JpaRepository
+import java.util.Optional
+import java.util.UUID
+
+/** Cache-aside on reads by id (Redis, 60s TTL); saves and deletes evict the entry. */
+interface ${pascal}Repository : JpaRepository<${pascal}, UUID> {
+    @Cacheable("${cacheName}", key = "#p0", unless = "#result == null")
+    override fun findById(id: UUID): Optional<${pascal}>
+
+    @CacheEvict("${cacheName}", key = "#p0.${pk}", condition = "#p0.${pk} != null")
+    override fun <S : ${pascal}> save(entity: S): S
+
+    @CacheEvict("${cacheName}", key = "#p0")
+    override fun deleteById(id: UUID)
+}
 `;
 }
 
@@ -1098,7 +1216,8 @@ function springKtController(
   pkg: string,
   pascal: string,
   kebab: string,
-  entity: Entity
+  entity: Entity,
+  publishes = false,
 ): string {
   const camelRepo = toCamel(pascal) + "Repository";
 
@@ -1114,7 +1233,7 @@ import java.util.UUID
 
 @RestController
 @RequestMapping("/${kebab}s")
-class ${pascal}Controller(private val ${camelRepo}: ${pascal}Repository) {
+class ${pascal}Controller(private val ${camelRepo}: ${pascal}Repository${publishes ? ", private val jobs: JobPublisher" : ""}) {
 
     @GetMapping
     fun list(): List<${pascal}> = ${camelRepo}.findAll()
@@ -1128,7 +1247,10 @@ class ${pascal}Controller(private val ${camelRepo}: ${pascal}Repository) {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    fun create(@RequestBody body: ${pascal}): ${pascal} = ${camelRepo}.save(body)
+    fun create(@RequestBody body: ${pascal}): ${pascal} = ${camelRepo}.save(body)${publishes
+      ? `
+        .also { jobs.publish("""{"event":"${kebab}.created","id":"\${it.${pkCol}}"}""") }`
+      : ""}
 
     @PutMapping("/{id}")
     fun update(@PathVariable id: UUID, @RequestBody body: ${pascal}): ResponseEntity<${pascal}> {

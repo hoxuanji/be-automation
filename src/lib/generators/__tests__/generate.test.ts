@@ -578,7 +578,7 @@ describe("Stack-option wiring", () => {
   it("Ktor tests load the application module (otherwise every route 404s)", () => {
     const ktor = gen({ language: "kotlin", framework: "ktor" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
     const app = ktor.get("src/main/kotlin/Application.kt")!;
-    assert.match(app, /fun Application\.module\((jwtVerifier: JWTVerifier\? = null)?\)[\s\S]*routing \{/);
+    assert.match(app, /fun Application\.module\((jwtVerifier: JWTVerifier\? = null)?.*\) \{[\s\S]*routing \{/);
     assert.match(app, /embeddedServer\(Netty, .*module = Application::module\)/);
     const test = ktor.get("src/test/kotlin/UserRouteTest.kt")!;
     assert.equal(test.match(/application \{ testModule\(\) \}/g)?.length, test.match(/testApplication \{/g)?.length);
@@ -934,7 +934,7 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     assert.match(auth, /if \(jwtVerifier != null\) \{\n\s+verifier\(jwtVerifier\)\n\s+\} else \{[\s\S]*AUTH_JWKS_URL[\s\S]*verifier\(jwkProvider, issuer\)/);
     const support = ktor.get("src/test/kotlin/TestSupport.kt")!;
     assert.match(support, /Algorithm\.RSA256\(/);
-    assert.match(support, /module\(jwtVerifier = TestAuth\.verifier\)/);
+    assert.match(support, /module\(jwtVerifier = TestAuth\.verifier[,)]/);
     // Protected route: 401 without a token, 200 with the signed one.
     const appTest = ktor.get("src/test/kotlin/ApplicationTest.kt")!;
     assert.match(appTest, /client\.request\("\/users"\) \{ method = HttpMethod\.Get \}\n\s+assertEquals\(HttpStatusCode\.Unauthorized/);
@@ -1306,5 +1306,131 @@ describe("Every deployment target gets a real CI deploy job", () => {
       assert.equal(routes.match(/503[^\n]*queue_not_configured|queue_not_configured[^\n]*503/g)?.length, 2, `${framework}: both publishing patterns 503`);
       assert.ok(!JSON.parse(r.get("package.json")!).scripts.worker);
     }
+  });
+
+  // ─── Kotlin parity: tracing / rate limit / audit / monitoring / cache / queues ──
+
+  const kt = (framework: string, overrides: Record<string, unknown> = {}, entities: typeof SAMPLE_ENTITIES = SAMPLE_ENTITIES) => {
+    const g = gen({ language: "kotlin", framework, ...overrides }, SAMPLE_ENDPOINTS, entities);
+    const find = (suffix: string) => g.files.find((f) => f.path.endsWith(suffix))?.content;
+    return { ...g, find };
+  };
+
+  it("Kotlin wires tracing, rate limiting and audit into the running app, and emits nothing when the flags are off", () => {
+    const ktor = kt("ktor");
+    const app = ktor.get("src/main/kotlin/Application.kt")!;
+    for (const call of ["configureTracing()", "configureRateLimit()", "configureAudit()"]) assert.ok(app.includes(call), `ktor module() must call ${call}`);
+    const obs = ktor.get("src/main/kotlin/Observability.kt")!;
+    // No collector configured must mean no exporter (and no startup failure), not a crash.
+    assert.match(obs, /OTEL_EXPORTER_OTLP_ENDPOINT"\)\?\.takeIf \{ it\.isNotBlank\(\) \} \?: return/);
+    assert.match(obs, /install\(KtorServerTracing\)/);
+    assert.match(obs, /install\(RateLimit\)[\s\S]*requestKey \{ call -> call\.request\.origin\.remoteHost \}/);
+    assert.match(obs, /call\.principal<JWTPrincipal>\(\)\?\.subject/, "audit lines name the caller when auth is on");
+    const gradle = ktor.get("build.gradle.kts")!;
+    assert.ok(gradle.includes("opentelemetry-ktor-2.0") && gradle.includes("ktor-server-rate-limit"));
+
+    const spring = kt("spring-kt");
+    assert.ok(spring.find("/Observability.kt")!.includes("class RateLimitFilter") && spring.find("/Observability.kt")!.includes("class AuditFilter"));
+    assert.match(spring.find("/Observability.kt")!, /@ConditionalOnExpression\("'\\\$\{OTEL_EXPORTER_OTLP_ENDPOINT:\}' != ''"\)/);
+    assert.ok(spring.get("build.gradle.kts")!.includes("micrometer-tracing-bridge-otel") && spring.get("build.gradle.kts")!.includes("bucket4j-core"));
+    // A shared MockMvc context would otherwise trip the limiter across test classes.
+    assert.match(spring.get("src/test/resources/application-test.properties")!, /rate-limit\.requests-per-minute=100000/);
+
+    const off = { tracing: false, rateLimit: false, audit: false };
+    assert.ok(!kt("ktor", off).get("src/main/kotlin/Observability.kt"), "no plugin code without the flags");
+    assert.ok(!kt("ktor", off).get("build.gradle.kts")!.includes("opentelemetry"));
+    assert.ok(!kt("spring-kt", off).find("/Observability.kt"));
+  });
+
+  it("Kotlin Sentry / Datadog get their SDK wired, disabled when the key is unset", () => {
+    const ktSentry = kt("ktor", { monitoring: "sentry" });
+    assert.ok(ktSentry.get("build.gradle.kts")!.includes('"io.sentry:sentry:'));
+    assert.match(ktSentry.get("src/main/kotlin/Observability.kt")!, /SENTRY_DSN[\s\S]*Sentry\.captureException\(e\)/);
+    assert.ok(ktSentry.get("src/main/kotlin/Application.kt")!.includes("configureSentry()"));
+    const ktDd = kt("ktor", { monitoring: "datadog" });
+    assert.ok(ktDd.get("build.gradle.kts")!.includes("micrometer-registry-datadog"));
+    assert.match(ktDd.get("src/main/kotlin/Observability.kt")!, /DD_API_KEY[\s\S]*DatadogMeterRegistry/);
+
+    const spSentry = kt("spring-kt", { monitoring: "sentry" });
+    assert.ok(spSentry.get("build.gradle.kts")!.includes("sentry-spring-boot-starter-jakarta"));
+    assert.match(spSentry.get("src/main/resources/application.properties")!, /sentry\.dsn=\$\{SENTRY_DSN:\}/);
+    const spDd = kt("spring-kt", { monitoring: "datadog" });
+    assert.match(spDd.get("src/main/resources/application.properties")!, /management\.datadog\.metrics\.export\.api-key=\$\{DD_API_KEY:\}/);
+    assert.match(spDd.get("src/test/resources/application-test.properties")!, /management\.datadog\.metrics\.export\.enabled=false/);
+  });
+
+  it("Kotlin queues use the broker's real client, read the env var .env.example documents, and tests never connect", () => {
+    const cases: [string, string, string, string][] = [
+      ["kafka", "org.apache.kafka:kafka-clients", "org.springframework.kafka:spring-kafka", "KAFKA_BROKERS"],
+      ["rabbitmq", "com.rabbitmq:amqp-client", "spring-boot-starter-amqp", "RABBITMQ_URL"],
+      ["nats", "io.nats:jnats", "io.nats:jnats", "NATS_URL"],
+      ["sqs", "software.amazon.awssdk:sqs", "spring-cloud-aws-starter-sqs", "AWS_ENDPOINT_URL_SQS"],
+      ["bullmq", "io.lettuce:lettuce-core", "spring-boot-starter-data-redis", "REDIS_URL"],
+    ];
+    for (const [queue, ktorDep, springDep, env] of cases) {
+      const ktor = kt("ktor", { queue, cache: "memcached" });
+      assert.ok(ktor.get("build.gradle.kts")!.includes(ktorDep), `${queue}: ktor dep`);
+      const q = ktor.get("src/main/kotlin/Queue.kt")!;
+      assert.ok(q.includes(`System.getenv("${env}")`), `${queue}: ktor reads ${env}`);
+      assert.ok(ktor.get(".env.example")!.includes(`${env}=`), `${queue}: ${env} is documented in .env.example`);
+      // Consumer runs in the API process and as a standalone worker.
+      assert.match(ktor.get("src/main/kotlin/Application.kt")!, /launchConsumer\(queue\)/);
+      assert.match(ktor.get("src/main/kotlin/Worker.kt")!, /object Worker \{[\s\S]*@JvmStatic\s+fun main/);
+      assert.ok(ktor.get("build.gradle.kts")!.includes('tasks.register<JavaExec>("worker")'));
+      assert.match(ktor.get("src/test/kotlin/TestSupport.kt")!, /module\([^)]*queue = TestQueue\)/, `${queue}: ktor tests inject the fake`);
+      // Entity writes are events.
+      assert.match(ktor.get("src/main/kotlin/routes/userRoutes.kt")!, /queue\.publish\("""\{"event":"user\.created"/);
+
+      const spring = kt("spring-kt", { queue, cache: "memcached" });
+      assert.ok(spring.get("build.gradle.kts")!.includes(springDep), `${queue}: spring dep`);
+      const sq = spring.find("/Queue.kt")!;
+      assert.match(sq, /@Component\n@Profile\("!test"\)\nclass \w+Jobs/, `${queue}: real broker bean is off in the test profile`);
+      assert.ok(spring.find("/InMemoryJobPublisher.kt")!.includes('@Profile("test")'));
+      assert.ok(spring.get("src/main/resources/application.properties")!.includes(`\${${env}:`), `${queue}: spring reads ${env}`);
+      assert.ok(spring.find("/UserController.kt")!.includes("jobs.publish("));
+    }
+    // BullMQ has no JVM client: say so instead of pretending.
+    assert.match(kt("ktor", { queue: "bullmq" }).get("src/main/kotlin/Queue.kt")!, /NOT wire-compatible with BullMQ/);
+    assert.match(kt("spring-kt", { queue: "sqs" }).get("src/test/resources/application-test.properties")!, /spring\.cloud\.aws\.sqs\.enabled=false/);
+    assert.ok(!kt("ktor", { queue: "none" }).get("src/main/kotlin/Queue.kt"));
+  });
+
+  it("Kotlin Redis cache is cache-aside on get-by-id and evicted on writes; memcached emits no Redis code", () => {
+    const routes = kt("ktor").get("src/main/kotlin/routes/userRoutes.kt")!;
+    assert.match(routes, /cache\.get\("users:\$id"\)\?\.let \{ return@get call\.respondText/, "a hit returns before the DB read");
+    assert.match(routes, /cache\.set\("users:\$id", Json\.encodeToString\(item\)\)/);
+    assert.equal(routes.match(/cache\.delete\("users:\$id"\)/g)?.length, 2, "update and delete evict");
+    assert.ok(kt("ktor").get("src/main/kotlin/Cache.kt")!.includes('System.getenv("REDIS_URL")'));
+    assert.match(kt("ktor").get("src/test/kotlin/TestSupport.kt")!, /cache = TestCache/);
+
+    const spring = kt("spring-kt");
+    const repo = spring.find("/UserRepository.kt")!;
+    assert.match(repo, /@Cacheable\("users", key = "#p0", unless = "#result == null"\)\n\s+override fun findById/);
+    assert.match(repo, /@CacheEvict\("users", key = "#p0\.id", condition = "#p0\.id != null"\)\n\s+override fun <S : User> save/);
+    assert.match(spring.find("/User.kt")!, /\) : java\.io\.Serializable/, "the Redis cache serializes entities");
+    const testProps = spring.get("src/test/resources/application-test.properties")!;
+    assert.match(testProps, /spring\.cache\.type=simple/);
+    assert.match(testProps, /spring\.autoconfigure\.exclude=.*RedisAutoConfiguration/);
+
+    for (const framework of ["ktor", "spring-kt"]) {
+      const g = kt(framework, { cache: "memcached", queue: "none" });
+      assert.ok(!g.get("build.gradle.kts")!.includes("lettuce") && !g.get("build.gradle.kts")!.includes("data-redis"), framework);
+    }
+  });
+
+  it("Kotlin /health?ready=1 checks every dependency; Ktor tests prove limits, events and caching", () => {
+    const app = kt("ktor").get("src/main/kotlin/Application.kt")!;
+    assert.match(app, /mapOf\("db" to dbReady\(\), "cache" to cache\.ping\(\), "queue" to queue\.ping\(\)\)/);
+    assert.match(app, /HttpStatusCode\.ServiceUnavailable/);
+    // spring-kt permitted /health in SecurityConfig but nothing served it.
+    const health = kt("spring-kt").find("/HealthController.kt")!;
+    assert.match(health, /@GetMapping\("\/health"\)/);
+    assert.match(health, /"queue" to jobs\.ping\(\)/);
+    assert.ok(kt("spring-kt").find("/HealthTest.kt")!.includes('param("ready", "1")'));
+
+    const test = kt("ktor").get("src/test/kotlin/ApplicationTest.kt")!;
+    assert.match(test, /repeat\(60\)[\s\S]*HttpStatusCode\.TooManyRequests/);
+    assert.match(test, /TestQueue\.published\.any/);
+    assert.match(test, /assertNotNull\(TestCache\.get\("users:\$id"\)/);
   });
 });
