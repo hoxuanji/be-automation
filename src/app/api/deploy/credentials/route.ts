@@ -2,6 +2,7 @@ import { type NextRequest } from "next/server";
 import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import { getDeployCreds, setDeployCreds } from "@/lib/db";
+import { CLOUD_CRED_SCHEMAS } from "@/lib/cloud-providers";
 
 export const runtime = "nodejs";
 
@@ -22,6 +23,8 @@ const PROVIDER_SCHEMAS = {
   render: z.object({
     token: z.string().min(8).max(512),
   }),
+  // aws / gcp / azure / k8s — structured creds, stored as GitHub Actions secrets at deploy time.
+  ...CLOUD_CRED_SCHEMAS,
 } as const;
 
 type KnownProvider = keyof typeof PROVIDER_SCHEMAS;

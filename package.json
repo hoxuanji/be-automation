@@ -8,10 +8,12 @@
     "start": "next start",
     "lint": "eslint src",
     "test": "node --experimental-strip-types --no-warnings --import ./src/lib/generators/__tests__/loader.mjs --test ./src/lib/generators/__tests__/generate.test.ts",
-    "test:update": "UPDATE_SNAPSHOTS=1 npm test"
+    "test:update": "UPDATE_SNAPSHOTS=1 npm test",
+    "test:deploy": "node --experimental-strip-types --no-warnings --import ./src/lib/generators/__tests__/loader.mjs --test ./src/lib/__tests__/cloud-deploy.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
+    "@aws-sdk/client-sts": "^3.1139.0",
     "@hookform/resolvers": "^3.9.1",
     "@monaco-editor/react": "^4.7.0",
     "@radix-ui/react-dialog": "^1.1.4",
@@ -35,6 +37,8 @@
     "clsx": "^2.1.1",
     "framer-motion": "^11.15.0",
     "jose": "^6.2.3",
+    "js-yaml": "4.3.2",
+    "libsodium-wrappers": "^0.8.4",
     "lucide-react": "^0.469.0",
     "monaco-editor": "0.55.1",
     "next": "16.3.6",
@@ -51,6 +55,7 @@
     "@types/archiver": "^6.0.3",
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.10.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

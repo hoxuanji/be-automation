@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { toast } from "@/components/ui/toast";
 import { useStackStore } from "@/lib/store";
 import { BrandIcon } from "@/components/shared/brand-icon";
+import { CLOUD_META, CLOUD_PROVIDERS, type CloudProvider } from "@/lib/cloud-providers";
 
 export default function SettingsPage() {
   const { authUser, loadAuth } = useStackStore();
@@ -497,6 +498,12 @@ function IntegrationsCard() {
         <ProviderIntegrationRow provider="fly" />
         <div className="border-t border-white/[0.04]" />
         <ProviderIntegrationRow provider="vercel" />
+        {CLOUD_PROVIDERS.map((p) => (
+          <React.Fragment key={p}>
+            <div className="border-t border-white/[0.04]" />
+            <CloudIntegrationRow provider={p} />
+          </React.Fragment>
+        ))}
       </CardContent>
     </Card>
   );
@@ -799,6 +806,197 @@ function ProviderIntegrationRow({ provider }: { provider: DeployProviderId }) {
               variant="ghost"
               size="sm"
               onClick={() => { setExpanded(false); setToken(""); setError(null); }}
+            >
+              <X className="h-3.5 w-3.5" /> Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Cloud (GitHub Actions) credentials ──────────────────────────────────────
+
+function cloudIdentity(provider: CloudProvider, r: Record<string, unknown>): string | null {
+  const s = (v: unknown) => (typeof v === "string" && v ? v : null);
+  switch (provider) {
+    case "aws": return s(r.arn) ?? s(r.account);
+    case "gcp": return s(r.clientEmail);
+    case "azure": return s(r.displayName) ?? s(r.subscriptionId);
+    case "k8s": return s(r.username) ?? s(r.server);
+  }
+}
+
+function CloudIntegrationRow({ provider }: { provider: CloudProvider }) {
+  const meta = CLOUD_META[provider];
+  const emptyFields = () => Object.fromEntries(meta.fields.map((f) => [f.key, ""]));
+  const [saved, setSaved] = React.useState(false);
+  const [loading, setLoading] = React.useState(true);
+  const [expanded, setExpanded] = React.useState(false);
+  const [fields, setFields] = React.useState<Record<string, string>>(emptyFields);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<{ message: string; hint?: string } | null>(null);
+  const [verifiedIdentity, setVerifiedIdentity] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    fetch("/api/deploy/credentials")
+      .then((r) => r.json())
+      .then((d: { creds?: Record<string, Record<string, string>> }) => {
+        setSaved(Object.keys(d.creds?.[provider] ?? {}).length > 0);
+      })
+      .catch(() => setSaved(false))
+      .finally(() => setLoading(false));
+  }, [provider]);
+
+  const complete = meta.fields.every((f) => fields[f.key]?.trim());
+
+  async function save() {
+    if (!complete) { setError({ message: "All fields are required" }); return; }
+    const payload = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v.trim()]));
+    setSaving(true);
+    setError(null);
+    try {
+      const vRes = await fetch(`/api/${provider}/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const vData = (await vRes.json()) as Record<string, unknown> & { error?: string; hint?: string };
+      if (!vRes.ok) {
+        setError({ message: vData.error ?? "Verification failed", hint: vData.hint });
+        return;
+      }
+      const sRes = await fetch("/api/deploy/credentials", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, fields: payload }),
+      });
+      if (!sRes.ok) {
+        setError({ message: "Couldn't save credentials", hint: "Retry in a moment." });
+        return;
+      }
+      setVerifiedIdentity(cloudIdentity(provider, vData));
+      setSaved(true);
+      setFields(emptyFields());
+      setExpanded(false);
+      toast({ title: `${meta.label} credentials saved`, description: "Stored encrypted; pushed to GitHub Actions secrets at deploy time.", kind: "success" });
+    } catch {
+      setError({ message: "Request failed", hint: "Check your network and try again." });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function remove() {
+    await fetch(`/api/deploy/credentials?provider=${provider}`, { method: "DELETE" });
+    setSaved(false);
+    setVerifiedIdentity(null);
+    toast({ title: `${meta.label} credentials removed`, kind: "info" });
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="grid h-9 w-9 place-items-center rounded-lg border border-white/10 bg-white/[0.03]">
+            <BrandIcon id={provider} size={20} />
+          </div>
+          <div className="min-w-0">
+            <div className="text-sm font-medium">{meta.label}</div>
+            <div className="text-xs text-muted-foreground truncate">
+              {loading ? (
+                "Checking…"
+              ) : saved ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                  {verifiedIdentity ?? "Credentials saved"}
+                </span>
+              ) : (
+                `No ${meta.credsLabel} saved`
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          {loading ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+          ) : saved ? (
+            <>
+              <Button variant="ghost" size="sm" onClick={() => { setExpanded((v) => !v); setError(null); }}>
+                Replace
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground hover:text-red-300"
+                onClick={() => void remove()}
+              >
+                Remove
+              </Button>
+            </>
+          ) : (
+            <Button variant="secondary" size="sm" onClick={() => { setExpanded(true); setError(null); }}>
+              Add credentials
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-muted-foreground">
+              {meta.credsLabel} from{" "}
+              <a href={meta.docsUrl} target="_blank" rel="noreferrer" className="underline hover:text-foreground">
+                {meta.docsText}
+              </a>
+            </span>
+            <Badge variant="purple"><Shield className="h-2.5 w-2.5" /> encrypted</Badge>
+          </div>
+          {meta.fields.map((f) => (
+            <label key={f.key} className="block space-y-1">
+              <span className="text-[11px] text-muted-foreground">{f.label}</span>
+              {f.multiline ? (
+                <textarea
+                  rows={5}
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder={f.placeholder}
+                  value={fields[f.key] ?? ""}
+                  onChange={(e) => { setFields((p) => ({ ...p, [f.key]: e.target.value })); setError(null); }}
+                  className="w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 font-mono text-[11px] shadow-inner placeholder:text-muted-foreground/70 focus-visible:outline-none focus-visible:border-brand-500/50 focus-visible:ring-2 focus-visible:ring-brand-500/20"
+                />
+              ) : (
+                <Input
+                  type={f.secret ? "password" : "text"}
+                  autoComplete="off"
+                  placeholder={f.placeholder}
+                  value={fields[f.key] ?? ""}
+                  onChange={(e) => { setFields((p) => ({ ...p, [f.key]: e.target.value })); setError(null); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") void save(); }}
+                />
+              )}
+            </label>
+          ))}
+          {error && (
+            <div className="rounded-md border border-red-500/20 bg-red-500/[0.04] px-2.5 py-2 text-xs text-red-300">
+              <div className="font-medium">{error.message}</div>
+              {error.hint && <div className="mt-0.5 text-red-300/70">{error.hint}</div>}
+            </div>
+          )}
+          <div className="flex gap-2">
+            <Button variant="secondary" size="sm" onClick={() => void save()} disabled={saving || !complete}>
+              {saving
+                ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Verifying…</>
+                : <><Check className="h-3.5 w-3.5" /> Verify &amp; save</>
+              }
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => { setExpanded(false); setFields(emptyFields()); setError(null); }}
             >
               <X className="h-3.5 w-3.5" /> Cancel
             </Button>

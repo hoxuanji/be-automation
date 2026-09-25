@@ -8,7 +8,15 @@ import {
   runRenderDeployPipeline,
   runFlyDeployPipeline,
   runVercelDeployPipeline,
+  runCloudDeployPipeline,
 } from "@/lib/deploy-pipeline";
+import {
+  CLOUD_CRED_SCHEMAS,
+  CLOUD_META,
+  isCloudProvider,
+  type CloudCreds,
+  type CloudProvider,
+} from "@/lib/cloud-providers";
 import {
   PipelineError,
   type DeployProvider,
@@ -24,7 +32,7 @@ export const dynamic = "force-dynamic";
 const bodySchema = z.object({
   // Provider is optional with a railway default — keeps the existing client
   // contract working unchanged for current callers.
-  provider: z.enum(["railway", "render", "fly", "vercel"]).optional().default("railway"),
+  provider: z.enum(["railway", "render", "fly", "vercel", "aws", "gcp", "azure", "k8s"]).optional().default("railway"),
   config: stackConfigSchema,
   endpoints: z.array(endpointSchema),
   entities: z.array(entitySchema).optional().default([]),
@@ -49,7 +57,9 @@ type ProviderTokens = {
   vercel?: string;
 };
 
-function tokenForProvider(p: DeployProvider, tokens: ProviderTokens): string | undefined {
+type TokenProvider = "railway" | "render" | "fly" | "vercel";
+
+function tokenForProvider(p: TokenProvider, tokens: ProviderTokens): string | undefined {
   switch (p) {
     case "railway": return tokens.railway;
     case "render":  return tokens.render;
@@ -58,7 +68,7 @@ function tokenForProvider(p: DeployProvider, tokens: ProviderTokens): string | u
   }
 }
 
-function tokenMissingError(p: DeployProvider) {
+function tokenMissingError(p: TokenProvider) {
   switch (p) {
     case "railway":
       return { error: "railway_token_missing", message: "No Railway token saved.", hint: "Save a Railway Personal API Token under Settings → Integrations first." };
@@ -120,11 +130,31 @@ export async function POST(req: NextRequest) {
     fly: allCreds.fly?.token,
     vercel: allCreds.vercel?.token,
   };
-  const providerToken = tokenForProvider(provider, tokens);
-  if (!providerToken) {
-    return Response.json(tokenMissingError(provider), { status: 400 });
+  // Cloud targets (aws/gcp/azure/k8s) use structured creds instead of a single token.
+  let cloudCreds: CloudCreds<CloudProvider> | null = null;
+  let providerToken: string | undefined;
+  if (isCloudProvider(provider)) {
+    const credsParsed = CLOUD_CRED_SCHEMAS[provider].safeParse(allCreds[provider]);
+    if (!credsParsed.success) {
+      const label = CLOUD_META[provider].label;
+      return Response.json(
+        {
+          error: "cloud_creds_missing",
+          message: `No ${label} credentials saved.`,
+          hint: `Save your ${label} ${CLOUD_META[provider].credsLabel} under Settings → Integrations first.`,
+        },
+        { status: 400 }
+      );
+    }
+    cloudCreds = credsParsed.data;
+  } else {
+    providerToken = tokenForProvider(provider, tokens);
+    if (!providerToken) {
+      return Response.json(tokenMissingError(provider), { status: 400 });
+    }
   }
 
+  const token = providerToken ?? ""; // non-empty for token providers (checked above)
   const { config, endpoints, entities } = parsed.data;
   const slugged = config.name.toLowerCase().replace(/[^a-z0-9._-]/g, "-") || "helios-app";
   const repoName = parsed.data.repoName ?? slugged;
@@ -149,16 +179,24 @@ export async function POST(req: NextRequest) {
       try {
         // Build the right pipeline generator for the chosen provider.
         const gen =
-          provider === "railway"
+          isCloudProvider(provider)
+            ? runCloudDeployPipeline({
+                githubToken,
+                provider,
+                creds: cloudCreds!, // validated against CLOUD_CRED_SCHEMAS[provider] above
+                config, endpoints, entities, repoName, isPrivate: parsed.data.private,
+                signal: abortSignal,
+              })
+            : provider === "railway"
             ? runDeployPipeline({
                 githubToken,
-                railwayToken: providerToken,
+                railwayToken: token,
                 config, endpoints, entities, repoName, isPrivate: parsed.data.private,
               })
             : provider === "render"
             ? runRenderDeployPipeline({
                 githubToken,
-                renderToken: providerToken,
+                renderToken: token,
                 config, endpoints, entities, repoName, isPrivate: parsed.data.private,
                 ownerId: parsed.data.ownerId,
                 region: parsed.data.region,
@@ -166,12 +204,12 @@ export async function POST(req: NextRequest) {
             : provider === "vercel"
             ? runVercelDeployPipeline({
                 githubToken,
-                vercelToken: providerToken,
+                vercelToken: token,
                 config, endpoints, entities, repoName, isPrivate: parsed.data.private,
               })
             : runFlyDeployPipeline({
                 githubToken,
-                flyToken: providerToken,
+                flyToken: token,
                 config, endpoints, entities, repoName, isPrivate: parsed.data.private,
                 orgSlug: parsed.data.orgSlug,
               });
@@ -194,7 +232,8 @@ export async function POST(req: NextRequest) {
         send("done", { type: "done", result: next.value });
       } catch (err) {
         const fallbackCode =
-          provider === "railway" ? "railway_error"
+          isCloudProvider(provider) ? "actions_error"
+          : provider === "railway" ? "railway_error"
           : provider === "render" ? "render_error"
           : provider === "vercel" ? "vercel_error"
           : "fly_error";
