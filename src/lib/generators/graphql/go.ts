@@ -50,6 +50,9 @@ export function goGraphqlFiles(
   files.push({ path: "graph/resolver.go", content: goGraphqlResolverRoot(module, backend) });
   files.push({ path: "graph/schema.resolvers.go", content: goGraphqlResolvers(module, entities, backend) });
   files.push({ path: "gqlgen.yml", content: goGqlgenYaml(module) });
+  // Standard gqlgen tool pin: without an import, `go mod tidy` drops gqlgen's own
+  // dependencies from go.sum and `go run github.com/99designs/gqlgen generate` fails.
+  files.push({ path: "tools.go", content: "//go:build tools\n\npackage tools\n\nimport (\n\t_ \"github.com/99designs/gqlgen\"\n)\n" });
   files.push({ path: "Makefile", content: goGraphqlMakefile() });
 
   for (const entity of entities) {
