@@ -35,6 +35,12 @@ export function rustFiles(
 
   files.push({ path: "Cargo.toml", content: cargoToml(safe, config.framework, sql, withAuth, metrics, feat) });
   files.push({ path: "Dockerfile", content: rustDockerfile(safe, feat) });
+  files.push({ path: ".dockerignore", content: "target/\n.git/\n.env\n" });
+  if (feat.queue === "kafka") {
+    // librdkafka's bundled CMake files declare a pre-3.5 minimum, which CMake 4 (current
+    // runners, Homebrew) rejects. Cargo passes this to the rdkafka-sys build script everywhere.
+    files.push({ path: ".cargo/config.toml", content: `[env]\nCMAKE_POLICY_VERSION_MINIMUM = "3.5"\n` });
+  }
   files.push({ path: "src/config.rs", content: rustConfig(sql) });
   files.push({ path: "src/db.rs", content: rustDb(sql) });
   files.push({ path: "src/main.rs", content: rustMain(config.framework, entities, endpoints, sql, withAuth, metrics, feat) });
@@ -185,13 +191,14 @@ function rustDockerfile(safeName: string, feat: RustFeatures): string {
     : "";
   // Same image, different entrypoint: run the queue worker with `command: ["/worker"]`.
   const worker = feat.queue ? `COPY --from=build /src/target/release/worker /worker\n` : "";
+  // No Cargo.lock ships in the zip and the crate has several bins (api, worker), so the
+  // "stub main.rs" dependency-cache trick can't work — copy the tree and build once.
+  // ponytail: add cargo-chef if image build time matters.
   return `# syntax=docker/dockerfile:1
-FROM rust:1.82-slim AS build
+FROM rust:1-slim AS build
 ${buildTools}WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -f target/release/${safeName}*
-COPY src ./src
-RUN touch src/main.rs && cargo build --release
+COPY . .
+RUN cargo build --release
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /src/target/release/${safeName} /api

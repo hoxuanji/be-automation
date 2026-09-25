@@ -1,5 +1,10 @@
 [
   {
+    "path": ".dockerignore",
+    "lines": 4,
+    "size": 19
+  },
+  {
     "path": ".editorconfig",
     "lines": 10,
     "size": 147
@@ -106,8 +111,8 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 15,
-    "size": 475
+    "lines": 13,
+    "size": 305
   },
   {
     "path": "graphql/schema.graphql",
