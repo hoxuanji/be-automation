@@ -36,8 +36,8 @@
   },
   {
     "path": "buf.yaml",
-    "lines": 10,
-    "size": 92
+    "lines": 15,
+    "size": 317
   },
   {
     "path": "DEPLOY.md",
@@ -106,8 +106,8 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 20,
-    "size": 395
+    "lines": 23,
+    "size": 507
   },
   {
     "path": "Makefile",
@@ -116,8 +116,8 @@
   },
   {
     "path": "package.json",
-    "lines": 28,
-    "size": 696
+    "lines": 29,
+    "size": 718
   },
   {
     "path": "prisma/schema.prisma",
@@ -131,8 +131,8 @@
   },
   {
     "path": "proto/test_app/v1/service.proto",
-    "lines": 121,
-    "size": 2977
+    "lines": 118,
+    "size": 3032
   },
   {
     "path": "QUICKSTART.md",
@@ -155,9 +155,19 @@
     "size": 2175
   },
   {
+    "path": "src/auth.ts",
+    "lines": 20,
+    "size": 793
+  },
+  {
+    "path": "src/db.ts",
+    "lines": 4,
+    "size": 90
+  },
+  {
     "path": "src/interceptors.ts",
-    "lines": 71,
-    "size": 2443
+    "lines": 101,
+    "size": 3705
   },
   {
     "path": "src/main.ts",
@@ -170,14 +180,19 @@
     "size": 1197
   },
   {
+    "path": "src/services/grpc-util.ts",
+    "lines": 57,
+    "size": 2270
+  },
+  {
     "path": "src/services/post.service.ts",
-    "lines": 33,
-    "size": 1087
+    "lines": 96,
+    "size": 2797
   },
   {
     "path": "src/services/user.service.ts",
-    "lines": 33,
-    "size": 1087
+    "lines": 98,
+    "size": 2881
   },
   {
     "path": "src/tracing.ts",

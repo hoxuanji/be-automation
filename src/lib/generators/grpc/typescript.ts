@@ -1,5 +1,8 @@
-import type { Entity, GeneratedFile, StackConfig } from "../types";
+import type { Endpoint, Entity, EntityField, GeneratedFile, StackConfig } from "../types";
 import { safeName, toCamel, toKebab } from "../types";
+import { tsAuthMode, usesPrisma } from "../patterns/typescript";
+import { tsTokenVerifier } from "../typescript";
+import { creatableFields, pkOf, protectedRpcs, protoJsonName, serverTimestamps } from "./proto";
 
 /**
  * Emits a TypeScript gRPC server using @grpc/grpc-js + @grpc/proto-loader.
@@ -8,30 +11,47 @@ import { safeName, toCamel, toKebab } from "../types";
  * or Connect-ES) because it gives users a working server immediately after
  * `npm install` — no `buf generate` step required. Callers that want
  * compile-time types can layer static codegen on top later.
+ *
+ * Entity RPCs use the same data layer as the REST repositories: the Prisma
+ * client (prisma/schema.prisma), or an in-memory table when the database has
+ * no Prisma support. Auth uses the REST token verifier.
  */
 export function tsGrpcFiles(
   config: StackConfig,
   entities: Entity[],
   // REST-path instrumentation: main.ts preamble (tracing / APM / metrics
   // registry imports) and the npm deps it needs. Built by typescript.ts.
-  obs: { preamble: string; deps: Record<string, string> } = { preamble: "", deps: {} }
+  obs: { preamble: string; deps: Record<string, string> } = { preamble: "", deps: {} },
+  endpoints: Endpoint[] = []
 ): GeneratedFile[] {
   const name = safeName(config.name);
   const pkg = name.replace(/-/g, "_") + ".v1";
   const prom = /prometheus|grafana/.test(config.monitoring);
+  const prisma = usesPrisma(config, entities);
+  const mode = tsAuthMode(config, endpoints);
+  // Full method paths ("/pkg.v1.UserService/GetUser") the auth interceptor guards.
+  const guarded = mode === "off" ? []
+    : entities.flatMap((e) => protectedRpcs(e, endpoints).map((rpc) => `/${pkg}.${e.name}Service/${rpc}`));
 
   const files: GeneratedFile[] = [];
 
-  files.push({ path: "package.json", content: tsGrpcPkgJson(name, entities.length > 0, config.database, obs.deps) });
+  files.push({ path: "package.json", content: tsGrpcPkgJson(name, prisma, guarded.length > 0, obs.deps) });
   files.push({ path: "tsconfig.json", content: tsGrpcTsconfig() });
-  files.push({ path: "Dockerfile", content: tsGrpcDockerfile() });
+  files.push({ path: "Dockerfile", content: tsGrpcDockerfile(prisma) });
   // ESM (Node16 resolution) needs the .js suffix on relative imports.
-  files.push({ path: "src/main.ts", content: obs.preamble.replace(`"./tracing"`, `"./tracing.js"`) + tsGrpcMain(pkg, entities, config, prom) });
+  files.push({ path: "src/main.ts", content: obs.preamble.replace(`"./tracing"`, `"./tracing.js"`) + tsGrpcMain(pkg, entities, config, prom, guarded.length > 0) });
   files.push({ path: "src/proto-loader.ts", content: tsGrpcProtoLoader(pkg) });
-  if (config.rateLimit || config.audit || prom) {
-    files.push({ path: "src/interceptors.ts", content: tsGrpcInterceptors(config, prom) });
+  if (config.rateLimit || config.audit || prom || guarded.length > 0) {
+    files.push({ path: "src/interceptors.ts", content: tsGrpcInterceptors(config, prom, guarded) });
+  }
+  if (guarded.length > 0) {
+    files.push({ path: "src/auth.ts", content: `${tsTokenVerifier(mode)}\nexport { unconfigured, verify };\n` });
   }
 
+  if (entities.length > 0) {
+    files.push({ path: "src/db.ts", content: prisma ? TS_PRISMA_DB : tsMemoryDb(config.database, entities) });
+    files.push({ path: "src/services/grpc-util.ts", content: TS_GRPC_UTIL });
+  }
   for (const entity of entities) {
     files.push({
       path: `src/services/${toKebab(entity.name)}.service.ts`,
@@ -42,16 +62,15 @@ export function tsGrpcFiles(
   return files;
 }
 
-function tsGrpcPkgJson(name: string, hasEntities: boolean, database: string, extraDeps: Record<string, string>): string {
+function tsGrpcPkgJson(name: string, prisma: boolean, withAuth: boolean, extraDeps: Record<string, string>): string {
   const deps: Record<string, string> = {
     "@grpc/grpc-js": "^1.12.3",
     "@grpc/proto-loader": "^0.7.13",
     "grpc-health-check": "^2.0.2",
     ...extraDeps,
   };
-  if (hasEntities && /postgres|neon|supabase|mysql|planetscale|cockroach/.test(database)) {
-    deps["@prisma/client"] = "^5.22.0";
-  }
+  if (prisma) deps["@prisma/client"] = "^5.22.0";
+  if (withAuth) deps["jose"] = "^5.9.6";
 
   const devDeps: Record<string, string> = {
     "@types/node": "^22.10.0",
@@ -101,7 +120,9 @@ function tsGrpcTsconfig(): string {
   ) + "\n";
 }
 
-function tsGrpcDockerfile(): string {
+// With Prisma, the client is generated in the build stage (needs the prisma
+// CLI, a devDependency) and copied into the runtime image.
+function tsGrpcDockerfile(prisma: boolean): string {
   return `# syntax=docker/dockerfile:1
 FROM node:22-alpine AS build
 WORKDIR /app
@@ -109,7 +130,7 @@ COPY package*.json tsconfig.json ./
 RUN npm ci
 COPY src ./src
 COPY proto ./proto
-RUN npm run build
+${prisma ? "COPY prisma ./prisma\nRUN npx prisma generate\n" : ""}RUN npm run build
 
 FROM node:22-alpine
 WORKDIR /app
@@ -118,7 +139,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/proto ./proto
-USER node
+${prisma ? "COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma\n" : ""}USER node
 EXPOSE 8080
 CMD ["node", "dist/main.js"]
 `;
@@ -156,8 +177,8 @@ export function serviceDefOf(name: string): grpc.ServiceDefinition {
 `;
 }
 
-function tsGrpcMain(pkg: string, entities: Entity[], config: StackConfig, prom: boolean): string {
-  const intercepted = config.rateLimit || config.audit || prom;
+function tsGrpcMain(pkg: string, entities: Entity[], config: StackConfig, prom: boolean, withAuth: boolean): string {
+  const intercepted = config.rateLimit || config.audit || prom || withAuth;
   const imports = entities
     .map((e) => `import { ${toCamel(e.name)}Service } from "./services/${toKebab(e.name)}.service.js";`)
     .join("\n");
@@ -225,7 +246,7 @@ ${prom ? "    metricsServer.close();\n" : ""}    server.tryShutdown((err) => {
 // Server interceptors for the cross-cutting flags (grpc-js >= 1.10). grpc-js
 // runs these for every call kind (unary, client/server/bidi streaming), so
 // user-added streaming methods are covered without per-handler wrapping.
-function tsGrpcInterceptors(config: StackConfig, prom: boolean): string {
+function tsGrpcInterceptors(config: StackConfig, prom: boolean, guarded: string[]): string {
   const blocks: string[] = [];
   const names: string[] = [];
   if (prom) {
@@ -300,8 +321,36 @@ const audit: grpc.ServerInterceptor = (method, call) =>
     ? `\n// Client address without the port ("ipv4:10.0.0.1:5123" -> "ipv4:10.0.0.1").
 const peerOf = (call: grpc.ServerInterceptingCallInterface) => call.getPeer().replace(/:\\d+$/, "");\n`
     : "";
+  if (guarded.length > 0) {
+    names.push("auth");
+    blocks.push(`// Entity RPCs whose REST routes require auth, checked with the same token
+// verifier as the REST middleware. Innermost, like the REST route guard.
+const protectedRpcs = new Set([
+${guarded.map((m) => `  "${m}",`).join("\n")}
+]);
+
+const auth: grpc.ServerInterceptor = (method, call) =>
+  new grpc.ServerInterceptingCall(call, {
+    start: (next) => {
+      next({
+        onReceiveMetadata: (metadata, mdNext) => {
+          if (!protectedRpcs.has(method.path)) return mdNext(metadata);
+          if (unconfigured) return call.sendStatus({ code: grpc.status.INTERNAL, details: "auth_unconfigured" });
+          const header = String(metadata.get("authorization")[0] ?? "");
+          if (!header.startsWith("Bearer ")) {
+            return call.sendStatus({ code: grpc.status.UNAUTHENTICATED, details: "missing_or_malformed_token" });
+          }
+          verify(header.slice("Bearer ".length).trim()).then(
+            () => mdNext(metadata),
+            () => call.sendStatus({ code: grpc.status.UNAUTHENTICATED, details: "invalid_token" })
+          );
+        },
+      });
+    },
+  });`);
+  }
   return `import * as grpc from "@grpc/grpc-js";
-${prom ? `import { Counter, Histogram } from "prom-client";\n` : ""}${peer}
+${prom ? `import { Counter, Histogram } from "prom-client";\n` : ""}${guarded.length > 0 ? `import { unconfigured, verify } from "./auth.js";\n` : ""}${peer}
 ${blocks.join("\n\n")}
 
 // Same order as the REST middleware chain.
@@ -309,39 +358,231 @@ export const interceptors: grpc.ServerInterceptor[] = [${names.join(", ")}];
 `;
 }
 
-function tsGrpcEntityService(entity: Entity): string {
-  const name = entity.name;
-  const varName = toCamel(name);
-  return `import * as grpc from "@grpc/grpc-js";
+const TS_PRISMA_DB = `import { PrismaClient } from "@prisma/client";
 
-// Handlers for ${name}Service. Each function accepts an untyped call because
-// we load the proto dynamically — switch to ts-proto or protoc-gen-es if you
-// want compile-time message types. Fill in real persistence in place of the
-// UNIMPLEMENTED stubs below.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Call = grpc.ServerUnaryCall<any, any>;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Callback = grpc.sendUnaryData<any>;
+export const prisma = new PrismaClient();
+`;
 
-function unimplemented(cb: Callback, rpc: string) {
-  cb({ code: grpc.status.UNIMPLEMENTED, details: \`\${rpc} not implemented\` });
+// No Prisma support for this database: in-memory tables, like the REST
+// repositories, exposing the slice of the Prisma client API the services use.
+function tsMemoryDb(database: string, entities: Entity[]): string {
+  return `/* eslint-disable @typescript-eslint/no-explicit-any -- rows mirror untyped proto messages */
+import { randomUUID } from "node:crypto";
+
+// ponytail: in-memory tables — no ${database || "database"} client is generated (same as
+// the REST repositories), so data is lost on restart and not shared across
+// replicas. Unique constraints are not enforced.
+function table(pk: string) {
+  const rows = new Map<string, any>();
+  const notFound = () => Object.assign(new Error("not found"), { code: "P2025" });
+  const get = (where: any) => rows.get(String(where[pk]));
+  return {
+    async findMany({ skip, take }: { skip: number; take: number; orderBy?: unknown }) {
+      return [...rows.values()].slice(skip, skip + take);
+    },
+    async count() {
+      return rows.size;
+    },
+    async findUnique({ where }: { where: any }) {
+      return get(where) ?? null;
+    },
+    async create({ data }: { data: any }) {
+      const row = { createdAt: new Date(), updatedAt: new Date(), ...data };
+      row[pk] ??= randomUUID();
+      rows.set(String(row[pk]), row);
+      return row;
+    },
+    async update({ where, data }: { where: any; data: any }) {
+      const row = get(where);
+      if (!row) throw notFound();
+      return Object.assign(row, { updatedAt: new Date() }, data);
+    },
+    async delete({ where }: { where: any }) {
+      const row = get(where);
+      if (!row) throw notFound();
+      rows.delete(String(where[pk]));
+      return row;
+    },
+  };
 }
 
-export const ${varName}Service = {
-  list${name}(_call: Call, cb: Callback) {
-    unimplemented(cb, "List${name}");
+export const prisma = {
+${entities.map((e) => `  ${toCamel(e.name)}: table("${pkOf(e).name}"),`).join("\n")}
+};
+`;
+}
+
+const TS_GRPC_UTIL = `import * as grpc from "@grpc/grpc-js";
+
+export type Timestamp = { seconds: string | number; nanos: number };
+
+class RpcError extends Error {
+  constructor(readonly code: grpc.status, message: string) {
+    super(message);
+  }
+}
+
+export const invalid = (message: string) => new RpcError(grpc.status.INVALID_ARGUMENT, message);
+
+// Throws INVALID_ARGUMENT naming the first required field that is unset.
+export function required(data: Record<string, unknown>, fields: string[]) {
+  const missing = fields.find((f) => data[f] == null || data[f] === "");
+  if (missing) throw invalid(\`\${missing} is required\`);
+}
+
+// List defaults: page 1, 20 items, at most 100 per page.
+export function pageOf(req: { page?: number; pageSize?: number }) {
+  const page = req.page || 1;
+  const pageSize = Math.min(req.pageSize || 20, 100);
+  return { page, pageSize, skip: (page - 1) * pageSize };
+}
+
+export function toTs(d: Date | null | undefined): Timestamp | null {
+  if (!d) return null;
+  const ms = d.getTime();
+  return { seconds: Math.floor(ms / 1000), nanos: (((ms % 1000) + 1000) % 1000) * 1e6 };
+}
+
+export const fromTs = (t: Timestamp | null | undefined): Date | null =>
+  t ? new Date(Number(t.seconds) * 1000 + Math.floor(t.nanos / 1e6)) : null;
+
+// JSON fields travel as bytes; empty means unset.
+export function parseJson(b: Buffer | undefined, field: string): unknown {
+  if (!b?.length) return undefined;
+  try {
+    return JSON.parse(b.toString("utf8"));
+  } catch {
+    throw invalid(\`\${field} must be valid JSON\`);
+  }
+}
+
+export const jsonBytes = (v: unknown) => (v == null ? Buffer.alloc(0) : Buffer.from(JSON.stringify(v)));
+
+// Maps a thrown error to a gRPC status: validation errors, Prisma P2025
+// (record not found) and P2002 (unique constraint); anything else is INTERNAL.
+export function fail(cb: grpc.sendUnaryData<unknown>, err: unknown) {
+  if (err instanceof RpcError) return cb({ code: err.code, details: err.message });
+  const code = (err as { code?: string } | null)?.code;
+  if (code === "P2025") return cb({ code: grpc.status.NOT_FOUND, details: "not found" });
+  if (code === "P2002") return cb({ code: grpc.status.ALREADY_EXISTS, details: "already exists" });
+  console.error(err);
+  cb({ code: grpc.status.INTERNAL, details: "internal error" });
+}
+`;
+
+const isTextField = (f: EntityField) => f.type === "string" || f.type === "text" || f.type === "uuid";
+
+function tsGrpcEntityService(entity: Entity): string {
+  const name = entity.name;
+  const model = toCamel(name);
+  const pk = pkOf(entity);
+  const pkReq = `req.${protoJsonName(pk)}`;
+  const toProto = [...entity.fields, ...serverTimestamps(entity)].map((f) => {
+    const v = `row.${f.name}`;
+    const val = isTextField(f) ? `${v} ?? ""` : f.type === "number" ? `${v} ?? 0` : f.type === "boolean" ? `${v} ?? false`
+      : f.type === "date" ? `toTs(${v})` : `jsonBytes(${v})`;
+    return `    ${protoJsonName(f)}: ${val},`;
+  }).join("\n");
+  // Request → Prisma data. Unset optional text / dates are null, unset JSON is
+  // left out (Prisma needs Prisma.DbNull, not null, for Json columns).
+  const data = (fields: EntityField[]) => fields.map((f) => {
+    const r = `req.${protoJsonName(f)}`;
+    if (f === pk && f.type === "number") return `    ...(${r} ? { ${f.name}: Math.trunc(${r}) } : {}),`;
+    const val = isTextField(f) ? `${r} || null` : f.type === "number" ? `Math.trunc(${r} ?? 0)` : f.type === "boolean" ? `Boolean(${r})`
+      : f.type === "date" ? `fromTs(${r})` : `parseJson(${r}, "${protoJsonName(f)}")`;
+    return `    ${f.name}: ${val},`;
+  }).join("\n");
+  const requiredOf = (fields: EntityField[]) =>
+    `[${fields.filter((f) => f.required && f.type !== "number" && f.type !== "boolean").map((f) => `"${f.name}"`).join(", ")}]`;
+  const createFields = creatableFields(entity);
+  const updateFields = entity.fields.filter((f) => f !== pk);
+  const usesJson = entity.fields.some((f) => f.type === "json");
+  const usesDate = [...entity.fields, ...serverTimestamps(entity)].some((f) => f.type === "date");
+  const utils = ["fail", "invalid", "pageOf", "required", ...(usesDate ? ["fromTs", "toTs"] : []), ...(usesJson ? ["jsonBytes", "parseJson"] : [])].sort();
+  return `/* eslint-disable @typescript-eslint/no-explicit-any -- proto-loader messages are untyped */
+import * as grpc from "@grpc/grpc-js";
+import { prisma } from "../db.js";
+import { ${utils.join(", ")} } from "./grpc-util.js";
+
+// ${name}Service handlers on the same Prisma models as the REST repositories.
+// Messages are untyped because the proto is loaded dynamically — switch to
+// ts-proto or protoc-gen-es for compile-time message types.
+type Call = grpc.ServerUnaryCall<any, any>;
+type Callback = grpc.sendUnaryData<any>;
+
+// Primary-key lookup; an empty key is INVALID_ARGUMENT.
+function key(req: any) {
+  if (!${pkReq}) throw invalid("${protoJsonName(pk)} is required");
+  return { ${pk.name}: ${pk.type === "number" ? `Math.trunc(${pkReq})` : `String(${pkReq})`} };
+}
+
+function toProto(row: any) {
+  return {
+${toProto}
+  };
+}
+
+function createData(req: any): any {
+  const data = {
+${data(createFields)}
+  };
+  required(data, ${requiredOf(createFields)});
+  return data;
+}
+
+// Update${name} replaces every field (the proto has no field mask).
+function updateData(req: any): any {
+  const data = {
+${data(updateFields)}
+  };
+  required(data, ${requiredOf(updateFields)});
+  return data;
+}
+
+export const ${model}Service = {
+  async list${name}(call: Call, cb: Callback) {
+    try {
+      const { page, pageSize, skip } = pageOf(call.request);
+      const [rows, total] = await Promise.all([
+        prisma.${model}.findMany({ skip, take: pageSize, orderBy: { ${pk.name}: "asc" } }),
+        prisma.${model}.count(),
+      ]);
+      cb(null, { items: rows.map(toProto), total, page, pageSize });
+    } catch (err) {
+      fail(cb, err);
+    }
   },
-  get${name}(_call: Call, cb: Callback) {
-    unimplemented(cb, "Get${name}");
+  async get${name}(call: Call, cb: Callback) {
+    try {
+      const row = await prisma.${model}.findUnique({ where: key(call.request) });
+      if (!row) return cb({ code: grpc.status.NOT_FOUND, details: "not found" });
+      cb(null, toProto(row));
+    } catch (err) {
+      fail(cb, err);
+    }
   },
-  create${name}(_call: Call, cb: Callback) {
-    unimplemented(cb, "Create${name}");
+  async create${name}(call: Call, cb: Callback) {
+    try {
+      cb(null, toProto(await prisma.${model}.create({ data: createData(call.request) })));
+    } catch (err) {
+      fail(cb, err);
+    }
   },
-  update${name}(_call: Call, cb: Callback) {
-    unimplemented(cb, "Update${name}");
+  async update${name}(call: Call, cb: Callback) {
+    try {
+      const where = key(call.request);
+      cb(null, toProto(await prisma.${model}.update({ where, data: updateData(call.request) })));
+    } catch (err) {
+      fail(cb, err);
+    }
   },
-  delete${name}(_call: Call, cb: Callback) {
-    unimplemented(cb, "Delete${name}");
+  async delete${name}(call: Call, cb: Callback) {
+    try {
+      await prisma.${model}.delete({ where: key(call.request) });
+      cb(null, {});
+    } catch (err) {
+      fail(cb, err);
+    }
   },
 };
 `;

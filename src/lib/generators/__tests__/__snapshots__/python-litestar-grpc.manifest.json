@@ -40,14 +40,34 @@
     "size": 0
   },
   {
+    "path": "app/auth.py",
+    "lines": 42,
+    "size": 1270
+  },
+  {
+    "path": "app/config.py",
+    "lines": 14,
+    "size": 299
+  },
+  {
+    "path": "app/db.py",
+    "lines": 74,
+    "size": 2307
+  },
+  {
     "path": "app/interceptors.py",
-    "lines": 138,
-    "size": 4584
+    "lines": 177,
+    "size": 6092
   },
   {
     "path": "app/main.py",
     "lines": 71,
-    "size": 2438
+    "size": 2474
+  },
+  {
+    "path": "app/models.py",
+    "lines": 30,
+    "size": 991
   },
   {
     "path": "app/services/__init__.py",
@@ -55,14 +75,19 @@
     "size": 0
   },
   {
+    "path": "app/services/common.py",
+    "lines": 27,
+    "size": 839
+  },
+  {
     "path": "app/services/post.py",
-    "lines": 37,
-    "size": 1359
+    "lines": 105,
+    "size": 3298
   },
   {
     "path": "app/services/user.py",
-    "lines": 37,
-    "size": 1359
+    "lines": 107,
+    "size": 3500
   },
   {
     "path": "app/tracing.py",
@@ -76,8 +101,8 @@
   },
   {
     "path": "buf.yaml",
-    "lines": 10,
-    "size": 92
+    "lines": 15,
+    "size": 317
   },
   {
     "path": "DEPLOY.md",
@@ -171,13 +196,13 @@
   },
   {
     "path": "proto/test_app/v1/service.proto",
-    "lines": 121,
-    "size": 2977
+    "lines": 118,
+    "size": 3032
   },
   {
     "path": "pyproject.toml",
-    "lines": 28,
-    "size": 634
+    "lines": 29,
+    "size": 692
   },
   {
     "path": "QUICKSTART.md",

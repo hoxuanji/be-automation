@@ -1,5 +1,7 @@
-import type { Entity, GeneratedFile, StackConfig } from "../types";
+import type { Endpoint, Entity, EntityField, GeneratedFile, StackConfig } from "../types";
 import { safeName, toSnake } from "../types";
+import { pyAuthMode } from "../patterns/python";
+import { creatableFields, pkOf, protectedRpcs, protoField, serverTimestamps } from "./proto";
 
 /**
  * Emits a Python gRPC server using grpcio + grpcio-health-checking.
@@ -8,21 +10,30 @@ import { safeName, toSnake } from "../types";
  * driven by the Makefile target the buf generator emits. Users don't have to
  * install `buf` specifically — the Makefile falls back to grpc_tools which is
  * pulled in as a dev dependency.
+ *
+ * Entity RPCs run on the REST tree's data layer (`rest`): app/config.py,
+ * app/db.py (SQLAlchemy session), app/models.py and the app/auth.py verifier.
  */
 export function pyGrpcFiles(
   config: StackConfig,
   entities: Entity[],
   // app/tracing.py from the REST generator ("" when tracing is off).
-  tracingModule = ""
+  tracingModule = "",
+  endpoints: Endpoint[] = [],
+  rest: GeneratedFile[] = []
 ): GeneratedFile[] {
   const name = safeName(config.name);
   // Stubs land in gen/python/<proto package>/v1 (see the Dockerfile protoc
   // step); gen/python is on PYTHONPATH, so they import as <proto package>.v1.
   const protoPkg = name.replace(/-/g, "_");
-  const o = pyGrpcObservability(config);
+  // Same split as the REST tree: SQLAlchemy unless the database is MongoDB.
+  const sql = entities.length > 0 && !/mongo/.test(config.database);
+  const guarded = pyAuthMode(config, endpoints) === "off" ? []
+    : entities.flatMap((e) => protectedRpcs(e, endpoints).map((rpc) => `/${protoPkg}.v1.${e.name}Service/${rpc}`));
+  const o = pyGrpcObservability(config, guarded);
 
   const files: GeneratedFile[] = [];
-  files.push({ path: "pyproject.toml", content: pyGrpcPyproject(name, entities.length > 0, o) });
+  files.push({ path: "pyproject.toml", content: pyGrpcPyproject(name, config.database, sql, guarded.length > 0, o) });
   files.push({ path: "Dockerfile", content: pyGrpcDockerfile() });
   files.push({ path: "app/__init__.py", content: "" });
   files.push({ path: "app/main.py", content: pyGrpcMain(protoPkg, entities, o) });
@@ -30,15 +41,21 @@ export function pyGrpcFiles(
     files.push({ path: "app/interceptors.py", content: pyGrpcInterceptors(o) });
   }
   if (tracingModule) files.push({ path: "app/tracing.py", content: tracingModule });
+  const reuse = (path: string) => rest.filter((f) => f.path === path);
+  if (sql) files.push(...reuse("app/config.py"), ...reuse("app/db.py"), ...reuse("app/models.py"));
+  // Only the token check; the REST auth_required wrapper is Django-specific.
+  if (guarded.length > 0) files.push(...reuse("app/auth.py").map((f) => ({ ...f, content: f.content.replace(/\n+def auth_required[\s\S]*$/, "\n") })));
 
+  const isPostgres = /postgres|neon|supabase|cockroach/.test(config.database);
   for (const entity of entities) {
     files.push({
       path: `app/services/${toSnake(entity.name)}.py`,
-      content: pyGrpcEntityService(protoPkg, entity),
+      content: sql ? pyGrpcSqlService(protoPkg, entity, isPostgres) : pyGrpcMemoryService(protoPkg, entity, config.database),
     });
   }
   if (entities.length > 0) {
     files.push({ path: "app/services/__init__.py", content: "" });
+    files.push({ path: "app/services/common.py", content: PY_SERVICES_COMMON });
   }
 
   return files;
@@ -51,9 +68,11 @@ type PyGrpcObs = {
   datadog: boolean;
   // app/interceptors.py classes, in the same order as the REST middleware.
   interceptors: string[];
+  // Full method names AuthInterceptor guards.
+  guarded: string[];
 };
 
-function pyGrpcObservability(config: StackConfig): PyGrpcObs {
+function pyGrpcObservability(config: StackConfig, guarded: string[]): PyGrpcObs {
   const prom = /prometheus|grafana/.test(config.monitoring);
   return {
     tracing: config.tracing,
@@ -64,14 +83,21 @@ function pyGrpcObservability(config: StackConfig): PyGrpcObs {
       prom ? "MetricsInterceptor" : "",
       config.rateLimit ? "RateLimitInterceptor" : "",
       config.audit ? "AuditInterceptor" : "",
+      // Innermost, like the REST route-level auth dependency.
+      guarded.length > 0 ? "AuthInterceptor" : "",
     ].filter(Boolean),
+    guarded,
   };
 }
 
-function pyGrpcPyproject(name: string, hasEntities: boolean, o: PyGrpcObs): string {
-  const extras = hasEntities
-    ? `sqlalchemy = "^2.0.36"\nasyncpg = "^0.30.0"\n`
-    : "";
+function pyGrpcPyproject(name: string, database: string, sql: boolean, withAuth: boolean, o: PyGrpcObs): string {
+  // Same sync drivers as the REST pyproject (app/db.py uses a sync engine).
+  const extras = [
+    sql ? `sqlalchemy = "^2.0.0"` : "",
+    sql && /postgres|neon|supabase|cockroach/.test(database) ? `psycopg2-binary = "^2.9.0"` : "",
+    sql && /mysql|planetscale/.test(database) ? `pymysql = "^1.1.1"` : "",
+    withAuth ? `pyjwt = { version = "^2.9.0", extras = ["crypto"] }` : "",
+  ].filter(Boolean).map((l) => `${l}\n`).join("");
   const obs = [
     o.prom ? `prometheus-client = "^0.21.0"` : "",
     o.sentry ? `sentry-sdk = "^2.19.0"` : "",
@@ -330,14 +356,48 @@ class MetricsInterceptor(grpc.ServerInterceptor):
 
         return _wrap(continuation(handler_call_details), around)`);
   }
+  if (has("AuthInterceptor")) {
+    blocks.push(`# Entity RPCs whose REST routes require auth.
+PROTECTED_RPCS = frozenset({
+${o.guarded.map((m) => `    "${m}",`).join("\n")}
+})
+
+
+def _deny(code: grpc.StatusCode, details: str):
+    def abort(_request, context):
+        context.abort(code, details)
+
+    return grpc.unary_unary_rpc_method_handler(abort)
+
+
+class AuthInterceptor(grpc.ServerInterceptor):
+    """Requires a valid bearer token in the "authorization" metadata for
+    PROTECTED_RPCS, checked by the same verifier (app.auth) as the REST routes."""
+
+    def intercept_service(self, continuation, handler_call_details):
+        if handler_call_details.method not in PROTECTED_RPCS:
+            return continuation(handler_call_details)
+        metadata = dict(handler_call_details.invocation_metadata or ())
+        authorization = metadata.get("authorization", "")
+        if not authorization.startswith("Bearer "):
+            return _deny(grpc.StatusCode.UNAUTHENTICATED, "missing_or_malformed_token")
+        try:
+            _verify(authorization[len("Bearer "):].strip())
+        except jwt.PyJWTError:  # bad token, or JWKS fetch failure
+            return _deny(grpc.StatusCode.UNAUTHENTICATED, "invalid_token")
+        except RuntimeError:
+            return _deny(grpc.StatusCode.INTERNAL, "auth_unconfigured")
+        return continuation(handler_call_details)`);
+  }
   const std = [
     has("AuditInterceptor") ? "import logging" : "",
     has("RateLimitInterceptor") ? "import threading" : "",
     has("MetricsInterceptor") || has("RateLimitInterceptor") ? "import time" : "",
     "from contextlib import contextmanager",
   ].filter(Boolean);
-  const third = ["import grpc", has("MetricsInterceptor") ? "from prometheus_client import Counter, Histogram" : ""].filter(Boolean);
-  const imports = [...std, ...(std.length ? [""] : []), ...third].join("\n");
+  const third = ["import grpc", has("AuthInterceptor") ? "import jwt" : "", has("MetricsInterceptor") ? "from prometheus_client import Counter, Histogram" : ""].filter(Boolean);
+  const local = has("AuthInterceptor") ? "\n\nfrom app.auth import _verify" : "";
+  const imports = [...std, ...(std.length ? [""] : []), ...third].join("\n") + local;
   return `"""gRPC server interceptors: ${o.interceptors.join(", ")}."""
 ${imports}
 
@@ -387,43 +447,263 @@ ${blocks.join("\n\n\n")}
 `;
 }
 
-function pyGrpcEntityService(pkg: string, entity: Entity): string {
-  const name = entity.name;
-  return `# Handlers for ${name}Service. Each method is a stub that returns
-# UNIMPLEMENTED — fill in real persistence (SQLAlchemy, asyncpg, motor, …) below.
-#
-# Method signatures are fixed by the generated stubs; do not rename them.
+const PY_SERVICES_COMMON = `"""Helpers shared by the entity servicers."""
+import json
 
 import grpc
+
+
+def page_of(request) -> tuple[int, int]:
+    """List defaults: page 1, 20 items, at most 100 per page."""
+    return request.page or 1, min(request.page_size or 20, 100)
+
+
+def require(values: dict, fields: tuple[str, ...], context) -> None:
+    """Abort INVALID_ARGUMENT naming the first required field left unset."""
+    for field in fields:
+        if values.get(field) in (None, ""):
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"{field} is required")
+
+
+def parse_json(raw: bytes, field: str, context):
+    """JSON fields travel as bytes; empty means unset."""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"{field} must be valid JSON")
+`;
+
+const pyIsText = (f: EntityField) => f.type === "string" || f.type === "text" || f.type === "uuid";
+const pyRequired = (fields: EntityField[], key: (f: EntityField) => string) => {
+  const names = fields.filter((f) => f.required && f.type !== "number" && f.type !== "boolean").map((f) => `"${key(f)}"`);
+  return `(${names.join(", ")}${names.length === 1 ? "," : ""})`;
+};
+
+// Servicer on the SQLAlchemy session (app.db) and models (app.models) the REST
+// routers use. Unique violations surface as IntegrityError → ALREADY_EXISTS.
+function pyGrpcSqlService(pkg: string, entity: Entity, isPostgres: boolean): string {
+  const name = entity.name;
+  const pk = pkOf(entity);
+  const pkReq = `request.${protoField(pk)}`;
+  const uuidPk = isPostgres && pk.type === "uuid";
+  const stamps = serverTimestamps(entity);
+  // SQLAlchemy attribute: declared fields keep their name; the server-managed
+  // timestamps are the snake_case created_at / updated_at columns.
+  const attr = (f: EntityField) => (stamps.includes(f) ? toSnake(f.name) : f.name);
+  const scalars: string[] = [];
+  const stampsOut: string[] = [];
+  for (const f of [...entity.fields, ...stamps]) {
+    const m = `m.${attr(f)}`;
+    const p = protoField(f);
+    if (f.type === "date") {
+      stampsOut.push(`    if ${m} is not None:\n        out.${p}.FromDatetime(${m})`);
+      continue;
+    }
+    scalars.push(`        ${p}=${
+      f.type === "uuid" ? `str(${m}) if ${m} is not None else ""`
+      : pyIsText(f) ? `${m} or ""`
+      : f.type === "number" ? `float(${m} or 0)`
+      : f.type === "boolean" ? `bool(${m})`
+      : isPostgres ? `json.dumps(${m}).encode() if ${m} is not None else b""` : `(${m} or "").encode()`
+    },`);
+  }
+  const values = (fields: EntityField[]) => fields.map((f) => {
+    const r = `request.${protoField(f)}`;
+    const v = f === pk && f.type === "number" ? `int(${r}) or None`
+      : pyIsText(f) ? `${r} or None`
+      : f.type === "number" ? `int(${r})`
+      : f.type === "boolean" ? r
+      : f.type === "date" ? `${r}.ToDatetime() if request.HasField("${protoField(f)}") else None`
+      : isPostgres ? `parse_json(${r}, "${protoField(f)}", context)`
+      : `${r}.decode() if parse_json(${r}, "${protoField(f)}", context) is not None else None`;
+    return `        "${f.name}": ${v},`;
+  }).join("\n");
+  const createFields = creatableFields(entity);
+  const updateFields = entity.fields.filter((f) => f !== pk);
+  const usesJson = entity.fields.some((f) => f.type === "json");
+  return `"""${name}Service: CRUD over the SQLAlchemy model the REST routers use (app.models)."""
+${[usesJson && isPostgres ? "import json" : "", uuidPk ? "import uuid" : ""].filter(Boolean).map((l) => `${l}\n`).join("")}${usesJson && isPostgres || uuidPk ? "\n" : ""}import grpc
+from google.protobuf import empty_pb2
+from sqlalchemy.exc import IntegrityError
+
+from app.db import SessionLocal
+from app.models import ${name}
+from app.services.common import page_of, ${usesJson ? "parse_json, " : ""}require
 from ${pkg}.v1 import service_pb2, service_pb2_grpc
+
+
+def _to_pb(m: ${name}) -> service_pb2.${name}:
+    out = service_pb2.${name}(
+${scalars.join("\n")}
+    )
+${stampsOut.join("\n")}${stampsOut.length ? "\n" : ""}    return out
+
+
+def _create_values(request, context) -> dict:
+    values = {
+${values(createFields)}
+    }
+    require(values, ${pyRequired(createFields, (f) => f.name)}, context)
+    return values
+
+
+def _update_values(request, context) -> dict:
+    """Update${name} replaces every field (the proto has no field mask)."""
+    values = {
+${values(updateFields)}
+    }
+    require(values, ${pyRequired(updateFields, (f) => f.name)}, context)
+    return values
+
+
+def _get(db, request, context) -> ${name}:
+    if not ${pkReq}:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "${protoField(pk)} is required")
+${uuidPk ? `    try:
+        key = uuid.UUID(${pkReq})
+    except ValueError:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "${protoField(pk)} must be a UUID")
+` : `    key = ${pk.type === "number" ? `int(${pkReq})` : pkReq}
+`}    item = db.get(${name}, key)
+    if item is None:
+        context.abort(grpc.StatusCode.NOT_FOUND, "not found")
+    return item
+
+
+def _commit(db, context) -> None:
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        context.abort(grpc.StatusCode.ALREADY_EXISTS, "already exists")
 
 
 class ${name}Service(service_pb2_grpc.${name}ServiceServicer):
     def List${name}(self, request, context):
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("List${name} not implemented")
-        return service_pb2.List${name}Response()
+        page, size = page_of(request)
+        with SessionLocal() as db:
+            total = db.query(${name}).count()
+            rows = db.query(${name}).order_by(${name}.${pk.name}).offset((page - 1) * size).limit(size).all()
+            return service_pb2.List${name}Response(items=[_to_pb(m) for m in rows], total=total, page=page, page_size=size)
 
     def Get${name}(self, request, context):
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("Get${name} not implemented")
-        return service_pb2.${name}()
+        with SessionLocal() as db:
+            return _to_pb(_get(db, request, context))
 
     def Create${name}(self, request, context):
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("Create${name} not implemented")
-        return service_pb2.${name}()
+        item = ${name}(**_create_values(request, context))
+        with SessionLocal() as db:
+            db.add(item)
+            _commit(db, context)
+            db.refresh(item)
+            return _to_pb(item)
 
     def Update${name}(self, request, context):
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("Update${name} not implemented")
-        return service_pb2.${name}()
+        values = _update_values(request, context)
+        with SessionLocal() as db:
+            item = _get(db, request, context)
+            for k, v in values.items():
+                setattr(item, k, v)
+            _commit(db, context)
+            db.refresh(item)
+            return _to_pb(item)
 
     def Delete${name}(self, request, context):
-        from google.protobuf import empty_pb2
+        with SessionLocal() as db:
+            db.delete(_get(db, request, context))
+            _commit(db, context)
+            return empty_pb2.Empty()
+`;
+}
 
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("Delete${name} not implemented")
+// MongoDB has no generated Python repository in the REST tree either (its
+// routers are not emitted), so the servicer keeps messages in memory.
+function pyGrpcMemoryService(pkg: string, entity: Entity, database: string): string {
+  const name = entity.name;
+  const pk = protoField(pkOf(entity));
+  const stamps = serverTimestamps(entity).map(protoField);
+  const checks = (fields: EntityField[]) => fields.map((f) => {
+    const p = protoField(f);
+    const bad = f.type === "json" ? `parse_json(request.${p}, "${p}", context) is None` : f.type === "date" ? `not request.HasField("${p}")` : `not request.${p}`;
+    if (f.type === "json" && !f.required) return `    parse_json(request.${p}, "${p}", context)\n`;
+    if (!f.required || f.type === "number" || f.type === "boolean") return "";
+    return `    if ${bad}:\n        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "${p} is required")\n`;
+  }).join("");
+  const pkEntity = pkOf(entity);
+  const usesJson = entity.fields.some((f) => f.type === "json");
+  return `"""${name}Service: CRUD over an in-memory table.
+
+ponytail: ${database || "this database"} has no generated Python repository (the REST tree
+has none either), so rows live in process memory, are lost on restart and are
+not shared across replicas. Unique constraints are not enforced.
+"""
+import threading
+import uuid
+
+import grpc
+from google.protobuf import empty_pb2, json_format
+
+from app.services.common import page_of${usesJson ? ", parse_json" : ""}
+from ${pkg}.v1 import service_pb2, service_pb2_grpc
+
+_rows: dict[str, service_pb2.${name}] = {}
+_lock = threading.Lock()
+
+
+def _fill(request, item: service_pb2.${name}) -> None:
+    """Copy same-named fields from a Create/Update request onto the row."""
+    json_format.ParseDict(json_format.MessageToDict(request, preserving_proto_field_name=True), item, ignore_unknown_fields=True)
+
+
+def _key(request, context) -> str:
+    if not request.${pk}:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "${pk} is required")
+    return str(request.${pk})
+
+
+class ${name}Service(service_pb2_grpc.${name}ServiceServicer):
+    def List${name}(self, request, context):
+        page, size = page_of(request)
+        with _lock:
+            rows = [_rows[k] for k in sorted(_rows)]
+        return service_pb2.List${name}Response(items=rows[(page - 1) * size:page * size], total=len(rows), page=page, page_size=size)
+
+    def Get${name}(self, request, context):
+        key = _key(request, context)
+        with _lock:
+            item = _rows.get(key)
+        if item is None:
+            context.abort(grpc.StatusCode.NOT_FOUND, "not found")
+        return item
+
+    def Create${name}(self, request, context):
+${checks(creatableFields(entity)).replace(/^/gm, "    ").replace(/^    $/gm, "")}        item = service_pb2.${name}()
+        _fill(request, item)
+${pkEntity.type === "uuid" ? `        item.${pk} = str(uuid.uuid4())\n` : ""}${stamps.map((s) => `        item.${s}.GetCurrentTime()\n`).join("")}        with _lock:
+            if str(item.${pk}) in _rows:
+                context.abort(grpc.StatusCode.ALREADY_EXISTS, "already exists")
+            _rows[str(item.${pk})] = item
+        return item
+
+    def Update${name}(self, request, context):
+        """Replaces every field (the proto has no field mask)."""
+        key = _key(request, context)
+${checks(entity.fields.filter((f) => f !== pkEntity)).replace(/^/gm, "    ").replace(/^    $/gm, "")}        item = service_pb2.${name}()
+        _fill(request, item)
+${stamps.includes("updated_at") ? "        item.updated_at.GetCurrentTime()\n" : ""}        with _lock:
+            if key not in _rows:
+                context.abort(grpc.StatusCode.NOT_FOUND, "not found")
+${stamps.includes("created_at") ? "            item.created_at.CopyFrom(_rows[key].created_at)\n" : ""}            _rows[key] = item
+        return item
+
+    def Delete${name}(self, request, context):
+        key = _key(request, context)
+        with _lock:
+            if _rows.pop(key, None) is None:
+                context.abort(grpc.StatusCode.NOT_FOUND, "not found")
         return empty_pb2.Empty()
 `;
 }
+

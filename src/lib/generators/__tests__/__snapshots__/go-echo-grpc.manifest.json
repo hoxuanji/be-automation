@@ -36,13 +36,13 @@
   },
   {
     "path": "buf.yaml",
-    "lines": 10,
-    "size": 92
+    "lines": 15,
+    "size": 317
   },
   {
     "path": "cmd/api/main.go",
-    "lines": 113,
-    "size": 3232
+    "lines": 123,
+    "size": 3558
   },
   {
     "path": "cmd/migrate/main.go",
@@ -121,13 +121,28 @@
   },
   {
     "path": "go.mod",
-    "lines": 18,
-    "size": 586
+    "lines": 23,
+    "size": 743
+  },
+  {
+    "path": "internal/auth/jwt.go",
+    "lines": 138,
+    "size": 4087
   },
   {
     "path": "internal/config/config.go",
     "lines": 22,
     "size": 476
+  },
+  {
+    "path": "internal/db/gorm.go",
+    "lines": 26,
+    "size": 544
+  },
+  {
+    "path": "internal/db/sql.go",
+    "lines": 58,
+    "size": 1600
   },
   {
     "path": "internal/grpcserver/health.go",
@@ -136,13 +151,13 @@
   },
   {
     "path": "internal/grpcserver/interceptors.go",
-    "lines": 140,
-    "size": 4757
+    "lines": 181,
+    "size": 6168
   },
   {
     "path": "internal/grpcserver/post_service.go",
-    "lines": 45,
-    "size": 1502
+    "lines": 119,
+    "size": 3692
   },
   {
     "path": "internal/grpcserver/ratelimit_test.go",
@@ -151,13 +166,18 @@
   },
   {
     "path": "internal/grpcserver/server.go",
-    "lines": 13,
-    "size": 429
+    "lines": 50,
+    "size": 1435
   },
   {
     "path": "internal/grpcserver/user_service.go",
-    "lines": 45,
-    "size": 1502
+    "lines": 127,
+    "size": 3980
+  },
+  {
+    "path": "internal/models/models.go",
+    "lines": 44,
+    "size": 1022
   },
   {
     "path": "internal/tracing/tracing.go",
@@ -181,8 +201,8 @@
   },
   {
     "path": "proto/test_app/v1/service.proto",
-    "lines": 121,
-    "size": 2977
+    "lines": 118,
+    "size": 3032
   },
   {
     "path": "QUICKSTART.md",
