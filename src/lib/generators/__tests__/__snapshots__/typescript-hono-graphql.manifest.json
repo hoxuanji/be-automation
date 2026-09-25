@@ -11,13 +11,8 @@
   },
   {
     "path": ".github/workflows/ci.yml",
-    "lines": 61,
-    "size": 1649
-  },
-  {
-    "path": ".github/workflows/deploy.yml",
-    "lines": 68,
-    "size": 2379
+    "lines": 69,
+    "size": 1835
   },
   {
     "path": ".gitignore",
@@ -36,8 +31,8 @@
   },
   {
     "path": "DEPLOY.md",
-    "lines": 92,
-    "size": 3281
+    "lines": 79,
+    "size": 2387
   },
   {
     "path": "deploy/helm/Chart.yaml",
@@ -111,8 +106,13 @@
   },
   {
     "path": "package.json",
-    "lines": 37,
-    "size": 978
+    "lines": 43,
+    "size": 1134
+  },
+  {
+    "path": "prisma/schema.prisma",
+    "lines": 28,
+    "size": 505
   },
   {
     "path": "prisma/seed.ts",
@@ -146,13 +146,18 @@
   },
   {
     "path": "src/main.ts",
-    "lines": 77,
-    "size": 3013
+    "lines": 70,
+    "size": 2544
   },
   {
-    "path": "src/queue.ts",
-    "lines": 100,
-    "size": 3810
+    "path": "src/repositories/post.repository.ts",
+    "lines": 32,
+    "size": 995
+  },
+  {
+    "path": "src/repositories/user.repository.ts",
+    "lines": 32,
+    "size": 995
   },
   {
     "path": "src/resolvers.ts",
@@ -161,13 +166,13 @@
   },
   {
     "path": "src/resolvers/post.ts",
-    "lines": 46,
-    "size": 1429
+    "lines": 47,
+    "size": 1842
   },
   {
     "path": "src/resolvers/user.ts",
     "lines": 47,
-    "size": 1454
+    "size": 1842
   },
   {
     "path": "src/scalars.ts",
@@ -185,9 +190,14 @@
     "size": 650
   },
   {
-    "path": "src/worker.ts",
-    "lines": 36,
-    "size": 1502
+    "path": "src/validators/post.validator.ts",
+    "lines": 22,
+    "size": 538
+  },
+  {
+    "path": "src/validators/user.validator.ts",
+    "lines": 23,
+    "size": 578
   },
   {
     "path": "tests/api.contract.test.ts",

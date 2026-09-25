@@ -39,7 +39,8 @@ export function typescriptFiles(
   // NestJS uses the Express base — see tsGraphqlMount.
   if (config.api === "graphql" && isGraphqlSupported(config.language)) {
     const framework = config.framework === "nestjs" ? "express" : config.framework;
-    return tsGraphqlFiles(config, entities, typescriptFiles({ ...config, api: "rest", framework }, [], []));
+    const rest = (ents: Entity[]) => typescriptFiles({ ...config, api: "rest", framework }, [], ents);
+    return tsGraphqlFiles(config, entities, rest([]), rest(entities));
   }
 
   // gRPC mode replaces the framework-specific HTTP bootstrap with a @grpc/grpc-js

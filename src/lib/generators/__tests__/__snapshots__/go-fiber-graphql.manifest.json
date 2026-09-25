@@ -11,13 +11,8 @@
   },
   {
     "path": ".github/workflows/ci.yml",
-    "lines": 62,
-    "size": 1669
-  },
-  {
-    "path": ".github/workflows/deploy.yml",
-    "lines": 69,
-    "size": 2418
+    "lines": 70,
+    "size": 1855
   },
   {
     "path": ".gitignore",
@@ -45,14 +40,9 @@
     "size": 2170
   },
   {
-    "path": "cmd/worker/main.go",
-    "lines": 67,
-    "size": 1754
-  },
-  {
     "path": "DEPLOY.md",
-    "lines": 92,
-    "size": 3281
+    "lines": 79,
+    "size": 2387
   },
   {
     "path": "deploy/helm/Chart.yaml",
@@ -116,13 +106,13 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 18,
-    "size": 590
+    "lines": 15,
+    "size": 384
   },
   {
     "path": "go.mod",
-    "lines": 22,
-    "size": 657
+    "lines": 23,
+    "size": 673
   },
   {
     "path": "gqlgen.yml",
@@ -130,24 +120,24 @@
     "size": 699
   },
   {
-    "path": "graph/health.go",
-    "lines": 11,
-    "size": 345
-  },
-  {
-    "path": "graph/post.resolvers.go",
-    "lines": 97,
-    "size": 2223
+    "path": "graph/post.go",
+    "lines": 42,
+    "size": 845
   },
   {
     "path": "graph/resolver.go",
-    "lines": 18,
-    "size": 491
+    "lines": 62,
+    "size": 1421
   },
   {
-    "path": "graph/user.resolvers.go",
-    "lines": 97,
-    "size": 2223
+    "path": "graph/schema.resolvers.go",
+    "lines": 172,
+    "size": 5401
+  },
+  {
+    "path": "graph/user.go",
+    "lines": 51,
+    "size": 1046
   },
   {
     "path": "graphql/schema.graphql",
@@ -161,8 +151,13 @@
   },
   {
     "path": "internal/config/config.go",
-    "lines": 24,
-    "size": 518
+    "lines": 22,
+    "size": 476
+  },
+  {
+    "path": "internal/db/gorm.go",
+    "lines": 26,
+    "size": 544
   },
   {
     "path": "internal/db/sql.go",
@@ -170,19 +165,19 @@
     "size": 1600
   },
   {
+    "path": "internal/models/models.go",
+    "lines": 44,
+    "size": 1022
+  },
+  {
     "path": "internal/monitoring/metrics.go",
     "lines": 14,
     "size": 415
   },
   {
-    "path": "internal/queue/queue.go",
-    "lines": 119,
-    "size": 3201
-  },
-  {
     "path": "internal/server/graphql.go",
-    "lines": 24,
-    "size": 804
+    "lines": 25,
+    "size": 848
   },
   {
     "path": "internal/server/health.go",
@@ -206,8 +201,8 @@
   },
   {
     "path": "internal/server/server.go",
-    "lines": 89,
-    "size": 2665
+    "lines": 83,
+    "size": 2451
   },
   {
     "path": "internal/tracing/tracing.go",

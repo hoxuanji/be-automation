@@ -21,7 +21,8 @@ export function pythonFiles(
   // GraphQL: Strawberry mounted on the REST FastAPI app (built with no routes),
   // so its middleware — slowapi, audit, OTel, Prometheus/Sentry — applies.
   if (config.api === "graphql" && isGraphqlSupported(config.language)) {
-    return pythonGraphqlFiles(entities, pythonFiles({ ...config, api: "rest", framework: "fastapi" }, [], []));
+    const rest = (ents: Entity[]) => pythonFiles({ ...config, api: "rest", framework: "fastapi" }, [], ents);
+    return pythonGraphqlFiles(entities, rest([]), rest(entities));
   }
 
   const files: GeneratedFile[] = [];
