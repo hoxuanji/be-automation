@@ -1043,4 +1043,124 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     assert.ok(api.includes('"queue_not_configured"') && !api.includes(`"queued": true`));
     assert.ok(!none.get("go.mod")!.includes("kafka-go") && !none.get("Dockerfile")!.includes("worker"));
   });
+
+  // ─── Rust parity: tracing / rateLimit / audit / monitoring / cache / queues ───
+
+  const RUST_QUEUES = ["rabbitmq", "kafka", "nats", "sqs", "bullmq"];
+
+  it("Rust Cargo.toml declares every external crate the generated src/ references (else `cargo check` fails)", () => {
+    const local = new Set(["std", "core", "alloc", "crate", "self", "super"]);
+    for (const framework of ["axum", "actix"]) {
+      for (const queue of RUST_QUEUES) {
+        for (const monitoring of ["grafana", "sentry", "datadog", "otel"]) {
+          for (const database of ["postgres", "mysql"]) {
+            const { files, get } = gen({ language: "rust", framework, queue, monitoring, database }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+            const deps = new Set([...get("Cargo.toml")!.split("[dev-dependencies]")[0].matchAll(/^([\w-]+) = /gm)].map((m) => m[1].replace(/-/g, "_")));
+            const rs = files.filter((f) => f.path.startsWith("src/") && f.path.endsWith(".rs"));
+            const code = rs.map((f) => f.content.replace(/\/\/.*$/gm, "")).join("\n");
+            const mods = new Set([...code.matchAll(/^mod (\w+);/gm)].map((m) => m[1]));
+            const imported = new Set([...code.matchAll(/^\s*use [^;]+;/gm)].flatMap((m) => m[0].match(/\w+/g)!));
+            for (const [, root] of code.matchAll(/(?<![\w:.])([a-z_][a-z0-9_]*)::(?!<)/g)) {
+              if (local.has(root) || mods.has(root) || imported.has(root)) continue;
+              assert.ok(deps.has(root), `${framework}/${queue}/${monitoring}/${database}: src uses ${root}:: but Cargo.toml lacks it`);
+            }
+            for (const [, root] of code.matchAll(/^use (\w+)::/gm)) {
+              assert.ok(local.has(root) || mods.has(root) || deps.has(root), `${framework}/${queue}: use ${root}:: without a Cargo dependency`);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it("Rust wires tracing, rate limiting, audit and Sentry only when chosen", () => {
+    for (const framework of ["axum", "actix"]) {
+      const on = gen({ language: "rust", framework, monitoring: "sentry" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const main = on.get("src/main.rs")!;
+      const cargo = on.get("Cargo.toml")!;
+      // OTLP exporter only when the endpoint env var is set, so a bare `cargo run` doesn't spam export errors.
+      assert.match(on.get("src/telemetry.rs")!, /env::var\("OTEL_EXPORTER_OTLP_ENDPOINT"\)[\s\S]*SpanExporter::builder\(\)\s*\.with_http\(\)/);
+      assert.match(main, /telemetry::init\(\)[\s\S]*provider\.shutdown\(\)/, `${framework}: spans must be flushed on exit`);
+      assert.match(main, framework === "axum" ? /TraceLayer::new_for_http\(\)/ : /tracing_actix_web::TracingLogger/);
+      assert.match(main, framework === "axum" ? /GovernorLayer/ : /actix_governor::Governor::new/);
+      assert.match(main, framework === "axum" ? /sentry_tower::NewSentryLayer/ : /sentry_actix::Sentry::new\(\)/);
+      assert.match(main, /env::var\("SENTRY_DSN"\)/);
+      assert.match(main, /target: "audit", method = %method, path = %path, status = [^,]+, ip = %ip/);
+      for (const crate of ["opentelemetry-otlp", "tracing-opentelemetry", "sentry"]) assert.ok(cargo.includes(`\n${crate} = `), `${framework}: ${crate}`);
+
+      const off = gen({ language: "rust", framework, ...OFF, cache: "none", queue: "none" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const offMain = off.get("src/main.rs")!;
+      assert.ok(!off.get("src/telemetry.rs") && !off.get("src/cache.rs") && !off.get("src/queue.rs") && !off.get("src/bin/worker.rs"));
+      assert.doesNotMatch(offMain, /governor|audit|sentry|telemetry|cache::|queue::/i);
+      assert.doesNotMatch(off.get("Cargo.toml")!, /opentelemetry|governor|sentry|redis|lapin|default-run/);
+    }
+  });
+
+  it("Rust axum serves with ConnectInfo whenever the rate limiter or audit log needs the client IP", () => {
+    // Without it the ConnectInfo extractor / peer-IP key extractor fail every request at runtime.
+    for (const [rateLimit, audit] of [[true, false], [false, true], [true, true]]) {
+      const main = gen({ language: "rust", framework: "axum", rateLimit, audit }).get("src/main.rs")!;
+      assert.match(main, /axum::serve\(listener, app\.into_make_service_with_connect_info::<std::net::SocketAddr>\(\)\)/);
+    }
+    assert.match(gen({ language: "rust", framework: "axum", rateLimit: false, audit: false }).get("src/main.rs")!, /axum::serve\(listener, app\)/);
+  });
+
+  it("Rust datadog / otel monitoring export traces over OTLP even with the tracing flag off", () => {
+    const dd = gen({ language: "rust", framework: "axum", tracing: false, monitoring: "datadog" });
+    assert.match(dd.get("src/telemetry.rs")!, /Datadog Agent[\s\S]*OTEL_EXPORTER_OTLP_ENDPOINT/, "the Datadog route must be documented");
+    assert.ok(gen({ language: "rust", framework: "actix", tracing: false, monitoring: "otel" }).get("src/telemetry.rs"));
+    assert.ok(!gen({ language: "rust", framework: "axum", tracing: false, monitoring: "grafana" }).get("src/telemetry.rs"));
+  });
+
+  it("Rust Redis cache: cache-aside entity reads, invalidation on writes, readiness pings Redis", () => {
+    for (const framework of ["axum", "actix"]) {
+      for (const database of ["postgres", "mysql"]) {
+        const g = gen({ language: "rust", framework, database, cache: "redis" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+        assert.match(g.get("src/cache.rs")!, /env::var\("REDIS_URL"\)[\s\S]*get_connection_manager/);
+        const handler = g.get("src/handlers/user.rs")!;
+        const getById = handler.slice(handler.indexOf("async fn get_by_id"), handler.indexOf("async fn create"));
+        // The cache is consulted before the database and populated after a miss.
+        assert.ok(getById.indexOf("cache::get::<User>") < getById.indexOf("SELECT") && getById.indexOf("SELECT") < getById.indexOf("cache::set"), `${framework}/${database}: cache-aside order`);
+        // Stale reads after a write are a correctness bug: update and delete must drop the key.
+        for (const fn of ["async fn update", "async fn delete"]) {
+          const body = handler.slice(handler.indexOf(fn));
+          assert.match(body.slice(0, body.indexOf("\n}\n")), /cache::del\(&cache_key\)/, `${framework}/${database}: ${fn} invalidates`);
+        }
+        assert.match(g.get("src/main.rs")!, /ready=1[\s\S]*cache::ping\(\)/);
+      }
+      // No database → in-memory store; caching it would only add a network hop.
+      const mem = gen({ language: "rust", framework, database: "mongodb", cache: "redis" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      assert.doesNotMatch(mem.get("src/handlers/user.rs")!, /cache::/);
+      assert.ok(!gen({ language: "rust", framework, cache: "memcached" }).get("src/cache.rs"));
+    }
+  });
+
+  it("Rust queues: a worker binary consumes the env var the repo configures, and send_notification publishes", () => {
+    const envVar: Record<string, string> = { rabbitmq: "RABBITMQ_URL", kafka: "KAFKA_BROKERS", nats: "NATS_URL", sqs: "AWS_ENDPOINT_URL_SQS", bullmq: "REDIS_URL" };
+    const eps = [...SAMPLE_ENDPOINTS, { id: "n", method: "POST" as const, path: "/notifications", summary: "", auth: true, pattern: "send_notification" }];
+    for (const framework of ["axum", "actix"]) {
+      for (const queue of RUST_QUEUES) {
+        const g = gen({ language: "rust", framework, queue, cache: "none" }, eps, SAMPLE_ENTITIES);
+        const q = g.get("src/queue.rs")!;
+        assert.ok(q.includes(`env::var("${envVar[queue]}")`), `${framework}/${queue}: queue.rs must read ${envVar[queue]}`);
+        assert.ok(g.get(".env.example")!.includes(`${envVar[queue]}=`), `${queue}: .env.example must define ${envVar[queue]}`);
+        assert.match(q, /pub async fn publish\(/);
+        assert.match(q, /pub async fn consume<F: Fn\(&\[u8\]\)>\(handle: F, shutdown: impl Future<Output = \(\)>\)/);
+        const worker = g.get("src/bin/worker.rs")!;
+        assert.match(worker, /#\[path = "\.\.\/queue\.rs"\]\s*mod queue;/);
+        assert.match(worker, /queue::consume\(handle, shutdown_signal\(\)\)/, "worker must stop on SIGTERM");
+        // Two binaries: `cargo run` must still start the API, and the image must ship the worker.
+        assert.match(g.get("Cargo.toml")!, /default-run = "test_app"/);
+        assert.match(g.get("Dockerfile")!, /target\/release\/worker \/worker/);
+        // Entities exist, yet the publishing endpoint is still served (stubs are skipped with entities).
+        const main = g.get("src/main.rs")!;
+        assert.match(main, /"\/notifications", (axum::routing::post|web::post\(\)\.to)\(send_notification\)/);
+        assert.match(main, /queue::publish\(/);
+      }
+    }
+    assert.match(gen({ language: "rust", framework: "axum", queue: "kafka" }).get("Dockerfile")!, /apt-get install[^\n]*cmake/, "rdkafka cmake-build needs cmake in the build image");
+    assert.match(gen({ language: "rust", framework: "axum", queue: "bullmq" }).get("src/queue.rs")!, /does NOT speak\s*\/\/! BullMQ's format/, "the BullMQ limitation must be stated");
+    const none = gen({ language: "rust", framework: "axum", queue: "none" }, eps, SAMPLE_ENTITIES).get("src/main.rs")!;
+    assert.doesNotMatch(none, /send_notification|\/notifications/);
+  });
 });
