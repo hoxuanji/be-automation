@@ -101,8 +101,8 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 22,
-    "size": 693
+    "lines": 25,
+    "size": 819
   },
   {
     "path": "graphql/schema.graphql",

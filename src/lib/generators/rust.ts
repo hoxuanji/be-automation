@@ -186,7 +186,8 @@ function rustDockerfile(safeName: string, feat: RustFeatures): string {
   // "stub main.rs" dependency-cache trick can't work — copy the tree and build once.
   // ponytail: add cargo-chef if image build time matters.
   return `# syntax=docker/dockerfile:1
-FROM rust:1-slim AS build
+# bookworm = the runtime's Debian 12, so the binary links against the same glibc.
+FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release

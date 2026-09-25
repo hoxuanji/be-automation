@@ -226,8 +226,8 @@
   },
   {
     "path": "migrations/000001_init.up.sql",
-    "lines": 23,
-    "size": 791
+    "lines": 22,
+    "size": 756
   },
   {
     "path": "QUICKSTART.md",

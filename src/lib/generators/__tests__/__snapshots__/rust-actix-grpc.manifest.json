@@ -111,8 +111,8 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 13,
-    "size": 305
+    "lines": 14,
+    "size": 396
   },
   {
     "path": "migrations/20240101000001_init.down.sql",
@@ -121,8 +121,8 @@
   },
   {
     "path": "migrations/20240101000001_init.up.sql",
-    "lines": 23,
-    "size": 791
+    "lines": 22,
+    "size": 756
   },
   {
     "path": "QUICKSTART.md",

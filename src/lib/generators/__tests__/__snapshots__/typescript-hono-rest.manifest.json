@@ -101,8 +101,8 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 21,
-    "size": 652
+    "lines": 24,
+    "size": 778
   },
   {
     "path": "package.json",

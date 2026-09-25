@@ -201,8 +201,8 @@
   },
   {
     "path": "src/main/resources/db/migration/V1__init.sql",
-    "lines": 23,
-    "size": 791
+    "lines": 22,
+    "size": 756
   },
   {
     "path": "src/main/resources/logback-spring.xml",

@@ -196,8 +196,8 @@
   },
   {
     "path": "migrations/versions/0001_init.py",
-    "lines": 39,
-    "size": 1362
+    "lines": 38,
+    "size": 1311
   },
   {
     "path": "pyproject.toml",

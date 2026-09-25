@@ -1939,4 +1939,19 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.match(appProps(quarkus), /^%test\.rate-limit\.enabled=false$/m);
     assert.match(quarkus.get("src/main/java/dev/helios/app/infra/RateLimitFilter.java")!, /if \(!enabled \|\| allow\(ip\)\) return Optional\.empty\(\);/);
   });
+  // An entity that declares createdAt used to get two created_at columns, so the
+  // initial migration failed on Postgres/MySQL and the app never started.
+  it("SQL migrations never declare a column twice", () => {
+    // TypeScript (Prisma) and Python (Alembic) have no generated .sql; these three do.
+    for (const [language, framework, database] of [["java", "spring", "postgres"], ["go", "gin", "mysql"], ["rust", "axum", "postgres"]]) {
+      const files = gen({ language, framework, database }, [], SAMPLE_ENTITIES).files.filter((f) => /\.sql$/.test(f.path) && /CREATE TABLE/.test(f.content));
+      assert.ok(files.length > 0, `${language}: emits a SQL migration`);
+      for (const f of files) {
+        for (const [, body] of f.content.matchAll(/CREATE TABLE IF NOT EXISTS \w+ \(\n([\s\S]*?)\n\);/g)) {
+          const cols = body.split(",\n").map((l) => l.trim().split(/\s+/)[0]);
+          assert.equal(new Set(cols).size, cols.length, `${language} ${f.path}: duplicate column in ${cols}`);
+        }
+      }
+    }
+  });
 });

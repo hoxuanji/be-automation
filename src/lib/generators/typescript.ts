@@ -772,6 +772,8 @@ function tsconfig() {
 function tsDockerfile() {
   return `# syntax=docker/dockerfile:1
 FROM node:22-alpine AS build
+# Prisma's query engine needs OpenSSL; Alpine ships without it.
+RUN apk add --no-cache openssl
 WORKDIR /app
 COPY package.json package-lock.json* ./
 # The generated repo ships no lockfile; npm ci needs one.
@@ -782,6 +784,7 @@ RUN if [ -f prisma/schema.prisma ]; then npx prisma generate; fi
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine
+RUN apk add --no-cache openssl
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json ./
