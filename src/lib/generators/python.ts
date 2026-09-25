@@ -12,7 +12,10 @@ export function pythonFiles(
 ): GeneratedFile[] {
   // gRPC mode replaces the FastAPI / Django / Litestar bootstrap entirely.
   if (config.api === "grpc") {
-    return pyGrpcFiles(config, entities, config.tracing ? pyTracingModule(config.name) : "");
+    // Entity RPCs reuse the REST tree's config, SQLAlchemy db/models and token
+    // verifier; Django's auth.py is the one without web-framework imports.
+    const rest = pythonFiles({ ...config, api: "rest", framework: "django" }, endpoints, entities);
+    return pyGrpcFiles(config, entities, config.tracing ? pyTracingModule(config.name) : "", endpoints, rest);
   }
 
   // GraphQL: Strawberry mounted on the REST FastAPI app (built with no routes),

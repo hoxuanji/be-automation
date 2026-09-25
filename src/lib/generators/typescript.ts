@@ -55,7 +55,7 @@ export function typescriptFiles(
       Object.entries(JSON.parse(pkgJson(safeName(config.name), config, false, false, endpoints)).dependencies as Record<string, string>)
         .filter(([k]) => /^(@opentelemetry\/|prom-client$|@sentry\/node$|dd-trace$)/.test(k))
     );
-    files.push(...tsGrpcFiles(config, entities, { preamble: tsInstrumentPreamble(config), deps: obsDeps }));
+    files.push(...tsGrpcFiles(config, entities, { preamble: tsInstrumentPreamble(config), deps: obsDeps }, endpoints));
     if (config.tracing) files.push({ path: "src/tracing.ts", content: tracingFile(safeName(config.name)) });
     return files;
   }
@@ -1096,7 +1096,7 @@ describe("${pascal} routes", () => {
 // Module-level token verifier shared by every framework's authRequired. Must
 // accept exactly the tokens this service's auth story produces: provider JWTs
 // (JWKS) or the HS256 tokens the auth_* routes sign with JWT_SECRET.
-function tsTokenVerifier(mode: TsAuthMode): string {
+export function tsTokenVerifier(mode: TsAuthMode): string {
   if (mode === "hs256") return `import { jwtVerify, type JWTPayload } from "jose";
 
 // Tokens are self-issued by the auth_* routes (HS256, JWT_SECRET). Verify exactly

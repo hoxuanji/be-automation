@@ -22,8 +22,8 @@ export function goFiles(
   if (config.api === "grpc") {
     const files: GeneratedFile[] = [];
     files.push({ path: "Dockerfile", content: goDockerfile("grpc") });
-    files.push({ path: "internal/config/config.go", content: goConfig() });
-    files.push(...goGrpcFiles(config, entities));
+    // Entity RPCs reuse the REST tree's config, DB layer, models and auth verifier.
+    files.push(...goGrpcFiles(config, entities, endpoints, goFiles({ ...config, api: "rest" }, endpoints, entities)));
     // `make proto` output (gen/go, not in the zip) imports protobuf.
     files.push({ path: "go.mod", content: goMod(module, files, [...migrate, "google.golang.org/protobuf"]) });
     return files;

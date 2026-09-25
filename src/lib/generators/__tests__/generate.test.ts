@@ -687,7 +687,8 @@ describe("Stack-option wiring", () => {
 // REST honored them, so the same builder toggles silently meant nothing.
 
 describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
-  const OFF = { rateLimit: false, audit: false, tracing: false, monitoring: "none" };
+  // auth "none" too: with a provider, protected entity RPCs add an auth interceptor.
+  const OFF = { rateLimit: false, audit: false, tracing: false, monitoring: "none", auth: "none" };
 
   it("Go go.mod requires every external module the grpc/graphql code imports (else `go build` fails)", () => {
     for (const api of ["grpc", "graphql"]) {
@@ -764,7 +765,7 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     assert.ok(main.startsWith(`import "./tracing.js";`), "ESM needs the .js suffix and tracing must load first");
     assert.match(main, /new grpc\.Server\(\{ interceptors \}\)/);
     assert.match(main, /METRICS_PORT/);
-    assert.match(g.get("src/interceptors.ts")!, /\[metrics, rateLimit, audit\]/);
+    assert.match(g.get("src/interceptors.ts")!, /\[metrics, rateLimit, audit, auth\]/);
     const deps = JSON.parse(g.get("package.json")!).dependencies;
     assert.ok(deps["prom-client"] && deps["@opentelemetry/sdk-node"]);
 
@@ -783,7 +784,7 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
 
     const g = gen({ language: "python", framework: "fastapi", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
     const grpcMain = g.get("app/main.py")!;
-    assert.match(grpcMain, /interceptors=\[server_interceptor\(\), MetricsInterceptor\(\), RateLimitInterceptor\(\), AuditInterceptor\(\)\]/);
+    assert.match(grpcMain, /interceptors=\[server_interceptor\(\), MetricsInterceptor\(\), RateLimitInterceptor\(\), AuditInterceptor\(\), AuthInterceptor\(\)\]/);
     assert.match(grpcMain, /start_http_server\(/);
     assert.match(grpcMain, /from test_app\.v1 import service_pb2_grpc/, "stubs are importable from gen/python on PYTHONPATH");
     assert.match(grpcMain, /service_pb2_grpc\.add_UserServiceServicer_to_server/);
@@ -1432,5 +1433,81 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.match(test, /repeat\(60\)[\s\S]*HttpStatusCode\.TooManyRequests/);
     assert.match(test, /TestQueue\.published\.any/);
     assert.match(test, /assertNotNull\(TestCache\.get\("users:\$id"\)/);
+  });
+
+  // gRPC entity RPCs used to answer UNIMPLEMENTED: a "working" server that
+  // stored nothing. They must run on the same data layer as the REST routes.
+  it("gRPC entity RPCs are backed by the REST data layer, never UNIMPLEMENTED", () => {
+    const cases: [string, string, string, string, RegExp][] = [
+      ["go", "gin", "postgres", "internal/grpcserver/user_service.go", /s\.db\.WithContext\(ctx\)\.First\(&m, "id = \?"/],
+      ["go", "chi", "mongodb", "internal/grpcserver/user_service.go", /s\.store\.Create\(ctx, userCollection/],
+      ["typescript", "fastify", "postgres", "src/services/user.service.ts", /prisma\.user\.create\(\{ data: createData/],
+      ["typescript", "express", "mongodb", "src/services/user.service.ts", /prisma\.user\.findMany/],
+      ["python", "fastapi", "postgres", "app/services/user.py", /with SessionLocal\(\) as db:/],
+      ["python", "fastapi", "mongodb", "app/services/user.py", /_rows\[str\(item\.id\)\] = item/],
+    ];
+    for (const [language, framework, database, path, dbCall] of cases) {
+      const g = gen({ language, framework, database, api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const svc = g.get(path)!;
+      const label = `${language}/${database}`;
+      assert.ok(svc, `${label}: missing ${path}`);
+      assert.doesNotMatch(svc, /not implemented|codes\.Unimplemented|status\.UNIMPLEMENTED|StatusCode\.UNIMPLEMENTED/i, `${label}: entity RPCs must not be stubs`);
+      assert.match(svc, dbCall, `${label}: RPCs must hit the data layer`);
+      for (const code of [/NotFound|NOT_FOUND|"P2025"/, /InvalidArgument|INVALID_ARGUMENT|invalid\(/]) {
+        assert.match(svc + (g.get("internal/grpcserver/server.go") ?? "") + (g.get("src/services/grpc-util.ts") ?? ""), code, `${label}: ${code}`);
+      }
+    }
+    // Unique violations are ALREADY_EXISTS wherever the database enforces them.
+    assert.match(gen({ api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("internal/grpcserver/server.go")!, /codes\.AlreadyExists/);
+    assert.match(gen({ language: "typescript", framework: "fastify", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("src/services/grpc-util.ts")!, /"P2002"[\s\S]*ALREADY_EXISTS/);
+    assert.match(gen({ language: "python", framework: "fastapi", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("app/services/user.py")!, /except IntegrityError:[\s\S]*ALREADY_EXISTS/);
+  });
+
+  it("gRPC reuses the REST models / db / auth files verbatim, so both protocols share one schema", () => {
+    const rest = gen({ api: "rest" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const grpc = gen({ api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    for (const p of ["internal/models/models.go", "internal/db/gorm.go", "internal/auth/jwt.go", "internal/config/config.go"]) {
+      assert.equal(grpc.get(p), rest.get(p), p);
+    }
+    assert.match(grpc.get("cmd/api/main.go")!, /db\.OpenGorm\(cfg\.DatabaseURL\)[\s\S]*grpcserver\.NewUserService\(gormDB\)/);
+    const py = gen({ language: "python", framework: "fastapi", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const pyRest = gen({ language: "python", framework: "fastapi", api: "rest" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.equal(py.get("app/models.py"), pyRest.get("app/models.py"));
+    assert.equal(py.get("app/db.py"), pyRest.get("app/db.py"));
+    assert.match(py.get("pyproject.toml")!, /psycopg2-binary/, "app/db.py's sync engine needs the sync driver");
+    assert.ok(!py.get("app/auth.py")!.includes("def auth_required"), "gRPC keeps only the token verifier");
+  });
+
+  it("gRPC auth interceptor guards exactly the RPCs whose REST routes require auth", () => {
+    // SAMPLE_ENDPOINTS protect GET/POST /users and GET/DELETE /users/:id; no PUT/PATCH, nothing on /posts.
+    const want = ["ListUser", "GetUser", "CreateUser", "DeleteUser"];
+    const go = gen({ api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("internal/grpcserver/interceptors.go")!;
+    const ts = gen({ language: "typescript", framework: "fastify", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("src/interceptors.ts")!;
+    const py = gen({ language: "python", framework: "fastapi", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("app/interceptors.py")!;
+    for (const [lang, src] of [["go", go], ["ts", ts], ["py", py]]) {
+      const guarded = [...src.matchAll(/"\/test_app\.v1\.(\w+)Service\/(\w+)"/g)].map((m) => m[2]);
+      assert.deepEqual(guarded, want, `${lang}: guarded RPCs`);
+      assert.match(src, /authorization/i, `${lang}: reads the authorization metadata`);
+      assert.match(src, /UNAUTHENTICATED|Unauthenticated/, `${lang}: rejects with UNAUTHENTICATED`);
+    }
+    assert.match(go, /auth\.ExtractBearer\(h\)[\s\S]*auth\.Default\(\)[\s\S]*v\.Verify\(ctx, raw\)/, "same verifier as REST");
+    assert.match(ts, /import \{ unconfigured, verify \} from "\.\/auth\.js"/);
+    assert.match(py, /from app\.auth import _verify/);
+
+    // No provider and no auth_* patterns: REST verifies nothing, so neither does gRPC.
+    const open = gen({ api: "grpc", auth: "none" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.ok(!open.get("internal/grpcserver/interceptors.go")?.includes("func Auth()"));
+    assert.ok(!open.get("internal/auth/jwt.go"));
+  });
+
+  it("gRPC proto declares each field once, so buf / protoc accept it", () => {
+    // An entity that models createdAt itself used to get a second created_at = 90.
+    const proto = gen({ api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).files.find((f) => f.path.endsWith("service.proto"))!.content;
+    for (const [, name, body] of proto.matchAll(/message (\w+) \{\n([\s\S]*?)\n\}/g)) {
+      const fields = [...body.matchAll(/^\s+[\w.]+ (\w+) = \d+;/gm)].map((m) => m[1]);
+      assert.equal(new Set(fields).size, fields.length, `${name}: duplicate field in ${fields}`);
+    }
+    assert.match(proto, /message Post \{[\s\S]*created_at = 90;[\s\S]*updated_at = 91;/, "entities without timestamps still get the server-managed ones");
+    assert.match(proto, /uint32 page = 1;[^\n]*\n\s+uint32 page_size = 2;/);
   });
 });
