@@ -256,7 +256,8 @@ jobs:
         working-directory: /tmp/smoke-repo
         run: |
           if [ -x ./mvnw ]; then MVN=./mvnw; else MVN=mvn; fi
-          $MVN -B compile -q 2>&1 | tee -a /tmp/smoke.log
+          # Java: generated tests must pass with no external services (H2 test profile, fakes).
+          $MVN -B test -q 2>&1 | tee -a /tmp/smoke.log
 
       - name: Smoke build (Kotlin – Gradle)
         if: matrix.combo.language == 'kotlin'
@@ -275,6 +276,8 @@ jobs:
       - name: Smoke build (Rust)
         if: matrix.combo.language == 'rust'
         working-directory: /tmp/smoke-repo
+        env:
+          CARGO_TERM_COLOR: never
         run: cargo check 2>&1 | tee -a /tmp/smoke.log
 
       - name: Report smoke errors
@@ -282,8 +285,9 @@ jobs:
         run: |
           # CI logs aren't always downloadable; surface the real errors as annotations.
           # Compiler errors first (Go, Rust, TS, Maven/javac, Kotlin), then failing tests from JUnit/surefire reports.
-          grep -E '\.go:[0-9]+:[0-9]+:|^error(\[E[0-9]+\])?:|^ *--> |error TS[0-9]+|\[ERROR\] .*\.(java|kt)|COMPILATION ERROR|^e: |What went wrong|undefined name|missing go.sum|Could not resolve|Cannot resolve' /tmp/smoke.log 2>/dev/null \
+          sed -E 's/\x1b\[[0-9;]*m//g' /tmp/smoke.log 2>/dev/null > /tmp/smoke.clean.log || true
+          grep -E '\.go:[0-9]+:[0-9]+:|^error(\[E[0-9]+\])?:|^ *--> |error TS[0-9]+|\[ERROR\] .*\.(java|kt)|COMPILATION ERROR|^e: |What went wrong|undefined name|missing go.sum|Could not resolve|Cannot resolve|CMake Error|failed to run custom build command|Tests run:.*Failures: [1-9]|Caused by: ' /tmp/smoke.clean.log 2>/dev/null \
             | grep -vE '^\s*(Compiling|Checking|Downloaded|Downloading)' | head -30 | while IFS= read -r l; do echo "::error::$l"; done
           find /tmp/smoke-repo \( -path '*test-results*' -o -path '*surefire-reports*' \) -name '*.xml' 2>/dev/null \
-            | xargs -r grep -hoE '<testcase [^>]*name="[^"]*"|<failure [^>]*message="[^"]{0,300}' | grep -B1 '<failure' | head -20 \
+            | xargs -r grep -hoE '<testcase [^>]*name="[^"]*"|<(failure|error) [^>]*message="[^"]{0,300}' | grep -B1 -E '<(failure|error)' | head -20 \
             | while IFS= read -r l; do echo "::error::$l"; done
