@@ -28,10 +28,10 @@ export function goFiles(
     return files;
   }
 
-  // GraphQL: the REST server (router, middleware, observability) with no
-  // routes of its own, plus gqlgen mounted on that same router.
+  // GraphQL: the REST server (router, middleware, observability, DB layer for
+  // the entities) with no routes of its own, plus gqlgen mounted on that router.
   if (config.api === "graphql" && isGraphqlSupported(config.language)) {
-    const rest = goFiles({ ...config, api: "rest" }, [], [])
+    const rest = goFiles({ ...config, api: "rest" }, [], entities)
       .filter((f) => f.path !== "go.mod")
       .map((f) => (f.path === "Dockerfile" ? { ...f, content: goDockerfile("graphql") } : f));
     const files = goGraphqlFiles(config, entities, rest);

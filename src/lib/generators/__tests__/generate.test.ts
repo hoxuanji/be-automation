@@ -991,4 +991,85 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     assert.match(stubs, /fun `GET users by id returns 401 without token`/);
     assert.match(contract("ktor", eps, [])!, /fun `GET users search returns 200`/);
   });
+
+  // GraphQL resolvers used to keep entities in sync.Map / Map / dict, so data
+  // vanished on restart even with Postgres configured. They must go through
+  // the same DB layer as the REST handlers.
+  it("GraphQL resolvers persist through the REST DB layer, not an in-memory store", () => {
+    for (const framework of ["gin", "fiber", "echo", "chi"]) {
+      const { files, get } = gen({ api: "graphql", framework }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const graph = files.filter((f) => f.path.startsWith("graph/"));
+      for (const f of graph) assert.doesNotMatch(f.content, /sync\.Map|NewMemoryStore/, `${framework}: ${f.path}`);
+      const resolvers = get("graph/schema.resolvers.go")!;
+      assert.match(resolvers, /r\.db\.WithContext\(ctx\)\.Create\(&row\)/);
+      assert.match(resolvers, /\.Limit\(ps\)\.Offset\(\(p - 1\) \* ps\)/, "listUsers pages in SQL, as the SDL declares");
+      assert.match(get("graph/user.go")!, /func userToGQL\(m \*models\.User\) \*User/, "gqlgen and GORM models are mapped explicitly");
+      assert.ok(get("internal/models/models.go") && get("internal/db/gorm.go"), `${framework}: REST GORM layer is shipped`);
+      const server = get("internal/server/server.go")!;
+      assert.match(server, /gormDB, err := db\.OpenGorm[\s\S]*mountGraphQL\(r, gormDB\)/, `${framework}: GraphQL gets the server's DB handle`);
+      assert.doesNotMatch(server, /handlers\.|userH/, `${framework}: REST entity routes are not mounted in GraphQL mode`);
+      assert.ok(!files.some((f) => f.path.startsWith("internal/handlers/")));
+    }
+    const mongo = gen({ api: "graphql", database: "mongodb" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.match(mongo.get("graph/schema.resolvers.go")!, /r\.store\.Create\(ctx, userCollection, doc\)/);
+    assert.match(mongo.get("internal/server/server.go")!, /db\.OpenMongo[\s\S]*mountGraphQL\(r, store\)/);
+
+    for (const framework of ["express", "fastify", "hono", "nestjs"]) {
+      const { get } = gen({ language: "typescript", framework, api: "graphql" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const r = get("src/resolvers/user.ts")!;
+      assert.doesNotMatch(r, /new Map/, framework);
+      assert.match(r, /import \* as repo from "\.\.\/repositories\/user\.repository"/);
+      assert.match(r, /validateUserBody/, "same zod validator as REST");
+      assert.match(get("src/repositories/user.repository.ts")!, /prisma\.user\.findMany\(\{ skip, take: pageSize \}\)/);
+      assert.ok(get("prisma/schema.prisma"));
+      assert.ok(JSON.parse(get("package.json")!).dependencies["@prisma/client"], "Prisma client is a dependency");
+    }
+
+    const py = gen({ language: "python", framework: "fastapi", api: "graphql" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const schema = py.get("app/schema.py")!;
+    assert.ok(!py.get("app/graphql_store.py") && !schema.includes("store["), "no dict store on SQL databases");
+    assert.match(schema, /with SessionLocal\(\) as db:/);
+    assert.match(schema, /\.offset\(\(page - 1\) \* page_size\)/);
+    assert.match(schema, /row = models\.User\(\*\*data\)/);
+    assert.ok(py.get("app/db.py") && py.get("app/models.py"));
+    assert.match(py.get("pyproject.toml")!, /^sqlalchemy = /m);
+  });
+
+  it("GraphQL resolvers return coded GraphQL errors for missing rows and invalid input", () => {
+    const go = gen({ api: "graphql" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.match(go.get("graph/resolver.go")!, /gqlerror\.Error\{Message: msg, Extensions: map\[string\]any\{"code": code\}\}/);
+    const goRes = go.get("graph/schema.resolvers.go")!;
+    assert.match(goRes, /return nil, lookupErr\(err, "User", input\.ID\)/, "update of a missing row is NOT_FOUND");
+    assert.match(goRes, /RowsAffected == 0 \{\n\t\treturn false, notFound\("User", id\)/);
+    assert.match(go.get("graph/user.go")!, /badInput\("email must not be empty"\)/);
+
+    const ts = gen({ language: "typescript", framework: "express", api: "graphql" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("src/resolvers/user.ts")!;
+    assert.match(ts, /code: "NOT_FOUND"/);
+    assert.match(ts, /err instanceof ZodError[\s\S]*code: "BAD_USER_INPUT"/);
+
+    const py = gen({ language: "python", framework: "fastapi", api: "graphql" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("app/schema.py")!;
+    assert.match(py, /extensions=\{"code": "NOT_FOUND"\}/);
+    assert.match(py, /except \(IntegrityError, DataError\)[\s\S]*"BAD_USER_INPUT"/, "unique violations are input errors, not 500s");
+  });
+
+  it("Go GraphQL resolvers match gqlgen's generated names and live only in graph/schema.resolvers.go", async () => {
+    const { gqlgenName } = await import("../graphql/go.ts");
+    // gqlgen's templates.ToGo — resolver methods and model fields must use these exact names.
+    const cases: [string, string][] = [["id", "ID"], ["userId", "UserID"], ["createdAt", "CreatedAt"], ["listApiKeys", "ListAPIKeys"], ["avatarUrl", "AvatarURL"], ["UsersPage", "UsersPage"], ["getUser", "GetUser"]];
+    for (const [input, want] of cases) assert.equal(gqlgenName(input), want, input);
+
+    // follow-schema layout: `make gql` copies every resolver body into
+    // graph/schema.resolvers.go, so a resolver defined in any other file is a
+    // duplicate method and the build breaks.
+    const { files } = gen({ api: "graphql", framework: "chi" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const graph = files.filter((f) => f.path.startsWith("graph/") && f.path.endsWith(".go"));
+    const want = ["Health", "ListUsers", "GetUser", "ListPosts", "GetPost", "CreateUser", "UpdateUser", "DeleteUser", "CreatePost", "UpdatePost", "DeletePost"];
+    for (const m of want) {
+      const defs = graph.filter((f) => new RegExp(`^func \\(r \\*(query|mutation)Resolver\\) ${m}\\(`, "m").test(f.content)).map((f) => f.path);
+      assert.deepEqual(defs, ["graph/schema.resolvers.go"], m);
+    }
+    for (const f of graph.filter((x) => x.path !== "graph/schema.resolvers.go")) {
+      assert.doesNotMatch(f.content, /^func \(r \*(query|mutation)Resolver\)/m, `${f.path} would be merged by gqlgen`);
+    }
+  });
 });

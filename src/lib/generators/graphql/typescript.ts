@@ -11,17 +11,22 @@ import { primaryKey, pluralize } from "./schema";
  * front of /graphql without re-implementing any of it here.
  *
  * The generated server reads SDL at startup from `graphql/schema.graphql`
- * (emitted by `generateGraphqlSchema`) and binds in-memory resolvers per
- * entity. CRUD logic uses an in-memory Map keyed by primary key — same
- * trade-off as the gRPC TS generator, which keeps the server runnable on
- * `npm install && npm run dev` with no DB attached.
+ * (emitted by `generateGraphqlSchema`) and binds resolvers per entity that
+ * go through the REST data layer: src/repositories/<entity>.repository.ts
+ * (Prisma, or the REST in-memory repository on MongoDB) and the zod
+ * validators, both taken from `restWithEntities` — the same REST tree built
+ * with the entities, whose routes/services are not used.
  */
 export function tsGraphqlFiles(
   config: StackConfig,
   entities: Entity[],
-  rest: GeneratedFile[]
+  rest: GeneratedFile[],
+  restWithEntities: GeneratedFile[]
 ): GeneratedFile[] {
-  const files = mountOnTsRest(rest, {
+  const dataLayer = restWithEntities.filter((f) => /^(prisma\/schema\.prisma|src\/(repositories|validators)\/)/.test(f.path));
+  const pkgWithDb = restWithEntities.find((f) => f.path === "package.json")!;
+  const base = rest.map((f) => (f.path === "package.json" ? pkgWithDb : f)).concat(dataLayer);
+  const files = mountOnTsRest(base, {
     imports: `import { createSchema, createYoga } from "graphql-yoga";\nimport { typeDefs } from "./schema";\nimport { resolvers } from "./resolvers";`,
     mount: tsGraphqlMount(config.framework),
     deps: { "graphql-yoga": "^5.10.4", graphql: "^16.10.0" },
@@ -194,72 +199,57 @@ ${mutationEntries}
 function tsGraphqlEntityResolver(entity: Entity): string {
   const name = entity.name;
   const camel = toCamel(name);
+  const kebab = toKebab(name);
   const pk = primaryKey(entity);
 
-  return `// In-memory CRUD for ${name}. Replace with a real DB call (Prisma, Drizzle,
-// raw pg, etc.) when you wire up persistence — the resolver signatures stay
-// the same so the GraphQL schema does not change.
+  return `import { GraphQLError } from "graphql";
+import { ZodError } from "zod";
+import * as repo from "../repositories/${kebab}.repository";
+import { validate${name}Body } from "../validators/${kebab}.validator";
 
-type ${name} = {
-${entity.fields.map((f) => `  ${f.name}: ${tsFieldType(f.type)};`).join("\n")}
-};
+// CRUD for ${name} through the same repository + validator as the REST routes.
 
-const store = new Map<string, ${name}>();
+const notFound = (id: string) =>
+  new GraphQLError(\`${name} \${id} not found\`, { extensions: { code: "NOT_FOUND" } });
+
+// The REST validator checks JSON bodies: round-trip the GraphQL input through
+// JSON so DateTime values become ISO strings and explicit nulls become "unset".
+function validate(input: unknown) {
+  try {
+    return validate${name}Body(JSON.parse(JSON.stringify(input, (_k, v) => (v === null ? undefined : v))));
+  } catch (err) {
+    if (err instanceof ZodError) {
+      throw new GraphQLError("Invalid ${name} input", { extensions: { code: "BAD_USER_INPUT", issues: err.issues } });
+    }
+    throw err;
+  }
+}
 
 export const ${camel}Resolvers = {
-  list: (_: unknown, args: { page?: number; pageSize?: number }) => {
-    const page = Math.max(1, args.page ?? 1);
-    const pageSize = Math.max(1, Math.min(100, args.pageSize ?? 20));
-    const all = Array.from(store.values());
-    const start = (page - 1) * pageSize;
-    return {
-      items: all.slice(start, start + pageSize),
-      total: all.length,
-      page,
-      pageSize,
-    };
-  },
-  get: (_: unknown, args: { ${pk.name}: string }) => store.get(String(args.${pk.name})) ?? null,
-  create: (_: unknown, args: { input: ${name} }) => {
-    const id = String(args.input.${pk.name} ?? crypto.randomUUID());
-    const row = { ...args.input, ${pk.name}: id } as ${name};
-    store.set(id, row);
+  list: (_: unknown, args: { page?: number | null; pageSize?: number | null }) =>
+    repo.findMany({
+      page: Math.max(1, args.page ?? 1),
+      pageSize: Math.max(1, Math.min(100, args.pageSize ?? 20)),
+    }),
+  get: (_: unknown, args: { ${pk.name}: string }) => repo.findById(String(args.${pk.name})),
+  create: (_: unknown, args: { input: unknown }) => repo.create(validate(args.input)),
+  update: async (_: unknown, args: { input: { ${pk.name}: string } }) => {
+    const id = String(args.input.${pk.name});
+    const data = validate(args.input);
+    if (!(await repo.findById(id))) throw notFound(id);
+    const row = await repo.update(id, data);
+    if (!row) throw new GraphQLError(\`${name} \${id} could not be updated\`);
     return row;
   },
-  update: (_: unknown, args: { input: ${name} }) => {
-    const id = String(args.input.${pk.name});
-    const existing = store.get(id);
-    if (!existing) throw new Error(\`${name} \${id} not found\`);
-    const next = { ...existing, ...args.input };
-    store.set(id, next);
-    return next;
-  },
-  remove: (_: unknown, args: { ${pk.name}: string }) => {
-    return store.delete(String(args.${pk.name}));
+  remove: async (_: unknown, args: { ${pk.name}: string }) => {
+    const id = String(args.${pk.name});
+    if (!(await repo.findById(id))) throw notFound(id);
+    await repo.remove(id);
+    return true;
   },
 };
 `;
 }
-
-function tsFieldType(t: string): string {
-  switch (t) {
-    case "string":
-    case "text":
-    case "uuid":
-      return "string";
-    case "number":
-      return "number";
-    case "boolean":
-      return "boolean";
-    case "date":
-      return "Date | string";
-    case "json":
-      return "unknown";
-    default:
-      return "unknown";
-  }
-}
-
 
 function tsGraphqlMount(framework: string): string {
   const yoga = `const yoga = createYoga({ schema: createSchema({ typeDefs, resolvers }) });`;
