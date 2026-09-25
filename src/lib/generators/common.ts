@@ -20,11 +20,10 @@ const languageMeta: Record<
   kotlin: { runCommand: "./gradlew run", testCommand: "./gradlew test", devCommand: "./gradlew run", installCommand: "./gradlew dependencies" },
 };
 
-// Languages whose generators wire tracing (OTLP), rate limiting and the
-// selected monitoring SDK into the app. Java only gets what java.ts emits
-// (Prometheus metrics for `grafana`), so the README must not claim more for it.
+// Every language generator now wires tracing (OTLP), rate limiting and the selected
+// monitoring SDK into the app; kept as a predicate so a new language opts in explicitly.
 const hasAppObservability = (l: StackConfig["language"]) =>
-  l === "go" || l === "typescript" || l === "python" || l === "rust" || l === "kotlin";
+  l === "go" || l === "typescript" || l === "python" || l === "rust" || l === "kotlin" || l === "java";
 
 // Whether the app exports OTLP traces. Go also turns tracing on when OTel is the
 // monitoring choice (go.ts: withTracing).
@@ -36,9 +35,8 @@ const emitsOtel = (c: StackConfig) =>
     (c.language === "rust" && (c.monitoring === "otel" || c.monitoring === "datadog")));
 
 // REST servers ping their dependencies (DB, cache, queue) on /health?ready=1; gRPC/GraphQL
-// trees and Java answer readiness with plain /health.
-const readyPath = (c: StackConfig) =>
-  c.api === "rest" && c.language !== "java" ? "/health?ready=1" : "/health";
+// trees answer readiness with plain /health.
+const readyPath = (c: StackConfig) => (c.api === "rest" ? "/health?ready=1" : "/health");
 
 // Self-managed auth (no provider): pattern login/register endpoints sign JWTs with JWT_SECRET.
 const selfIssuesJwt = (c: StackConfig, endpoints: Endpoint[]) =>
@@ -423,7 +421,7 @@ function observabilityClaims(config: StackConfig): string[] {
   if (config.rateLimit) {
     out.push(full ? "- Per-client rate limiting is enabled." : `- Rate limiting: not generated for ${langEmoji[lang]} yet.`);
   }
-  if (config.audit && lang !== "java") {
+  if (config.audit) {
     out.push("- Audit logs are emitted for every mutating request.");
   }
   return out.length > 0 ? out : ["- No monitoring provider selected."];

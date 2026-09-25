@@ -487,13 +487,8 @@ describe("Stack-option wiring", () => {
   });
 
   it("README only claims tracing/rate limiting where the language implements it", () => {
-    // Java doesn't wire tracing / rate limiting (java.ts), so its README must not claim them.
-    const java = gen({ language: "java", framework: "quarkus" });
-    assert.ok(!java.get("README.md")!.includes("traces are exported via OTLP"), "java README over-claims tracing");
-    assert.ok(!java.get("README.md")!.includes("rate limiting is enabled"), "java README over-claims rate limiting");
-    assert.ok(!java.get(".env.example")!.includes("OTEL_EXPORTER_OTLP_ENDPOINT"));
-    // Every other language implements both, so the README says so and .env.example documents the endpoint.
-    for (const [language, framework] of [["go", "gin"], ["typescript", "express"], ["python", "fastapi"], ["rust", "axum"], ["kotlin", "ktor"]]) {
+    // Every language implements both, so the README says so and .env.example documents the endpoint.
+    for (const [language, framework] of [["go", "gin"], ["typescript", "express"], ["python", "fastapi"], ["rust", "axum"], ["kotlin", "ktor"], ["java", "spring"], ["java", "quarkus"]]) {
       const g = gen({ language, framework });
       assert.ok(g.get("README.md")!.includes("traces are exported via OTLP"), `${language} README should claim tracing`);
       assert.ok(g.get("README.md")!.includes("rate limiting is enabled"), `${language} README should claim rate limiting`);
@@ -1684,5 +1679,154 @@ describe("Every deployment target gets a real CI deploy job", () => {
       assert.doesNotMatch(worker!, /ports:/, `${language}: worker publishes no ports`);
     }
     assert.doesNotMatch(gen({ language: "go", framework: "gin", api: "grpc", queue: "kafka" }).get("docker-compose.yml")!, /^  worker:/m);
+  });
+
+  // ─── Java parity: tracing / rate limit / audit / monitoring / cache / queues ──
+
+  const JAVA = ["spring", "quarkus"] as const;
+  const javaGen = (framework: string, overrides: Record<string, unknown> = {}, endpoints = SAMPLE_ENDPOINTS, entities = SAMPLE_ENTITIES) =>
+    gen({ language: "java", framework, ...overrides }, endpoints, entities);
+  const javaSources = (g: ReturnType<typeof gen>) => g.files.filter((f) => f.path.startsWith("src/main/java/")).map((f) => f.content).join("\n");
+  const appProps = (g: ReturnType<typeof gen>) => g.get("src/main/resources/application.properties")!;
+
+  it("Java: each observability toggle adds its library AND the code/config that uses it; off removes both", () => {
+    // A dependency without wiring (or wiring without the dependency) is the
+    // "claimed but not generated" gap the README used to warn about.
+    const wiring: Record<string, Record<string, [RegExp, RegExp]>> = {
+      spring: {
+        tracing: [/micrometer-tracing-bridge-otel/, /management\.otlp\.tracing\.endpoint=\$\{OTEL_EXPORTER_OTLP_ENDPOINT:/],
+        rateLimit: [/bucket4j_jdk17-core/, /class RateLimitFilter extends OncePerRequestFilter[\s\S]*response\.setStatus\(429\)/],
+        audit: [/<artifactId>logstash-logback-encoder</, /class AuditFilter extends OncePerRequestFilter[\s\S]*MUTATING\.contains/],
+      },
+      quarkus: {
+        tracing: [/quarkus-opentelemetry/, /quarkus\.otel\.exporter\.otlp\.traces\.endpoint=\$\{OTEL_EXPORTER_OTLP_ENDPOINT:/],
+        rateLimit: [/bucket4j_jdk17-core/, /@ServerRequestFilter\(preMatching = true\)[\s\S]*status\(429\)/],
+        audit: [/<artifactId>quarkus-resteasy-reactive-jackson</, /@ServerResponseFilter[\s\S]*MUTATING\.contains/],
+      },
+    };
+    for (const framework of JAVA) {
+      for (const [flag, [depRe, codeRe]] of Object.entries(wiring[framework])) {
+        const on = javaGen(framework, { [flag]: true });
+        const off = javaGen(framework, { [flag]: false });
+        assert.match(on.get("pom.xml")!, depRe, `${framework} ${flag}: dependency`);
+        assert.match(javaSources(on) + appProps(on), codeRe, `${framework} ${flag}: wiring`);
+        assert.doesNotMatch(javaSources(off) + appProps(off), codeRe, `${framework} ${flag}=false must not emit the wiring`);
+      }
+      // Sentry / Datadog: SDK in the pom, DSN / API key read from the env names .env.example documents.
+      const sentry = javaGen(framework, { monitoring: "sentry" });
+      assert.match(sentry.get("pom.xml")!, framework === "spring" ? /sentry-spring-boot-starter-jakarta/ : /quarkus-logging-sentry/);
+      assert.match(appProps(sentry), /dsn=\$\{SENTRY_DSN:\}/);
+      assert.ok(sentry.get(".env.example")!.includes("SENTRY_DSN="));
+      const dd = javaGen(framework, { monitoring: "datadog" });
+      assert.match(dd.get("pom.xml")!, /micrometer-registry-datadog/);
+      assert.match(appProps(dd), /datadog[\w.]*\.api-key=\$\{DD_API_KEY:\}/);
+      assert.ok(!javaGen(framework, { monitoring: "grafana" }).get("pom.xml")!.includes("datadog"));
+    }
+  });
+
+  it("Java: every queue option gets a publisher + consumer that read the env var docker-compose/.env set", () => {
+    // The app must read the same variable the generated compose file / .env.example provide,
+    // otherwise it silently falls back to localhost inside a container.
+    const envOf: Record<string, string> = { rabbitmq: "RABBITMQ_URL", kafka: "KAFKA_BROKERS", nats: "NATS_URL", sqs: "AWS_ENDPOINT_URL_SQS", bullmq: "REDIS_URL" };
+    for (const framework of JAVA) {
+      for (const queue of queues.map((o) => o.id)) {
+        const g = javaGen(framework, { queue, cache: "memcached" });
+        const env = envOf[queue];
+        assert.ok(env, `no expectation for queue ${queue}`);
+        assert.ok(appProps(g).includes(`\${${env}:`), `${framework}/${queue}: application.properties must read ${env}`);
+        assert.ok(g.get(".env.example")!.includes(`${env}=`) || g.get("docker-compose.yml")!.includes(`${env}:`), `${framework}/${queue}: ${env} is not provided anywhere`);
+        const pub = g.get("src/main/java/dev/helios/app/messaging/NotificationPublisher.java");
+        const con = g.get("src/main/java/dev/helios/app/messaging/NotificationConsumer.java");
+        assert.ok(pub && /public void publish\(String payload\)/.test(pub), `${framework}/${queue}: publisher`);
+        assert.ok(con && /void onMessage\(String payload\)/.test(con), `${framework}/${queue}: consumer`);
+      }
+      assert.ok(!javaGen(framework, { queue: "none" }).files.some((f) => f.path.includes("/messaging/")), "no queue, no messaging code");
+      // bullmq has no JVM client: the code must say so instead of pretending to be a BullMQ worker.
+      assert.match(javaGen(framework, { queue: "bullmq" }).get("src/main/java/dev/helios/app/messaging/NotificationPublisher.java")!, /BullMQ workers will\s+\*\s+NOT see these messages/);
+    }
+  });
+
+  it("Java: `mvn test` needs no broker, Redis, exporter or database", () => {
+    // CI and new users run the generated tests on a laptop with nothing installed.
+    for (const queue of ["rabbitmq", "kafka", "nats", "sqs", "bullmq"]) {
+      const spring = javaGen("spring", { queue, monitoring: "datadog" });
+      const test = spring.get("src/test/resources/application-test.properties")!;
+      assert.match(test, /jdbc:h2:mem:/);
+      assert.match(test, /queue\.consumer\.enabled=false/);
+      assert.match(test, /spring\.cache\.type=simple/);
+      assert.match(test, /management\.datadog\.metrics\.export\.enabled=false/);
+      assert.match(spring.get("src/main/java/dev/helios/app/messaging/NotificationConsumer.java")!,
+        /@ConditionalOnProperty\(name = "queue\.consumer\.enabled", havingValue = "true", matchIfMissing = true\)/);
+      assert.match(spring.get("src/test/java/dev/helios/app/UserControllerTest.java")!, /@ActiveProfiles\("test"\)/);
+
+      const quarkus = appProps(javaGen("quarkus", { queue, monitoring: "sentry" }));
+      assert.match(quarkus, /%test\.quarkus\.datasource\.db-kind=h2/);
+      assert.match(quarkus, /%test\.quarkus\.otel\.sdk\.disabled=true/);
+      assert.match(quarkus, /%test\.quarkus\.log\.sentry\.enabled=false/);
+      // SmallRye channels become in-memory; hand-rolled consumers are switched off.
+      assert.match(quarkus, /%test\.mp\.messaging\.incoming\.notifications-in\.connector=smallrye-in-memory|%test\.queue\.consumer\.enabled=false/);
+    }
+    assert.match(javaGen("spring", { queue: "kafka" }).get("src/test/resources/application-test.properties")!, /spring\.kafka\.admin\.auto-create=false/);
+  });
+
+  it("Java: Redis cache serves get-by-id and is evicted on every write", () => {
+    // Without eviction a PUT/DELETE keeps serving the stale row for the TTL.
+    for (const cache of ["redis", "upstash", "dragonfly"]) {
+      const spring = javaGen("spring", { cache });
+      assert.match(spring.get("pom.xml")!, /spring-boot-starter-data-redis/);
+      assert.match(appProps(spring), /spring\.data\.redis\.url=\$\{REDIS_URL:/);
+      const svc = spring.get("src/main/java/dev/helios/app/service/UserService.java")!;
+      assert.match(svc, /@Cacheable\(cacheNames = "users", key = "#id"[^\n]*\)\n\s+public Optional<User> findById/);
+      assert.match(svc, /@CacheEvict\(cacheNames = "users", key = "#id"\)\n\s+public Optional<User> update/);
+      assert.match(svc, /@CacheEvict\(cacheNames = "users", key = "#id"\)\n\s+public boolean delete/);
+      assert.match(spring.get("src/main/java/dev/helios/app/model/User.java")!, /class User implements java\.io\.Serializable/);
+      assert.match(spring.get("src/main/java/dev/helios/app/infra/CacheConfig.java")!, /@EnableCaching/);
+
+      const quarkus = javaGen("quarkus", { cache });
+      assert.match(appProps(quarkus), /quarkus\.redis\.hosts=\$\{REDIS_URL:/);
+      const res = quarkus.get("src/main/java/dev/helios/app/UserResource.java")!;
+      assert.match(res, /cache\.get\("users:" \+ id, User\.class\)[\s\S]*User\.findById\(id\)[\s\S]*cache\.put\("users:" \+ id, entity\)/);
+      assert.equal(res.match(/cache\.evict\("users:" \+ id\)/g)?.length, 2, "update and delete evict");
+    }
+    for (const framework of JAVA) {
+      const g = javaGen(framework, { cache: "memcached", queue: "none" });
+      assert.ok(!g.get("pom.xml")!.includes("redis"), `${framework}: memcached must not pull in a Redis client`);
+      assert.ok(!javaSources(g).includes("Cacheable") && !javaSources(g).includes("JsonCache"));
+    }
+  });
+
+  it("Java: /health?ready=1 aggregates dependency health; brokers without a built-in check get one", () => {
+    const spring = javaGen("spring");
+    assert.match(spring.get("pom.xml")!, /spring-boot-starter-actuator/);
+    assert.match(spring.get("src/main/java/dev/helios/app/HealthController.java")!, /healthEndpoint\.health\(\)\.getStatus\(\)[\s\S]*up \? 200 : 503/);
+    const quarkus = javaGen("quarkus");
+    assert.match(quarkus.get("pom.xml")!, /quarkus-smallrye-health/);
+    assert.match(quarkus.get("src/main/java/dev/helios/app/HealthResource.java")!, /reporter\.getReadiness\(\)[\s\S]*up \? 200 : 503/);
+    // Spring auto-configures Redis + RabbitMQ indicators and SmallRye covers Kafka/RabbitMQ/Redis; the rest are generated.
+    const springChecks: Record<string, RegExp> = { kafka: /class KafkaHealthIndicator implements HealthIndicator/, nats: /class NatsConnection implements HealthIndicator/, sqs: /class SqsHealthIndicator implements HealthIndicator/ };
+    for (const [queue, re] of Object.entries(springChecks)) assert.match(javaSources(javaGen("spring", { queue })), re, queue);
+    for (const queue of ["nats", "sqs"]) assert.match(javaSources(javaGen("quarkus", { queue })), /@Readiness\n@ApplicationScoped\npublic class \w+ implements HealthCheck/, queue);
+  });
+
+  it("Java: send_notification stubs publish to the queue; generated imports all resolve", () => {
+    const eps = [{ id: "n", method: "POST" as const, path: "/notifications", summary: "", auth: false, pattern: "send_notification" }];
+    const spring = javaGen("spring", { queue: "kafka" }, eps, []).get("src/main/java/dev/helios/app/ApiController.java")!;
+    assert.match(spring, /postNotifications\(@RequestBody String payload\) \{\n\s+publisher\.publish\(payload\);/);
+    const quarkus = javaGen("quarkus", { queue: "nats" }, eps, []).get("src/main/java/dev/helios/app/ApiResource.java")!;
+    assert.match(quarkus, /postNotifications\(String payload\) \{\n\s+publisher\.publish\(payload\);/);
+    // Without a queue the stub stays a stub (no dangling NotificationPublisher reference).
+    assert.ok(!javaGen("spring", { queue: "none" }, eps, []).get("src/main/java/dev/helios/app/ApiController.java")!.includes("NotificationPublisher"));
+
+    // Every `import dev.helios.app.…` points at a generated class — a missing file only shows up at `mvn compile`.
+    for (const framework of JAVA) {
+      for (const queue of queues.map((o) => o.id)) {
+        const g = javaGen(framework, { queue }, [...SAMPLE_ENDPOINTS, ...eps]);
+        for (const f of g.files.filter((x) => x.path.endsWith(".java"))) {
+          for (const [, cls] of f.content.matchAll(/^import (dev\.helios\.app\.[\w.]+);$/gm)) {
+            assert.ok(g.get(`src/main/java/${cls.replace(/\./g, "/")}.java`), `${framework}/${queue}: ${f.path} imports missing ${cls}`);
+          }
+        }
+      }
+    }
   });
 });
