@@ -1829,4 +1829,11 @@ describe("Every deployment target gets a real CI deploy job", () => {
       }
     }
   });
+
+  it("Kotlin: JUnit Platform builds ship the launcher (Gradle 9 fails `gradle test` without it)", () => {
+    for (const framework of ["ktor", "spring-kt"]) {
+      const build = gen({ language: "kotlin", framework }).get("build.gradle.kts")!;
+      if (build.includes("useJUnitPlatform()")) assert.match(build, /testRuntimeOnly\("org\.junit\.platform:junit-platform-launcher"\)/, framework);
+    }
+  });
 });

@@ -945,6 +945,8 @@ dependencies {
 ${authDeps}${metricsDeps}${springKtInfraDeps(infra, metrics)}    runtimeOnly("${mysql ? "com.mysql:mysql-connector-j" : "org.postgresql:postgresql:42.7.4"}")
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("com.h2database:h2")
+    // Gradle 9 no longer injects the JUnit Platform launcher; version comes from the Boot BOM.
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
