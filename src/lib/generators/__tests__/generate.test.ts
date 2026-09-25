@@ -1241,4 +1241,70 @@ describe("Every deployment target gets a real CI deploy job", () => {
     const helmOnly = gen({ deployment: "k8s", kubernetes: false, helm: true }).get(".github/workflows/deploy.yml")!;
     assert.match(helmOnly, /helm upgrade --install test-app \.\/deploy\/helm[^\n]*--set image\.tag="\$SHA"/);
   });
+
+  // The Queue tab must produce a working broker client in TS repos — not a TODO.
+  const TS_QUEUE_CLIENT: Record<string, { dep: string; env: string | null }> = {
+    kafka: { dep: "kafkajs", env: "KAFKA_BROKERS" },
+    rabbitmq: { dep: "amqplib", env: "RABBITMQ_URL" },
+    nats: { dep: "nats", env: "NATS_URL" },
+    sqs: { dep: "@aws-sdk/client-sqs", env: null }, // endpoint override via AWS_ENDPOINT_URL_SQS, read by the SDK itself
+    bullmq: { dep: "bullmq", env: "REDIS_URL" },
+  };
+  const QUEUE_ENDPOINTS = [
+    { id: "n", method: "POST" as const, path: "/notifications", summary: "", auth: false, pattern: "send_notification" },
+    { id: "w", method: "POST" as const, path: "/webhooks/stripe", summary: "", auth: false, pattern: "webhook_receive" },
+    { id: "h", method: "GET" as const, path: "/healthz", summary: "", auth: false, pattern: "health_check" },
+  ];
+  const TS_FRAMEWORKS = ["express", "fastify", "hono", "nestjs"];
+  const tsRouteFile = (fw: string) => (fw === "nestjs" ? "src/app.controller.ts" : "src/main.ts");
+
+  it("TS queue: each queue id ships its real client, a worker entrypoint, and reads the env var the repo documents", () => {
+    assert.deepEqual(Object.keys(TS_QUEUE_CLIENT).sort(), queues.map((q) => q.id).sort(), "every catalog queue is covered");
+    const allClients = Object.values(TS_QUEUE_CLIENT).map((c) => c.dep);
+    for (const [queue, { dep, env }] of Object.entries(TS_QUEUE_CLIENT)) {
+      for (const framework of TS_FRAMEWORKS) {
+        const r = gen({ language: "typescript", framework, queue, auth: "none" }, QUEUE_ENDPOINTS);
+        const label = `${framework}/${queue}`;
+        const pkg = JSON.parse(r.get("package.json")!);
+        assert.ok(pkg.dependencies[dep], `${label}: ${dep} in dependencies`);
+        for (const other of allClients.filter((d) => d !== dep)) assert.ok(!pkg.dependencies[other], `${label}: no unused ${other}`);
+        const queueTs = r.get("src/queue.ts");
+        assert.ok(queueTs?.includes(`from "${dep}"`), `${label}: src/queue.ts uses ${dep}`);
+        // docker compose runs the worker via this script / dist/worker.js.
+        assert.ok(r.get("src/worker.ts")?.includes("subscribe(TOPICS.notifications"), `${label}: worker consumes notifications`);
+        assert.equal(pkg.scripts.worker, "node dist/worker.js");
+        if (env) {
+          assert.ok(queueTs!.includes(`process.env.${env}`), `${label}: reads ${env}`);
+          assert.match(r.get(".env.example")!, new RegExp(`^${env}=`, "m"), `${label}: ${env} is the name .env.example documents`);
+        }
+      }
+    }
+  });
+
+  it("TS queue: send_notification and webhook_receive publish for real, readiness pings the broker, shutdown closes it", () => {
+    for (const framework of TS_FRAMEWORKS) {
+      const r = gen({ language: "typescript", framework, queue: "rabbitmq", auth: "none" }, QUEUE_ENDPOINTS);
+      const routes = r.get(tsRouteFile(framework))!;
+      assert.match(routes, /await publish\(TOPICS\.notifications, \{ recipient, channel, template, payload \}\)/, framework);
+      assert.match(routes, /await publish\(TOPICS\.webhooks,/, framework);
+      assert.ok(!/TODO: (enqueue|publish)/.test(routes), `${framework}: no queue TODOs left`);
+      // A broker outage is a 503 (retryable), not a fake success.
+      assert.match(routes, /queue_unavailable/, framework);
+      assert.match(routes, /checks\.queue = "ok"/, `${framework}: health_check pattern includes the queue`);
+      assert.match(routes, /await queuePing\(\)/, `${framework}: /health?ready=1 pings the queue`);
+      const shutdownFile = framework === "nestjs" ? routes : r.get("src/main.ts")!;
+      assert.match(shutdownFile, /closeQueue\(\)/, `${framework}: queue closed on shutdown`);
+    }
+  });
+
+  it("TS queue: without a queue, publishing patterns answer 503 instead of pretending to enqueue", () => {
+    for (const framework of TS_FRAMEWORKS) {
+      const r = gen({ language: "typescript", framework, queue: "none", auth: "none" }, QUEUE_ENDPOINTS);
+      const routes = r.get(tsRouteFile(framework))!;
+      assert.ok(!r.get("src/queue.ts") && !r.get("src/worker.ts"), `${framework}: no queue files`);
+      assert.ok(!routes.includes("./queue"), `${framework}: no queue import`);
+      assert.equal(routes.match(/503[^\n]*queue_not_configured|queue_not_configured[^\n]*503/g)?.length, 2, `${framework}: both publishing patterns 503`);
+      assert.ok(!JSON.parse(r.get("package.json")!).scripts.worker);
+    }
+  });
 });

@@ -106,8 +106,8 @@
   },
   {
     "path": "package.json",
-    "lines": 48,
-    "size": 1293
+    "lines": 51,
+    "size": 1400
   },
   {
     "path": "prisma/schema.prisma",
@@ -141,8 +141,8 @@
   },
   {
     "path": "src/app.controller.ts",
-    "lines": 43,
-    "size": 942
+    "lines": 52,
+    "size": 1510
   },
   {
     "path": "src/app.module.ts",
@@ -215,6 +215,11 @@
     "size": 562
   },
   {
+    "path": "src/queue.ts",
+    "lines": 100,
+    "size": 3810
+  },
+  {
     "path": "src/repositories/post.repository.ts",
     "lines": 32,
     "size": 995
@@ -248,6 +253,11 @@
     "path": "src/validators/user.validator.ts",
     "lines": 23,
     "size": 578
+  },
+  {
+    "path": "src/worker.ts",
+    "lines": 36,
+    "size": 1502
   },
   {
     "path": "tests/api.contract.test.ts",
