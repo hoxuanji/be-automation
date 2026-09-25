@@ -11,8 +11,13 @@
   },
   {
     "path": ".github/workflows/ci.yml",
-    "lines": 65,
-    "size": 1714
+    "lines": 57,
+    "size": 1528
+  },
+  {
+    "path": ".github/workflows/deploy.yml",
+    "lines": 64,
+    "size": 2268
   },
   {
     "path": ".gitignore",
@@ -31,8 +36,8 @@
   },
   {
     "path": "DEPLOY.md",
-    "lines": 79,
-    "size": 2387
+    "lines": 92,
+    "size": 3281
   },
   {
     "path": "deploy/helm/Chart.yaml",

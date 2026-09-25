@@ -3,6 +3,10 @@ import { safeName, toEnvKey, looksLikeSecretValue, isGrpcSupported, isGraphqlSup
 import { authProviderSpec } from "./auth/providers";
 import type { GitConfig } from "../git-config";
 import { gitWorkflowFiles } from "./git-files";
+import {
+  acrName, ciDeploySection, circleDeployJob, flyToml, githubDeployWorkflow, gitlabDeployJob,
+  maxInstances, minInstances, providerRegion, railwayJson, vercelSupported,
+} from "./deploy";
 
 const languageMeta: Record<
   StackConfig["language"],
@@ -103,7 +107,8 @@ export function commonFiles(
     files.push({ path: "docker-compose.yml", content: dockerCompose(config) });
   }
 
-  if (config.kubernetes) {
+  // A k8s target always needs something to apply: plain manifests unless Helm is chosen.
+  if (config.kubernetes || (config.deployment === "k8s" && !config.helm)) {
     files.push({
       path: "deploy/k8s/deployment.yaml",
       content: k8sDeployment(config),
@@ -149,6 +154,10 @@ export function commonFiles(
     files.push({ path: "deploy/gcp/service.yaml", content: cloudRunService(config) });
   } else if (config.deployment === "azure") {
     files.push({ path: "deploy/azure/containerapp.yaml", content: azureContainerApp(config) });
+  } else if (config.deployment === "fly") {
+    files.push({ path: "fly.toml", content: flyToml(config) });
+  } else if (config.deployment === "railway") {
+    files.push({ path: "railway.json", content: railwayJson(config) });
   }
 
   if (config.helm) {
@@ -180,6 +189,13 @@ export function commonFiles(
     files.push({
       path: ".github/workflows/ci.yml",
       content: ciWorkflow(config),
+    });
+  }
+  // Fixed path + workflow/job name `deploy`: Helios' one-click deploy dispatches it.
+  if (config.cicd !== "gitlab-ci" && config.cicd !== "circleci") {
+    files.push({
+      path: ".github/workflows/deploy.yml",
+      content: githubDeployWorkflow(config, ghaBuildSteps(config.language)),
     });
   }
   if (config.cicd === "gitlab-ci") {
@@ -705,6 +721,10 @@ mysql -u root -e "CREATE DATABASE IF NOT EXISTS ${safeName(config.name)};"
 }
 
 function deployGuide(config: StackConfig): string {
+  return deployGuideBody(config) + ciDeploySection(config);
+}
+
+function deployGuideBody(config: StackConfig): string {
   const name = safeName(config.name);
 
   const envVarList = buildDeployEnvVarList(config);
@@ -712,6 +732,7 @@ function deployGuide(config: StackConfig): string {
   switch (config.deployment) {
     case "vercel":
       return `# Deploy to Vercel
+${vercelSupported(config) ? "" : `\n> **Warning:** ${config.language}/${config.framework}${config.api === "grpc" ? " (gRPC)" : ""} cannot run on Vercel — it only runs serverless Node frameworks and FastAPI, not this Dockerfile. Pick Railway, Render, Fly or a container platform instead.\n`}
 
 ## Prerequisites
 
@@ -833,10 +854,10 @@ ${envVarList.map((v) => `- \`${v}\``).join("\n")}
 
 ### 4. Deploy
 
-Render auto-deploys on every push to \`main\`. To trigger manually:
+CI triggers a deploy of each pushed commit (see **Continuous deployment** below) — turn the service's Auto-Deploy off so commits aren't deployed twice. To trigger manually:
 
 \`\`\`bash
-curl -X POST https://api.render.com/deploy/<service-id>?key=<deploy-hook-key>
+curl -X POST https://api.render.com/v1/services/<service-id>/deploys -H "Authorization: Bearer $RENDER_API_KEY"
 \`\`\`
 
 ## Notes
@@ -855,18 +876,18 @@ curl -X POST https://api.render.com/deploy/<service-id>?key=<deploy-hook-key>
 
 ## Steps
 
-### 1. Launch the app
+### 1. Create the app
 
 \`\`\`bash
-flyctl launch --name ${name} --region ${config.region} --no-deploy
+flyctl apps create ${name}
 \`\`\`
 
-This creates a \`fly.toml\` at the repo root. Review and commit it.
+\`fly.toml\` (region \`${providerRegion(config, "fly")}\`, health check, machine size) is already committed.
 
 ### 2. Create a Postgres cluster (if needed)
 
 \`\`\`bash
-flyctl postgres create --name ${name}-db --region ${config.region}
+flyctl postgres create --name ${name}-db --region ${providerRegion(config, "fly")}
 flyctl postgres attach --app ${name} ${name}-db
 \`\`\`
 
@@ -982,16 +1003,16 @@ gcloud services enable artifactregistry.googleapis.com run.googleapis.com
 \`\`\`bash
 gcloud artifacts repositories create ${name} \\
   --repository-format=docker \\
-  --location=${config.region}
+  --location=${providerRegion(config, "gcp")}
 \`\`\`
 
 ### 3. Build and push the image
 
 \`\`\`bash
 PROJECT=$(gcloud config get-value project)
-REGISTRY=${config.region}-docker.pkg.dev/$PROJECT/${name}
+REGISTRY=${providerRegion(config, "gcp")}-docker.pkg.dev/$PROJECT/${name}
 
-gcloud auth configure-docker ${config.region}-docker.pkg.dev
+gcloud auth configure-docker ${providerRegion(config, "gcp")}-docker.pkg.dev
 docker build -t ${name} .
 docker tag ${name}:latest $REGISTRY/${name}:latest
 docker push $REGISTRY/${name}:latest
@@ -1007,15 +1028,15 @@ ${envVarList.filter((v) => v !== "APP_NAME" && v !== "PORT").map((v) => `printf 
 
 export GCP_PROJECT_ID=$PROJECT
 envsubst < deploy/gcp/service.yaml > /tmp/service.yaml
-gcloud run services replace /tmp/service.yaml --region ${config.region}
-gcloud run services add-iam-policy-binding ${name} --region ${config.region} \\
+gcloud run services replace /tmp/service.yaml --region ${providerRegion(config, "gcp")}
+gcloud run services add-iam-policy-binding ${name} --region ${providerRegion(config, "gcp")} \\
   --member=allUsers --role=roles/run.invoker
 \`\`\`
 
 ### 5. Verify
 
 \`\`\`bash
-gcloud run services describe ${name} --region ${config.region} --format "value(status.url)"
+gcloud run services describe ${name} --region ${providerRegion(config, "gcp")} --format "value(status.url)"
 \`\`\`
 
 ## Notes
@@ -1036,7 +1057,7 @@ gcloud run services describe ${name} --region ${config.region} --format "value(s
 ### 1. Create a resource group and Container Registry
 
 \`\`\`bash
-az group create --name ${name}-rg --location ${config.region}
+az group create --name ${name}-rg --location ${providerRegion(config, "azure")}
 az acr create --resource-group ${name}-rg --name ${acrName(name)} --sku Basic --admin-enabled true
 \`\`\`
 
@@ -1055,7 +1076,7 @@ docker push ${acrName(name)}.azurecr.io/${name}:latest
 az containerapp env create \\
   --name ${name}-env \\
   --resource-group ${name}-rg \\
-  --location ${config.region}
+  --location ${providerRegion(config, "azure")}
 \`\`\`
 
 ### 4. Deploy the Container App
@@ -1152,7 +1173,7 @@ postgresql:
 ` : ""}
 ## Notes
 
-- Update \`deploy/k8s/deployment.yaml\` to set the correct image tag before each deploy.
+- CI pins \`deploy/k8s/deployment.yaml\` to the commit's image tag at deploy time; for manual deploys set it yourself.
 - For ingress, add an \`Ingress\` resource or use your cluster's load balancer service type.
 - Enable HPA by applying \`deploy/k8s/hpa.yaml\` (${config.autoscale ? "already included" : "set `autoscale: true` in your config to generate it"}).
 - The \`secrets.env\` file is gitignored; rotate values there and re-run \`make -C deploy/k8s secrets\` to update the cluster Secret in place.
@@ -2156,34 +2177,6 @@ ${codeqlLang[lang] ? `      - name: Initialize CodeQL
           cache-to: type=gha,mode=max`
     : "";
 
-  const deploymentComment = (() => {
-    switch (config.deployment) {
-      case "fly":
-        return `      - name: Deploy to Fly.io
-        if: github.ref == 'refs/heads/main'
-        uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only
-        if: github.ref == 'refs/heads/main'
-        env:
-          FLY_API_TOKEN: \${{ secrets.FLY_API_TOKEN }}`;
-      case "railway":
-        return `      # Deploy to Railway — trigger via webhook
-      # - name: Deploy to Railway
-      #   if: github.ref == 'refs/heads/main'
-      #   run: curl -X POST "\${{ secrets.RAILWAY_DEPLOY_WEBHOOK }}"`;
-      case "render":
-        return `      # Deploy to Render — trigger via deploy hook
-      # - name: Deploy to Render
-      #   if: github.ref == 'refs/heads/main'
-      #   run: curl -X POST "\${{ secrets.RENDER_DEPLOY_HOOK }}"`;
-      case "vercel":
-        return `      # Deploy to Vercel — handled automatically via Vercel GitHub integration
-      # Remove this comment and configure the Vercel integration in your repo settings.`;
-      default:
-        return `      # Add your deployment step here for ${config.deployment}`;
-    }
-  })();
-
   const header = `name: ci
 on:
   push:
@@ -2191,14 +2184,23 @@ on:
   pull_request:
 `;
 
-  if (lang === "go") {
-    return (
-      header +
-      `jobs:
+  return (
+    header +
+    `jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+${ghaBuildSteps(lang)}
+${dockerBuildPush}
+
+${securityJob}`
+  );
+}
+
+// Build/test steps for one language — shared by ci.yml and deploy.yml's test job.
+function ghaBuildSteps(lang: StackConfig["language"]): string {
+  const steps: Record<StackConfig["language"], string> = {
+    go: `      - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23'
@@ -2212,29 +2214,8 @@ on:
       - name: Test
         run: go test ./... -race -cover -coverprofile=coverage.out
       - name: Build
-        run: go build ./...
-${dockerBuildPush}
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-${deploymentComment}
-
-${securityJob}`
-    );
-  }
-
-  if (lang === "typescript") {
-    return (
-      header +
-      `jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+        run: go build ./...`,
+    typescript: `      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -2247,29 +2228,8 @@ ${securityJob}`
       - name: Test
         run: npm test --if-present
       - name: Build
-        run: npm run build --if-present
-${dockerBuildPush}
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-${deploymentComment}
-
-${securityJob}`
-    );
-  }
-
-  if (lang === "python") {
-    return (
-      header +
-      `jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+        run: npm run build --if-present`,
+    python: `      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -2280,29 +2240,8 @@ ${securityJob}`
       - name: Lint
         run: ruff check .
       - name: Test
-        run: pytest -q --cov --cov-report=xml
-${dockerBuildPush}
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-${deploymentComment}
-
-${securityJob}`
-    );
-  }
-
-  if (lang === "rust") {
-    return (
-      header +
-      `jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+        run: pytest -q --cov --cov-report=xml`,
+    rust: `      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
@@ -2310,29 +2249,8 @@ ${securityJob}`
       - name: Test
         run: cargo test --all
       - name: Build
-        run: cargo build --release
-${dockerBuildPush}
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-${deploymentComment}
-
-${securityJob}`
-    );
-  }
-
-  if (lang === "java") {
-    return (
-      header +
-      `jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+        run: cargo build --release`,
+    java: `      - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -2341,28 +2259,8 @@ ${securityJob}`
       - name: Test
         run: mvn -B test
       - name: Build
-        run: mvn -B package -DskipTests
-${dockerBuildPush}
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-${deploymentComment}
-
-${securityJob}`
-    );
-  }
-
-  return (
-    header +
-    `jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+        run: mvn -B package -DskipTests`,
+    kotlin: `      - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -2374,19 +2272,9 @@ ${securityJob}`
       - name: Test
         run: gradle test
       - name: Build
-        run: gradle build -x test
-${dockerBuildPush}
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-${deploymentComment}
-
-${securityJob}`
-  );
+        run: gradle build -x test`,
+  };
+  return steps[lang];
 }
 
 function prometheusConfig(name: string, path: string, target: string) {
@@ -2710,16 +2598,7 @@ function postmanCollection(config: StackConfig, endpoints: Endpoint[]): string {
 }
 
 // ─── Scaling helpers ─────────────────────────────────────────────────────────
-
-// `serverless` scales to zero on platforms that support it; everything else
-// keeps the configured baseline warm.
-function minInstances(config: StackConfig): number {
-  return config.scaling === "serverless" ? 0 : config.replicas;
-}
-
-function maxInstances(config: StackConfig): number {
-  return config.autoscale ? Math.max(config.replicas * 4, 10) : Math.max(config.replicas, 1);
-}
+// minInstances / maxInstances live in ./deploy (shared with the deploy jobs).
 
 // Non-secret runtime vars; everything else from buildDeployEnvVarList is
 // treated as a secret on the cloud targets.
@@ -2799,6 +2678,7 @@ const secretName = (app: string, v: string) => `${app}-${kebabVar(v)}`;
 
 function cloudRunService(config: StackConfig): string {
   const name = safeName(config.name);
+  const region = providerRegion(config, "gcp");
   const vars = buildDeployEnvVarList(config).filter((v) => !PLAIN_ENV.has(v));
   // PORT is reserved on Cloud Run — the platform injects it from containerPort.
   const env = [
@@ -2807,13 +2687,13 @@ function cloudRunService(config: StackConfig): string {
       (v) => `            - name: ${v}\n              valueFrom:\n                secretKeyRef:\n                  name: ${secretName(name, v)}\n                  key: latest`
     ),
   ].join("\n");
-  return `# Deploy: envsubst < deploy/gcp/service.yaml > /tmp/service.yaml && gcloud run services replace /tmp/service.yaml --region ${config.region}
+  return `# Deploy: envsubst < deploy/gcp/service.yaml > /tmp/service.yaml && gcloud run services replace /tmp/service.yaml --region ${region}
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
   name: ${name}
   labels:
-    cloud.googleapis.com/location: ${config.region}
+    cloud.googleapis.com/location: ${region}
 spec:
   template:
     metadata:
@@ -2823,7 +2703,7 @@ spec:
     spec:
       containerConcurrency: 80
       containers:
-        - image: ${config.region}-docker.pkg.dev/\${GCP_PROJECT_ID}/${name}/${name}:latest
+        - image: ${region}-docker.pkg.dev/\${GCP_PROJECT_ID}/${name}/${name}:latest
           ports:
             - name: ${config.api === "grpc" ? "h2c" : "http1"}
               containerPort: 8080
@@ -2854,7 +2734,7 @@ function azureContainerApp(config: StackConfig): string {
 #   set -a; . ./.env; set +a
 #   envsubst < deploy/azure/containerapp.yaml > /tmp/containerapp.yaml
 #   az containerapp create --name ${name} --resource-group ${name}-rg --yaml /tmp/containerapp.yaml
-location: ${config.region}
+location: ${providerRegion(config, "azure")}
 name: ${name}
 type: Microsoft.App/containerApps
 properties:
@@ -2884,11 +2764,6 @@ ${env}
       minReplicas: ${minInstances(config)}
       maxReplicas: ${maxInstances(config)}
 `;
-}
-
-// ACR names must be 5-50 alphanumeric characters — no dashes.
-function acrName(name: string): string {
-  return `${name.replace(/[^a-z0-9]/g, "")}registry`;
 }
 
 // ─── Alternate CI providers ──────────────────────────────────────────────────
@@ -2928,13 +2803,13 @@ docker:
     - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
     - docker push "$CI_REGISTRY_IMAGE:latest"`
     : "";
-  return `stages: [test${config.docker ? ", build" : ""}]
+  return `stages: [test${config.docker ? ", build" : ""}, deploy]
 
 test:
   stage: test
   image: ${c.image}
   script:
-${script}${docker}
+${script}${docker}${gitlabDeployJob(config)}
 `;
 }
 
@@ -2967,6 +2842,7 @@ function circleCi(config: StackConfig): string {
             branches:
               only: main`
     : "";
+  const deploy = circleDeployJob(config);
   return `version: 2.1
 
 jobs:
@@ -2975,12 +2851,12 @@ jobs:
       - image: ${c.circleImage}
     steps:
       - checkout
-${steps}${dockerJob}
+${steps}${dockerJob}${deploy.job}
 
 workflows:
   ci:
     jobs:
-      - test${dockerWorkflow}
+      - test${dockerWorkflow}${deploy.workflow}
 `;
 }
 

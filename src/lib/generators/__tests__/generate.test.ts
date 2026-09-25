@@ -5,6 +5,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generate } from "../index.ts";
 import { databases, caches, queues, monitoring as monitoringOptions } from "../../../data/stack-options.ts";
+import { DEPLOY_SECRETS } from "../deploy.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SNAPSHOT_DIR = resolve(__dirname, "__snapshots__");
@@ -990,5 +991,82 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     assert.match(stubs, /fun `GET users returns 200`/);
     assert.match(stubs, /fun `GET users by id returns 401 without token`/);
     assert.match(contract("ktor", eps, [])!, /fun `GET users search returns 200`/);
+  });
+});
+
+// One-click deploy sets DEPLOY_SECRETS as repo secrets and dispatches
+// .github/workflows/deploy.yml, so each target must ship a live (not
+// commented-out) deploy job that reads exactly those secrets.
+describe("Every deployment target gets a real CI deploy job", () => {
+  const ACTION: Record<string, RegExp> = {
+    fly: /flyctl deploy --remote-only --app test-app --image-label "\$GITHUB_SHA"/,
+    railway: /railway up --ci --service "\$RAILWAY_SERVICE_ID"/,
+    render: /api\.render\.com\/v1\/services\/\$RENDER_SERVICE_ID\/deploys/,
+    vercel: /vercel deploy --prebuilt --prod/,
+    aws: /uses: aws-actions\/amazon-ecs-deploy-task-definition@v2/,
+    gcp: /uses: google-github-actions\/deploy-cloudrun@v2/,
+    azure: /uses: azure\/container-apps-deploy-action@v2/,
+    k8s: /kubectl rollout status deployment\/test-app/,
+  };
+  const uncommented = (s: string) => s.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+
+  for (const [deployment, action] of Object.entries(ACTION)) {
+    it(`${deployment}: deploy.yml runs after tests on push + dispatch, with the documented secrets`, () => {
+      const lang = deployment === "vercel" ? { language: "typescript", framework: "express" } : {};
+      const { get } = gen({ deployment, ...lang });
+      const wf = get(".github/workflows/deploy.yml");
+      assert.ok(wf, "deploy.yml is the fixed path one-click deploy dispatches");
+      const live = uncommented(wf);
+      assert.match(live, /workflow_dispatch:/);
+      assert.match(live, /push:\n    branches: \[main\]/);
+      assert.match(live, /\n  deploy:\n    name: .*\n    needs: test\n/);
+      assert.match(live, action, "deploy step must be live, not a comment");
+      const guide = get("DEPLOY.md")!;
+      for (const s of DEPLOY_SECRETS[deployment as keyof typeof DEPLOY_SECRETS]) {
+        assert.ok(live.includes(`secrets.${s.name} }}`), `${s.name} referenced by the workflow`);
+        assert.ok(guide.includes(`\`${s.name}\``), `${s.name} documented in DEPLOY.md`);
+      }
+      assert.ok(!/(docker (build|push)|IMAGE=|imageToDeploy|image\.tag)[^\n]*:latest/.test(live), "deployed images are tagged with the git SHA, never :latest");
+      // Railway and Vercel build from uploaded source, so there is no image tag to pin.
+      if (deployment !== "railway" && deployment !== "vercel") assert.match(live, /GITHUB_SHA|github\.sha/);
+    });
+  }
+
+  it("ci.yml no longer carries a placeholder deploy job", () => {
+    for (const deployment of Object.keys(ACTION)) {
+      const ci = gen({ deployment }).get(".github/workflows/ci.yml")!;
+      assert.ok(!/\n  deploy:/.test(ci) && !/Add your deployment step/.test(ci), deployment);
+    }
+  });
+
+  it("GitLab and CircleCI get a live deploy job for every target", () => {
+    for (const deployment of Object.keys(ACTION)) {
+      const ts = { deployment, language: "typescript", framework: "express" };
+      const gl = gen({ ...ts, cicd: "gitlab-ci" }).get(".gitlab-ci.yml")!;
+      assert.match(gl, /\ndeploy:\n  stage: deploy\n/, `${deployment} gitlab`);
+      assert.match(gl, /stages: \[.*deploy\]/);
+      const cc = gen({ ...ts, cicd: "circleci" }).get(".circleci/config.yml")!;
+      assert.match(cc, /\n  deploy:\n    docker:/, `${deployment} circleci`);
+      assert.match(cc, /- deploy:\n          requires: \[test\]/);
+    }
+  });
+
+  it("Vercel fails fast (and DEPLOY.md warns) for stacks Vercel can't run", () => {
+    const { get } = gen({ deployment: "vercel", language: "go", framework: "gin" });
+    assert.match(get(".github/workflows/deploy.yml")!, /Vercel cannot run a go\/gin server[^\n]*exit 1/);
+    assert.ok(!get(".github/workflows/deploy.yml")!.includes("vercel deploy"));
+    assert.match(get("DEPLOY.md")!, /cannot run on Vercel/);
+  });
+
+  it("provider regions are translated from the AWS-style picker ids", () => {
+    assert.match(gen({ deployment: "gcp", region: "eu-west-2" }).get("deploy/gcp/service.yaml")!, /location: europe-west2/);
+    assert.match(gen({ deployment: "azure", region: "eu-west-2" }).get("deploy/azure/containerapp.yaml")!, /^location: uksouth$/m);
+    assert.match(gen({ deployment: "fly", region: "eu-west-2" }).get("fly.toml")!, /primary_region = "lhr"/);
+  });
+
+  it("k8s target ships something to apply even with the Kubernetes toggle off", () => {
+    assert.ok(gen({ deployment: "k8s", kubernetes: false, helm: false }).get("deploy/k8s/deployment.yaml"));
+    const helmOnly = gen({ deployment: "k8s", kubernetes: false, helm: true }).get(".github/workflows/deploy.yml")!;
+    assert.match(helmOnly, /helm upgrade --install test-app \.\/deploy\/helm[^\n]*--set image\.tag="\$SHA"/);
   });
 });
