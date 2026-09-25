@@ -106,8 +106,8 @@
   },
   {
     "path": "package.json",
-    "lines": 40,
-    "size": 1021
+    "lines": 43,
+    "size": 1128
   },
   {
     "path": "prisma/seed.ts",
@@ -141,8 +141,8 @@
   },
   {
     "path": "src/main.ts",
-    "lines": 70,
-    "size": 2694
+    "lines": 77,
+    "size": 3162
   },
   {
     "path": "src/middleware/audit.ts",
@@ -158,6 +158,11 @@
     "path": "src/middleware/rate-limit.ts",
     "lines": 19,
     "size": 561
+  },
+  {
+    "path": "src/queue.ts",
+    "lines": 100,
+    "size": 3810
   },
   {
     "path": "src/resolvers.ts",
@@ -188,6 +193,11 @@
     "path": "src/tracing.ts",
     "lines": 14,
     "size": 650
+  },
+  {
+    "path": "src/worker.ts",
+    "lines": 36,
+    "size": 1502
   },
   {
     "path": "tests/api.contract.test.ts",

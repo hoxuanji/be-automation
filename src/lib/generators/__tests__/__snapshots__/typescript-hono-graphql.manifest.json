@@ -106,8 +106,8 @@
   },
   {
     "path": "package.json",
-    "lines": 34,
-    "size": 871
+    "lines": 37,
+    "size": 978
   },
   {
     "path": "prisma/seed.ts",
@@ -141,8 +141,13 @@
   },
   {
     "path": "src/main.ts",
-    "lines": 70,
-    "size": 2544
+    "lines": 77,
+    "size": 3013
+  },
+  {
+    "path": "src/queue.ts",
+    "lines": 100,
+    "size": 3810
   },
   {
     "path": "src/resolvers.ts",
@@ -173,6 +178,11 @@
     "path": "src/tracing.ts",
     "lines": 14,
     "size": 650
+  },
+  {
+    "path": "src/worker.ts",
+    "lines": 36,
+    "size": 1502
   },
   {
     "path": "tests/api.contract.test.ts",
