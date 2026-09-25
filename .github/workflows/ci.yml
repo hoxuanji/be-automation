@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main, tnandy/mvp1]
 
+# Explicit bash = `bash --noprofile --norc -eo pipefail`. Without it GitHub runs `bash -e`
+# (no pipefail), and every `cmd | tee -a /tmp/smoke.log` step reports tee's exit status,
+# so compile/test failures show green.
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
