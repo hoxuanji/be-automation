@@ -53,7 +53,7 @@ The client is the source of truth for the in-progress `StackConfig` and `Endpoin
   - `builder/` — **Core surface.** 10 tabs (Runtime, Database, Cache, Queue, APIs, Security, Deployment, Scaling, CI/CD, Monitoring) + architecture preview + AI assistant + summary.
   - `api-builder/` — REST/gRPC endpoint editor.
   - `preview/` — Generated repository browser with Download zip CTA.
-  - `deploy/` — Provider grid + credentials. Railway / Render / Fly / Vercel deploy for real; the rest are "Coming soon".
+  - `deploy/` — Provider grid + credentials. Railway / Render / Fly / Vercel deploy via their APIs; AWS / GCP / Azure / K8s via GitHub Actions secrets + the generated `deploy.yml`.
   - Also: `templates/`, `gallery/`, `from-repo/`, `editor/`, `git-settings/`, `settings/`, `changelog/`, `terms/`, `privacy/`, `(auth)/login`, `invite/`.
   - `api/generate/route.ts` — zip stream endpoint.
   - `api/ai/chat/route.ts` — Anthropic SSE endpoint.
