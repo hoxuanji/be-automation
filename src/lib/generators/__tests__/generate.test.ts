@@ -1667,7 +1667,7 @@ describe("Every deployment target gets a real CI deploy job", () => {
       ["typescript", "express", /command: \["node", "dist\/worker\.js"\]/],
       ["python", "fastapi", /command: \["python", "-m", "app\.worker"\]/],
       ["rust", "axum", /entrypoint: \["\/worker"\]/],
-      ["kotlin", "ktor", /entrypoint: \["java", "-cp", "app\.jar", "WorkerKt"\]/],
+      ["kotlin", "ktor", /entrypoint: \["java", "-cp", "app\.jar", "Worker"\]/],
     ];
     for (const [language, framework, start] of cases) {
       const compose = gen({ language, framework, queue: "kafka" }).get("docker-compose.yml")!;

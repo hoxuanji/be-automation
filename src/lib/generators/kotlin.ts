@@ -45,6 +45,17 @@ function ktorFiles(
   files.push({ path: "build.gradle.kts", content: ktorBuildGradle(safe, withAuth, mysql, metrics, infra) });
   files.push({ path: "settings.gradle.kts", content: `rootProject.name = "${safe}"\n` });
   files.push({ path: "Dockerfile", content: ktorDockerfile() });
+  // Without a config logback logs everything at DEBUG (every Redis/DB command).
+  files.push({
+    path: "src/main/resources/logback.xml",
+    content: `<configuration>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder><pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern></encoder>
+  </appender>
+  <root level="\${LOG_LEVEL:-INFO}"><appender-ref ref="STDOUT"/></root>
+</configuration>
+`,
+  });
   files.push({
     path: "src/main/kotlin/Application.kt",
     content: ktorApplication(entities, stubEndpoints(endpoints, entities), withAuth, metrics, infra),

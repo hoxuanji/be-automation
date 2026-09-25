@@ -48,6 +48,8 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        # .env also carries vars read elsewhere (PORT, broker URLs, OTEL_*); don't crash on them.
+        extra = "ignore"
 
 settings = Settings()
 `,

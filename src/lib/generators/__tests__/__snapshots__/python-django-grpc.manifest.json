@@ -51,8 +51,8 @@
   },
   {
     "path": "app/config.py",
-    "lines": 14,
-    "size": 299
+    "lines": 16,
+    "size": 422
   },
   {
     "path": "app/db.py",

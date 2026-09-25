@@ -350,13 +350,26 @@ jobs:
             state=$(docker compose ps worker --format '{{.State}}')
             [ "$state" = "running" ] || { echo "::error::worker is $state"; exit 1; }
           fi
-      - name: Report e2e errors
+      # GitHub keeps at most 10 error annotations per step, so each source gets its own step.
+      - name: "Report e2e: container states"
+        if: failure()
+        working-directory: /tmp/smoke-repo
+        run: docker compose ps -a --format '{{.Service}} {{.State}} {{.Status}}' | while IFS= read -r l; do echo "::error::$l"; done
+      - name: "Report e2e: api logs"
         if: failure()
         working-directory: /tmp/smoke-repo
         run: |
-          docker compose ps -a || true
-          for svc in api worker; do
-            docker compose logs --no-color --tail 40 "$svc" 2>/dev/null | grep -iE 'error|panic|exception|fatal|refused|failed' | head -10 \
-              | while IFS= read -r l; do echo "::error::$svc: $l"; done
-          done
-          grep -iE 'error|failed' /tmp/compose.log | head -15 | while IFS= read -r l; do echo "::error::build: $l"; done
+          docker compose logs --no-color api 2>&1 | grep -v ' DEBUG ' \
+            | grep -iE 'error|panic|exception|fatal|refused|failed|traceback|caused by|cannot|unable|no such' | tail -10 \
+            | while IFS= read -r l; do echo "::error::$l"; done
+      - name: "Report e2e: worker logs"
+        if: failure()
+        working-directory: /tmp/smoke-repo
+        run: |
+          docker compose logs --no-color worker 2>&1 | grep -v ' DEBUG ' \
+            | grep -iE 'error|panic|exception|fatal|refused|failed|traceback|caused by|cannot|unable|no such' | tail -10 \
+            | while IFS= read -r l; do echo "::error::$l"; done
+      - name: "Report e2e: image build"
+        if: failure()
+        run: |
+          grep -iE 'error|failed' /tmp/compose.log 2>/dev/null | grep -viE 'warn' | tail -10 | while IFS= read -r l; do echo "::error::$l"; done

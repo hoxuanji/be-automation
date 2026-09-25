@@ -97,7 +97,7 @@ const WORKER_ENTRY: Record<string, string> = {
   "src/worker.ts": `command: ["node", "dist/worker.js"]`,
   "app/worker.py": `command: ["python", "-m", "app.worker"]`,
   "src/bin/worker.rs": `entrypoint: ["/worker"]`,
-  "src/main/kotlin/Worker.kt": `entrypoint: ["java", "-cp", "app.jar", "WorkerKt"]`,
+  "src/main/kotlin/Worker.kt": `entrypoint: ["java", "-cp", "app.jar", "Worker"]`,
 };
 
 // docker compose runs the queue consumer next to the api: same image, env and dependencies, no ports.
