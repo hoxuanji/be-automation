@@ -991,4 +991,74 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     assert.match(stubs, /fun `GET users by id returns 401 without token`/);
     assert.match(contract("ktor", eps, [])!, /fun `GET users search returns 200`/);
   });
+
+  // The builder's queue choice must produce a working broker client in Python
+  // repos — not a TODO — reading the env var the repo's .env / compose set.
+  const PY_QUEUES: Record<string, { client: RegExp; dep: RegExp; env: string }> = {
+    kafka:    { client: /from aiokafka import/, dep: /^aiokafka = /m, env: "KAFKA_BROKERS" },
+    rabbitmq: { client: /import aio_pika/, dep: /^aio-pika = /m, env: "RABBITMQ_URL" },
+    nats:     { client: /import nats\n/, dep: /^nats-py = /m, env: "NATS_URL" },
+    sqs:      { client: /from aiobotocore\.session import get_session/, dep: /^aiobotocore = /m, env: "AWS_REGION" },
+    bullmq:   { client: /from bullmq import Queue, Worker/, dep: /^bullmq = /m, env: "REDIS_URL" },
+  };
+  const QUEUE_EPS = [
+    { id: "1", method: "POST" as const, path: "/notifications", summary: "Notify", auth: false, pattern: "send_notification" },
+    { id: "2", method: "POST" as const, path: "/webhooks/stripe", summary: "Hook", auth: false, pattern: "webhook_receive" },
+    { id: "3", method: "GET" as const, path: "/healthz", summary: "Health", auth: false, pattern: "health_check" },
+  ];
+
+  it("Python queue option emits a real client + worker, connected at startup and probed for readiness", () => {
+    assert.deepEqual(queues.map((o) => o.id).sort(), Object.keys(PY_QUEUES).sort(), "every catalog queue has a Python client");
+    for (const framework of FRAMEWORKS.python) {
+      for (const [queue, want] of Object.entries(PY_QUEUES)) {
+        const g = gen({ language: "python", framework, queue, auth: "none" }, QUEUE_EPS, []);
+        const label = `${framework}/${queue}`;
+        const q = g.get("app/queue.py");
+        assert.ok(q, `${label}: app/queue.py`);
+        assert.match(q!, want.client, label);
+        assert.ok(q!.includes(want.env), `${label}: reads ${want.env}`);
+        // The env var the client reads is the one the generated .env sets.
+        assert.ok(g.get(".env.example")!.includes(want.env + "="), `${label}: .env.example sets ${want.env}`);
+        for (const fn of ["connect", "close", "ping", "publish", "consume"]) assert.match(q!, new RegExp(`^async def ${fn}\\(`, "m"), `${label}: ${fn}()`);
+        assert.match(g.get("pyproject.toml")!, want.dep, `${label}: client is a declared dependency`);
+        // `python -m app.worker` consumes with graceful SIGTERM handling.
+        const w = g.get("app/worker.py")!;
+        assert.match(w, /broker\.consume\(handle\)/);
+        assert.match(w, /signal\.SIGTERM/);
+        assert.match(w, /finally:\n\s+await broker\.close\(\)/);
+
+        const main = g.get("app/main.py")!;
+        assert.match(main, /from \. import queue as broker/);
+        // Startup connects, shutdown closes — FastAPI/Litestar lifespan, Django via an ASGI lifespan wrapper.
+        assert.match(main, /await broker\.connect\(\)[\s\S]*await broker\.close\(\)/, `${label}: lifespan`);
+        if (framework === "django") assert.match(main, /lifespan\.startup\.complete/);
+        // Readiness (/health?ready=1) and the health_check pattern fail when the broker is down.
+        assert.match(main, /ready[\s\S]{0,40}not await broker\.ping\(\)/, `${label}: readiness probe`);
+        assert.match(main, /checks\["queue"\] = "degraded"/);
+        // Patterns publish for real; no placeholder survives.
+        assert.match(main, /await broker\.publish\("notifications", payload\.model_dump\(\)\)/, `${label}: send_notification`);
+        assert.match(main, /await broker\.publish\("webhooks", /, `${label}: webhook_receive`);
+        assert.match(main, /status_code=503, detail="queue_unavailable"/);
+        assert.doesNotMatch(main, /TODO: (publish|enqueue)/, label);
+      }
+    }
+  });
+
+  it("Python without a queue answers 503 instead of pretending to publish", () => {
+    for (const framework of FRAMEWORKS.python) {
+      const g = gen({ language: "python", framework, queue: "none", auth: "none" }, QUEUE_EPS, []);
+      assert.ok(!g.get("app/queue.py") && !g.get("app/worker.py"), `${framework}: no broker module`);
+      const main = g.get("app/main.py")!;
+      assert.doesNotMatch(main, /\bbroker\b/, `${framework}: nothing references the missing broker`);
+      // Both queue-backed patterns refuse rather than silently dropping the event.
+      assert.equal(main.match(/status_code=503, detail="no_queue_configured"/g)?.length, 2, framework);
+    }
+  });
+
+  it("Python bullmq keeps the redis pin resolvable next to a Redis cache", () => {
+    // bullmq pins redis==7.4.x; a direct redis ^5 dependency would make `poetry install` fail.
+    const deps = gen({ language: "python", framework: "fastapi", queue: "bullmq", cache: "redis" }).get("pyproject.toml")!;
+    assert.match(deps, /^redis = "\^7\.4\.1"$/m);
+    assert.match(gen({ language: "python", framework: "fastapi", queue: "kafka", cache: "redis" }).get("pyproject.toml")!, /^redis = "\^5\.2\.0"$/m);
+  });
 });

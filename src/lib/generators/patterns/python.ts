@@ -1,6 +1,7 @@
 import type { Endpoint, Entity, StackConfig } from "../types";
 import type { PatternId } from "./index";
 import { authProviderSpec } from "../auth/providers";
+import { pyQueue } from "../queue/python";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -216,6 +217,7 @@ export const pyHasRedis = (c: StackConfig) => /redis|upstash|dragonfly/.test(c.c
 
 function healthCheck(config: StackConfig, hasDb: boolean): string {
   const hasCache = pyHasRedis(config);
+  const hasQueue = !!pyQueue(config);
   return `async def handler(${hasDb ? "db: Session = Depends(get_db)" : ""}):
     checks: dict = {"status": "ok"}
     http_status = 200
@@ -231,10 +233,15 @@ ${hasDb ? `    try:
     except Exception:
         checks["cache"] = "degraded"
         http_status = 503
+` : ""}${hasQueue ? `    if await broker.ping():
+        checks["queue"] = "ok"
+    else:
+        checks["queue"] = "degraded"
+        http_status = 503
 ` : ""}    return JSONResponse(status_code=http_status, content=checks)`;
 }
 
-function webhookReceive(): string {
+function webhookReceive(config: StackConfig): string {
   return `async def handler(request: Request):
     secret = os.getenv("WEBHOOK_SECRET", "")
     raw_body = await request.body()
@@ -243,7 +250,7 @@ function webhookReceive(): string {
         expected = "sha256=" + hmac_lib.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
         if not hmac_lib.compare_digest(sig, expected):
             raise HTTPException(status_code=401, detail="invalid_signature")
-    # TODO: enqueue event for async processing
+${publish(config, "webhooks", '{"body": raw_body.decode("utf-8", "replace")}')}
     logger.info("webhook received", extra={"bytes": len(raw_body)})
     return {"received": True}`;
 }
@@ -310,20 +317,26 @@ function aggregateStats(table: string): string {
 }
 
 function sendNotification(config: StackConfig): string {
-  const queueNote = config.queue === "kafka"
-    ? "aiokafka producer"
-    : config.queue === "rabbitmq"
-    ? "aio_pika channel"
-    : config.queue === "nats"
-    ? "nats.publish()"
-    : "your message broker";
   return `async def handler(payload: NotificationRequest):
     if not payload.recipient or not payload.channel:
         raise HTTPException(status_code=400, detail="recipient and channel required")
-    # TODO: publish via ${queueNote}
-    # await broker.publish("notifications", payload.model_dump())
+${publish(config, "notifications", "payload.model_dump()")}
     logger.info("notification queued", extra={"channel": payload.channel, "recipient": payload.recipient})
     return {"queued": True, "channel": payload.channel}`;
+}
+
+// Publish to the configured broker (app/queue.py, imported as `broker` by main.py);
+// without one there is nowhere to hand the event off to, so answer 503.
+function publish(config: StackConfig, topic: string, payload: string): string {
+  if (!pyQueue(config)) {
+    return `    # No queue configured — choose one in the builder to deliver this asynchronously.
+    raise HTTPException(status_code=503, detail="no_queue_configured")`;
+  }
+  return `    try:
+        await broker.publish("${topic}", ${payload})
+    except Exception:
+        logger.exception("queue publish failed", extra={"topic": "${topic}"})
+        raise HTTPException(status_code=503, detail="queue_unavailable")`;
 }
 
 function cacheRead(table: string, param: string, entity: Entity | undefined, hasCache: boolean): string {
@@ -405,7 +418,7 @@ function patternBody(e: Endpoint, config: StackConfig, entities: Entity[], mode:
     case "auth_refresh": return authRefresh();
     case "auth_change_password": return authChangePassword(user!);
     case "health_check": return healthCheck(config, hasDb);
-    case "webhook_receive": return webhookReceive();
+    case "webhook_receive": return webhookReceive(config);
     case "file_upload":  return fileUpload();
     case "paginated_search": return paginatedSearch(m!);
     case "aggregate_stats":  return aggregateStats(table);
