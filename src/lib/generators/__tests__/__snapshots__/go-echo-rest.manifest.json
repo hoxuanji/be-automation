@@ -40,6 +40,11 @@
     "size": 2170
   },
   {
+    "path": "cmd/worker/main.go",
+    "lines": 67,
+    "size": 1754
+  },
+  {
     "path": "DEPLOY.md",
     "lines": 79,
     "size": 2387
@@ -106,13 +111,13 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 14,
-    "size": 336
+    "lines": 17,
+    "size": 542
   },
   {
     "path": "go.mod",
-    "lines": 23,
-    "size": 716
+    "lines": 24,
+    "size": 756
   },
   {
     "path": "internal/api/contract/contract_test.go",
@@ -131,8 +136,8 @@
   },
   {
     "path": "internal/config/config.go",
-    "lines": 22,
-    "size": 476
+    "lines": 24,
+    "size": 518
   },
   {
     "path": "internal/db/gorm.go",
@@ -175,6 +180,11 @@
     "size": 362
   },
   {
+    "path": "internal/queue/queue.go",
+    "lines": 119,
+    "size": 3201
+  },
+  {
     "path": "internal/server/health.go",
     "lines": 35,
     "size": 939
@@ -196,8 +206,8 @@
   },
   {
     "path": "internal/server/server.go",
-    "lines": 102,
-    "size": 3025
+    "lines": 110,
+    "size": 3301
   },
   {
     "path": "internal/tracing/tracing.go",

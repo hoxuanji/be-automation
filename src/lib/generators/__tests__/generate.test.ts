@@ -991,4 +991,56 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     assert.match(stubs, /fun `GET users by id returns 401 without token`/);
     assert.match(contract("ktor", eps, [])!, /fun `GET users search returns 200`/);
   });
+
+  it("Go queue option is really wired: client, publisher, readiness, worker, go.mod", () => {
+    // Why: a queue picked in the builder used to produce "TODO: publish" stubs, so
+    // send_notification claimed success while nothing was ever sent.
+    const clients: Record<string, string> = {
+      kafka: "github.com/segmentio/kafka-go",
+      rabbitmq: "github.com/rabbitmq/amqp091-go",
+      nats: "github.com/nats-io/nats.go",
+      sqs: "github.com/aws/aws-sdk-go-v2/service/sqs",
+      bullmq: "github.com/redis/go-redis/v9",
+    };
+    assert.deepEqual(Object.keys(clients).sort(), queues.map((q) => q.id).sort(), "every catalog queue has a Go client");
+    const eps = [
+      { id: "n", method: "POST" as const, path: "/notifications", summary: "", auth: false, pattern: "send_notification" },
+      { id: "w", method: "POST" as const, path: "/webhooks/stripe", summary: "", auth: false, pattern: "webhook_receive" },
+    ];
+    for (const framework of FRAMEWORKS.go) {
+      for (const [queue, mod] of Object.entries(clients)) {
+        const { get } = gen({ framework, queue }, eps);
+        const q = get("internal/queue/queue.go")!;
+        assert.ok(q.includes(`"${mod}"`), `${framework}/${queue}: imports ${mod}`);
+        assert.match(q, /Publish\(ctx context\.Context, topic string, msg \[\]byte\) error/);
+        assert.ok(get("go.mod")!.includes(`\t${mod} v`), `${framework}/${queue}: go.mod requires ${mod}`);
+        const api = get("internal/handlers/api.go")!;
+        assert.ok(api.includes("h.mq.Publish(") && api.includes("queue.TopicNotifications") && api.includes("queue.TopicWebhooks"), `${framework}/${queue}: handlers publish`);
+        assert.ok(!/TODO: (enqueue|publish)/.test(api), `${framework}/${queue}: no queue TODOs left`);
+        const server = get("internal/server/server.go")!;
+        assert.match(server, /queue\.Open\(/);
+        assert.match(server, /s\.checks\["queue"\] = q\.Ping/, "queue is part of /health?ready=1");
+        assert.match(server, /return q\.Close\(\)/, "queue closes on shutdown");
+        assert.match(server, /handlers\.NewAPIHandlers\([^)]*\bq\)/);
+        const worker = get("cmd/worker/main.go")!;
+        assert.match(worker, /q\.Subscribe\(ctx, topic,/);
+        assert.match(worker, /signal\.NotifyContext/, "worker shuts down gracefully");
+        assert.ok(get("Dockerfile")!.includes("./cmd/worker"), "the image ships the worker binary");
+      }
+    }
+    // Env names are the ones .env.example already documents.
+    assert.ok(gen({ queue: "kafka" }).get("internal/config/config.go")!.includes('env:"KAFKA_BROKERS"'));
+    assert.ok(gen({ queue: "rabbitmq" }).get("internal/config/config.go")!.includes('env:"RABBITMQ_URL"'));
+    assert.ok(gen({ queue: "nats" }).get("internal/config/config.go")!.includes('env:"NATS_URL"'));
+    // BullMQ is Node-only: the Go side must say so rather than pretend interop.
+    assert.match(gen({ queue: "bullmq" }).get("internal/queue/queue.go")!, /does NOT produce or consume BullMQ jobs/);
+
+    // No queue: nothing emitted, and send_notification refuses instead of lying.
+    const none = gen({ queue: "none" }, eps);
+    assert.equal(none.get("internal/queue/queue.go"), undefined);
+    assert.equal(none.get("cmd/worker/main.go"), undefined);
+    const api = none.get("internal/handlers/api.go")!;
+    assert.ok(api.includes('"queue_not_configured"') && !api.includes(`"queued": true`));
+    assert.ok(!none.get("go.mod")!.includes("kafka-go") && !none.get("Dockerfile")!.includes("worker"));
+  });
 });

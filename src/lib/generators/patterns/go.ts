@@ -3,6 +3,7 @@ import type { PatternId } from "./index";
 import type { GeneratedFile } from "../types";
 import { safeName } from "../types";
 import { authProviderSpec } from "../auth/providers";
+import { goQueueKind } from "../queue/go";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -129,6 +130,16 @@ function redisNilCheck(fw: Fw): string {
   if (fw === "echo") return `\tif h.rdb == nil {\n\t\treturn c.JSON(http.StatusServiceUnavailable, ${m})\n\t}`;
   return `\tif h.rdb == nil {\n\t\twriteJSON(w, http.StatusServiceUnavailable, ${m})\n\t\treturn\n\t}`;
 }
+
+function mqNilCheck(fw: Fw): string {
+  const m = mapLit(fw, ["error", '"queue_not_configured"']);
+  if (fw === "gin") return `\tif h.mq == nil {\n\t\tc.JSON(http.StatusServiceUnavailable, ${m})\n\t\treturn\n\t}`;
+  if (fw === "fiber") return `\tif h.mq == nil {\n\t\treturn c.Status(http.StatusServiceUnavailable).JSON(${m})\n\t}`;
+  if (fw === "echo") return `\tif h.mq == nil {\n\t\treturn c.JSON(http.StatusServiceUnavailable, ${m})\n\t}`;
+  return `\tif h.mq == nil {\n\t\twriteJSON(w, http.StatusServiceUnavailable, ${m})\n\t\treturn\n\t}`;
+}
+
+const reqCtx: Record<Fw, string> = { gin: "c.Request.Context()", fiber: "c.UserContext()", echo: "c.Request().Context()", chi: "r.Context()" };
 
 function crudList(fw: Fw, table: string): string {
   const x = fwCtx(fw);
@@ -439,8 +450,18 @@ function healthCheck(fw: Fw, config: StackConfig): string {
 \t${x.sendJSON("status", checks)}`;
 }
 
-function webhookReceive(fw: Fw): string {
+function webhookReceive(fw: Fw, config: StackConfig): string {
   const x = fwCtx(fw);
+  const raw = fw === "chi" ? "body" : "rawBody";
+  const enqueue = goQueueKind(config.queue)
+    ? `${mqNilCheck(fw)}
+\tif err := h.mq.Publish(${reqCtx[fw]}, queue.TopicWebhooks, ${raw}); err != nil {
+\t\th.log.Error("enqueue webhook", "err", err)
+\t\t${x.retErr("http.StatusServiceUnavailable", "queue_unavailable")}
+\t}
+\th.log.Info("webhook enqueued", "bytes", len(${raw}))`
+    : `\t// TODO: enqueue event for async processing
+\th.log.Info("webhook received", "bytes", len(${raw}))`;
   return `\tconst sigHeader = "X-Hub-Signature-256"
 \tsecret := os.Getenv("WEBHOOK_SECRET")
 \tif secret == "" {
@@ -470,8 +491,7 @@ fw === "fiber" ? `\trawBody := c.Body()` :
 \t\t}
 \t}
 
-\t// TODO: enqueue event for async processing
-\th.log.Info("webhook received", "bytes", ${fw === "chi" ? "len(body)" : "len(rawBody)"})
+${enqueue}
 \t${x.retOK(mapLit(fw, ["received", "true"]))}`;
 }
 
@@ -608,13 +628,20 @@ function aggregateStats(fw: Fw, table: string): string {
 
 function sendNotification(fw: Fw, config: StackConfig): string {
   const x = fwCtx(fw);
-  const queueHint = config.queue === "kafka"
-    ? "Kafka producer — use confluent-kafka-go or segmentio/kafka-go"
-    : config.queue === "rabbitmq"
-    ? "RabbitMQ — use github.com/rabbitmq/amqp091-go"
-    : config.queue === "nats"
-    ? "NATS — use github.com/nats-io/nats.go"
-    : "message queue — configure broker URL via env";
+  const publish = goQueueKind(config.queue)
+    ? `${mqNilCheck(fw)}
+\tmsg, err := json.Marshal(body)
+\tif err != nil {
+\t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
+\t}
+\tif err := h.mq.Publish(${reqCtx[fw]}, queue.TopicNotifications, msg); err != nil {
+\t\th.log.Error("enqueue notification", "err", err)
+\t\t${x.retErr("http.StatusServiceUnavailable", "queue_unavailable")}
+\t}
+\th.log.Info("notification queued", "channel", body.Channel, "recipient", body.Recipient)
+\t${x.retOK(mapLit(fw, ["queued", "true"], ["channel", "body.Channel"]))}`
+    : `\t// No queue in this stack: pick one in the builder to get a publisher + cmd/worker.
+\t${x.retErr("http.StatusServiceUnavailable", "queue_not_configured", "\t")}`;
   return `\ttype notifReq struct {
 \t\tRecipient string         \`json:"recipient"\`
 \t\tChannel   string         \`json:"channel"\` // "email" | "sms" | "push"
@@ -626,10 +653,7 @@ ${x.getBodyTyped("notifReq")}
 \t\t${x.retErr("http.StatusBadRequest", "recipient and channel required")}
 \t}
 
-\t// TODO: publish to ${queueHint}
-\t// Example: broker.Publish("notifications", body)
-\th.log.Info("notification queued", "channel", body.Channel, "recipient", body.Recipient)
-\t${x.retOK(mapLit(fw, ["queued", "true"], ["channel", "body.Channel"]))}`;
+${publish}`;
 }
 
 function cacheRead(fw: Fw, table: string): string {
@@ -698,7 +722,7 @@ function patternBody(pattern: string | undefined, fw: Fw, e: Endpoint, config: S
     case "auth_refresh": return authRefreshFw(fw);
     case "auth_change_password": return authChangePasswordFw(fw);
     case "health_check": return healthCheck(fw, config);
-    case "webhook_receive": return webhookReceive(fw);
+    case "webhook_receive": return webhookReceive(fw, config);
     case "file_upload":  return fileUpload(fw);
     case "paginated_search": return paginatedSearch(fw, table);
     case "aggregate_stats":  return aggregateStats(fw, table);
@@ -733,12 +757,13 @@ function buildImports(code: string, module: string): string {
       .map(([, path]) => `\t"${path}"`)
       .sort()
       .join("\n");
-  return `import (\n${pick(GO_STD)}\n\n${pick([...GO_EXT, ["auth", `${module}/internal/auth`]])}\n)`;
+  const groups = [pick(GO_STD), pick([...GO_EXT, ["auth", `${module}/internal/auth`], ["queue", `${module}/internal/queue`]])];
+  return `import (\n${groups.filter(Boolean).join("\n\n")}\n)`;
 }
 
 // ── struct + helpers ──────────────────────────────────────────────────────────
 
-function buildStruct(fw: Fw, methods: string, usesDb: boolean, usesRdb: boolean): string {
+function buildStruct(fw: Fw, methods: string, usesDb: boolean, usesRdb: boolean, usesMq: boolean): string {
   const helpers: string[] = [];
   if (methods.includes("h.issueJWT(")) helpers.push(`func (h *APIHandlers) issueJWT(sub string) (string, error) {
 \tsecret := os.Getenv("JWT_SECRET")
@@ -806,9 +831,10 @@ func queryIntOr(v string, def int) int {
     "\tlog *slog.Logger",
     usesDb ? "\tdb  *gorm.DB      // nil when the stack has no SQL database" : "",
     usesRdb ? "\trdb *redis.Client // nil when the stack has no Redis cache" : "",
+    usesMq ? "\tmq  queue.Queue" : "",
   ].filter(Boolean).join("\n");
-  const params = ["log *slog.Logger", usesDb ? "gdb *gorm.DB" : "", usesRdb ? "rdb *redis.Client" : ""].filter(Boolean).join(", ");
-  const inits = ["log: log", usesDb ? "db: gdb" : "", usesRdb ? "rdb: rdb" : ""].filter(Boolean).join(", ");
+  const params = ["log *slog.Logger", usesDb ? "gdb *gorm.DB" : "", usesRdb ? "rdb *redis.Client" : "", usesMq ? "mq queue.Queue" : ""].filter(Boolean).join(", ");
+  const inits = ["log: log", usesDb ? "db: gdb" : "", usesRdb ? "rdb: rdb" : "", usesMq ? "mq: mq" : ""].filter(Boolean).join(", ");
 
   return [`type APIHandlers struct {
 ${fields}
@@ -828,7 +854,7 @@ export function goApiHandlersFile(
   config: StackConfig,
   endpoints: Endpoint[],
   entities: Entity[]
-): { file: GeneratedFile; usesDb: boolean; usesRdb: boolean } {
+): { file: GeneratedFile; usesDb: boolean; usesRdb: boolean; usesMq: boolean } {
   const framework = (["gin", "fiber", "echo", "chi"].includes(fw) ? fw : "gin") as Fw;
 
   const methods = endpoints
@@ -842,7 +868,8 @@ export function goApiHandlersFile(
 
   const usesDb = /\bh\.db\b/.test(methods);
   const usesRdb = /\bh\.rdb\b/.test(methods);
-  const structCode = buildStruct(framework, methods, usesDb, usesRdb);
+  const usesMq = /\bh\.mq\b/.test(methods);
+  const structCode = buildStruct(framework, methods, usesDb, usesRdb, usesMq);
   const imports = buildImports(structCode + "\n" + methods, `github.com/your-username/${safeName(config.name)}`);
 
   return {
@@ -852,6 +879,7 @@ export function goApiHandlersFile(
     },
     usesDb,
     usesRdb,
+    usesMq,
   };
 }
 
