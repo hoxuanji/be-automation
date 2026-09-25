@@ -30,7 +30,7 @@ function javaShortType(t: FieldType): string {
     case "uuid":    return "UUID";
     case "string":  return "String";
     case "text":    return "String";
-    case "number":  return "Long";
+    case "number":  return "Double"; // migrations create DOUBLE PRECISION; Hibernate validate rejects Long
     case "boolean": return "Boolean";
     case "date":    return "Instant";
     case "json":    return "JsonNode";
@@ -711,7 +711,7 @@ function repositoryInterface(entity: Entity): string {
   const pascal = toPascal(entity.name);
   const pk = pkField(entity);
   const idType = pk ? javaShortType(pk.type) : "UUID";
-  const idImport = pk && pk.type === "uuid" ? "import java.util.UUID;" : pk && pk.type === "number" ? "import java.lang.Long;" : "import java.util.UUID;";
+  const idImport = pk && pk.type === "number" ? "" : "import java.util.UUID;";
 
   return `package dev.helios.app.repository;
 

@@ -1954,4 +1954,18 @@ describe("Every deployment target gets a real CI deploy job", () => {
       }
     }
   });
+  // Spring runs Hibernate with ddl-auto=validate against the Flyway schema: a `number`
+  // field typed Long (bigint) against DOUBLE PRECISION stopped the app from starting.
+  it("Java number fields match the migration's DOUBLE PRECISION column", () => {
+    const entities = [{ id: "e", name: "Item", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "score", type: "number" as const, required: false, unique: false },
+    ] }];
+    for (const framework of ["spring", "quarkus"]) {
+      const g = gen({ language: "java", framework }, [], entities);
+      const model = g.files.find((f) => /model\/Item\.java$|Item\.java$/.test(f.path) && f.content.includes("score"))!;
+      assert.match(model.content, /(private|public) Double score;/, `${framework}: score is Double`); // Panache uses public fields
+      assert.match(g.files.find((f) => f.path.endsWith(".sql"))!.content, /score DOUBLE PRECISION/);
+    }
+  });
 });
