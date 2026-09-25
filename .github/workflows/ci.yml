@@ -47,6 +47,8 @@ jobs:
       - run: npm ci
       # First pass: regenerate snapshots (creates missing ones, updates stale ones).
       # Second pass: assert nothing changed — if something differs the commit is the source of truth.
+      - name: Cloud deploy pipeline tests
+        run: npm run test:deploy
       - name: Regenerate snapshots
         run: UPDATE_SNAPSHOTS=1 npm test
       - name: Assert no snapshot drift

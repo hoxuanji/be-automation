@@ -238,3 +238,19 @@ describe("runCloudDeployPipeline", () => {
     assert.ok(!calls.some((c) => c.path.endsWith("/dispatches")));
   });
 });
+
+// The Helios one-click side (CLOUD_SECRET_NAMES) and the generated deploy.yml
+// (DEPLOY_SECRETS) are written separately; if they drift, secrets land under
+// names the workflow never reads and every cloud deploy fails at runtime.
+describe("one-click secrets match the generated deploy workflow", () => {
+  it("every secret Helios sets is one deploy.yml reads", async () => {
+    const { CLOUD_SECRET_NAMES } = await import("@/lib/cloud-deploy");
+    const { DEPLOY_SECRETS } = await import("@/lib/generators/deploy");
+    for (const [provider, names] of Object.entries(CLOUD_SECRET_NAMES)) {
+      const read = new Set(DEPLOY_SECRETS[provider as keyof typeof DEPLOY_SECRETS].map((s) => s.name));
+      for (const name of Object.values(names as Record<string, string>)) {
+        assert.ok(read.has(name), `${provider}: Helios sets ${name}, but deploy.yml doesn't read it`);
+      }
+    }
+  });
+});
