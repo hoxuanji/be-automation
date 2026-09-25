@@ -1,7 +1,7 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { toPascal, toSnake, toKebab, toCamel } from "./types";
 import { needsAuth } from "./auth/providers";
-import { springInfra, quarkusInfra, type JavaInfra } from "./java-infra";
+import { springInfra, quarkusInfra, javaQueue, type JavaInfra } from "./java-infra";
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
@@ -1059,7 +1059,13 @@ ${extra}${infra?.deps ?? ""}    <dependency>
       <artifactId>rest-assured</artifactId>
       <scope>test</scope>
     </dependency>
-    <!-- Tests run on in-memory H2 (%test profile) instead of a live database. -->
+${withAuth ? `    <!-- @TestSecurity: contract tests call protected routes as an authenticated user. -->
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-test-security</artifactId>
+      <scope>test</scope>
+    </dependency>
+` : ""}    <!-- Tests run on in-memory H2 (%test profile) instead of a live database. -->
     <dependency>
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-jdbc-h2</artifactId>
@@ -1261,22 +1267,21 @@ public class HealthResource {
 }
 
 function quarkusResourceTest(entity: Entity, pascal: string, kebab: string, withAuth = false): string {
-  // We assert only that the route table is wired and reachable. The exact
-  // status code on POST is left flexible (201 vs 200 vs 400) because Panache
-  // entity validation depends on the specific @NotNull annotations the
-  // generator emits — checking >= 200 < 500 catches "route not registered"
-  // without coupling the test to a particular validation policy.
-  void entity;
+  // A valid body (required fields filled, unique values fresh): "{}" violates the
+  // NOT NULL columns and answers 500 once auth is off. ApiContractTest covers the rest of CRUD.
   return `package dev.helios.app;
 
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.lessThan;
 
 @QuarkusTest
 class ${pascal}ResourceTest {
+
+    private static String unique() {
+        return "test-" + java.util.UUID.randomUUID();
+    }
 
     @Test
     void list${pascal}s_${withAuth ? "rejectsMissingToken" : "returnsOk"}() {
@@ -1285,13 +1290,265 @@ class ${pascal}ResourceTest {
     }
 
     @Test
-    void create${pascal}_isReachable() {
-        given().contentType("application/json").body("{}")
+    void create${pascal}_${withAuth ? "rejectsMissingToken" : "returnsCreated"}() {
+        given().contentType("application/json").body(${javaEntityBody(entity)})
                .when().post("/${kebab}s")
-               .then().statusCode(lessThan(500));
+               .then().statusCode(${withAuth ? 401 : 201});
     }
 }
 `;
+}
+
+// ─── API contract tests (emitted from contract-tests.ts) ──────────────────────
+
+type JavaContractCase = {
+  name: string;       // Java identifier stem, e.g. getUsersById
+  method: string;
+  path: string;       // Java expression for the request path
+  protected: boolean;
+  status: number;     // expected status with a principal (or with auth off)
+  body?: string;      // Java expression for a JSON body
+  createFor?: string; // entity pascal: the test first creates a row and binds `id`
+  json?: "object" | "array";
+  keys?: string[];    // top-level keys the response object must carry
+  // ponytail: publish stubs get a request rejected before the broker is touched
+  // (Spring: missing body → 400, Quarkus: wrong media type → 415). That proves the
+  // route is wired and authorized without a live queue during `mvn test`.
+  rejectBody?: boolean;
+};
+
+const javaStr = (s: string) => JSON.stringify(s);
+
+/** Required fields get fresh values per request so unique columns never collide across tests. */
+function javaEntityBody(entity: Entity): string {
+  const pk = pkField(entity);
+  const json = "{" + entity.fields.filter((f) => !f.primaryKey && f !== pk && f.required).map((f) => {
+    const k = `"${toCamel(f.name)}":`;
+    switch (f.type) {
+      case "string":
+      case "text": return `${k}"\u0000unique()\u0000"`;
+      case "uuid": return `${k}"\u0000java.util.UUID.randomUUID()\u0000"`;
+      default:     return k + testValue(f);
+    }
+  }).join(",") + "}";
+  // Odd segments (between \0 markers) are Java expressions, even ones JSON text.
+  return json.split("\u0000").map((seg, i) => (i % 2 ? seg : javaStr(seg))).join(" + ");
+}
+
+function javaContractCases(config: StackConfig, endpoints: Endpoint[], entities: Entity[], withAuth: boolean, spring: boolean): JavaContractCase[] {
+  const publisher = javaQueue(config.queue) !== null;
+  const cases: JavaContractCase[] = [
+    { name: "getHealth", method: "GET", path: javaStr("/health"), protected: false, status: 200, json: "object", keys: ["ok"] },
+  ];
+  // Same rule as the generators: stubs only when no entity CRUD owns the paths.
+  const stubs = entities.length === 0 ? endpoints.filter((e) => e.path !== "/health") : [];
+  for (const e of stubs) {
+    const method = ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(e.method) ? e.method : "GET";
+    const publishes = publisher && e.pattern === "send_notification";
+    cases.push({
+      name: handlerMethodName(e),
+      method,
+      path: javaStr(springPath(e.path).replace(/\{[^}]+\}/g, "1")),
+      // Spring's SecurityConfig protects every route but /health; Quarkus marks stubs @Authenticated one by one.
+      protected: withAuth && (spring || e.auth),
+      status: publishes ? (spring ? 400 : 415) : 200,
+      body: ["POST", "PUT", "PATCH"].includes(method) ? javaStr("{}") : undefined,
+      rejectBody: publishes,
+      json: publishes ? undefined : "object",
+      keys: publishes ? undefined : ["op"],
+    });
+  }
+  for (const entity of entities) {
+    const pascal = toPascal(entity.name);
+    const base = `/${toKebab(entity.name)}s`;
+    const pk = pkField(entity);
+    const pkName = toCamel(pk?.name ?? "id");
+    const keys = [pkName, ...entity.fields.filter((f) => !f.primaryKey && f !== pk && f.required).map((f) => toCamel(f.name))];
+    const body = `body${pascal}()`;
+    const byId = `${javaStr(`${base}/`)} + id`;
+    const n = (m: string, suffix = "") => `${m.toLowerCase()}${pascal}s${suffix}`;
+    cases.push(
+      { name: n("GET"), method: "GET", path: javaStr(base), protected: withAuth, status: 200, json: "array" },
+      { name: n("POST"), method: "POST", path: javaStr(base), protected: withAuth, status: 201, body, json: "object", keys },
+      { name: n("GET", "ById"), method: "GET", path: byId, protected: withAuth, status: 200, createFor: pascal, json: "object", keys: [pkName] },
+      { name: n("PUT", "ById"), method: "PUT", path: byId, protected: withAuth, status: 200, createFor: pascal, body, json: "object", keys: [pkName] },
+      { name: n("DELETE", "ById"), method: "DELETE", path: byId, protected: withAuth, status: 204, createFor: pascal },
+    );
+  }
+  return cases;
+}
+
+/** Unique, valid Java method names: stem_suffix, then stem_suffix2, … */
+function javaTestNames(): (stem: string, suffix: string) => string {
+  const seen = new Map<string, number>();
+  return (stem, suffix) => {
+    const base = `${stem.replace(/[^A-Za-z0-9_]/g, "") || "route"}_${suffix}`;
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return n === 1 ? base : `${base}${n}`;
+  };
+}
+
+type JavaRender = (fn: string, c: JavaContractCase, principal: boolean, status: number) => string;
+
+// Protected routes get a 401-without-principal test plus a with-principal test.
+function javaContractMethods(cases: JavaContractCase[], render: JavaRender): string {
+  const name = javaTestNames();
+  return cases.map((c) =>
+    c.protected
+      // The 401 check needs no row: a random id keeps it independent of the database.
+      ? render(name(c.name, "returns401WithoutToken"), { ...c, createFor: undefined, path: c.path.replace(/ \+ id$/, " + java.util.UUID.randomUUID()") }, false, 401) +
+        render(name(c.name, `returns${c.status}WithToken`), c, true, c.status)
+      : render(name(c.name, `returns${c.status}`), c, false, c.status)
+  ).join("");
+}
+
+function springContractTest(cases: JavaContractCase[], entities: Entity[], withAuth: boolean): string {
+  const jwt = (principal: boolean) => (principal ? ".with(jwt())" : "");
+  const render: JavaRender = (fn, c, principal, status) => {
+    const req = [`request(HttpMethod.${c.method}, ${c.path})${jwt(principal)}`];
+    if (c.body && !(status !== 401 && c.rejectBody)) req.push(".contentType(MediaType.APPLICATION_JSON)", `.content(${c.body})`);
+    const expects = [`.andExpect(status().is(${status}))`];
+    if (status !== 401 && c.json) {
+      expects.push(".andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))");
+      if (c.json === "array") expects.push('.andExpect(jsonPath("$").isArray())');
+      for (const k of c.keys ?? []) expects.push(`.andExpect(jsonPath(${javaStr(`$.${k}`)}).exists())`);
+    }
+    return `
+    @Test
+    void ${fn}() throws Exception {
+${c.createFor ? `        String id = create${c.createFor}();\n` : ""}        mvc.perform(${req.join("\n                ")})
+            ${expects.join("\n            ")};
+    }
+`;
+  };
+  const helpers = entities.map((e) => {
+    const pascal = toPascal(e.name);
+    return `
+    private static String body${pascal}() {
+        return ${javaEntityBody(e)};
+    }
+
+    private String create${pascal}() throws Exception {
+        String json = mvc.perform(post(${javaStr(`/${toKebab(e.name)}s`)})${jwt(withAuth)}
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body${pascal}()))
+            .andExpect(status().isCreated())
+            .andReturn().getResponse().getContentAsString();
+        Object id = JsonPath.read(json, ${javaStr(`$.${toCamel(pkField(e)?.name ?? "id")}`)});
+        return id.toString();
+    }
+`;
+  }).join("");
+  return `package dev.helios.app;
+
+${entities.length ? "import com.jayway.jsonpath.JsonPath;\n" : ""}import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+${withAuth ? "import org.springframework.boot.test.mock.mockito.MockBean;\n" : ""}import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+${withAuth ? "import org.springframework.security.oauth2.jwt.JwtDecoder;\n" : ""}import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.web.servlet.MockMvc;
+
+${withAuth ? "import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;\n" : ""}import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+
+/**
+ * Contract tests: every route is served (not 404), protected routes reject a
+ * missing token and accept an authenticated principal, JSON responses carry the
+ * expected shape, and entity CRUD round-trips. The "test" profile runs on
+ * in-memory H2 with brokers and exporters off, so no external services are needed.
+ */
+@SpringBootTest
+@AutoConfigureMockMvc
+@ActiveProfiles("test")
+class ApiContractTest {
+
+    @Autowired
+    MockMvc mvc;
+${withAuth ? `
+    // jwt() supplies the authenticated principal; the mock keeps the context off the JWKS endpoint.
+    @MockBean
+    JwtDecoder jwtDecoder;
+` : ""}
+    private static String unique() {
+        return "test-" + java.util.UUID.randomUUID();
+    }
+${helpers}${javaContractMethods(cases, render)}}
+`;
+}
+
+function quarkusContractTest(cases: JavaContractCase[], entities: Entity[], withAuth: boolean): string {
+  const render: JavaRender = (fn, c, principal, status) => {
+    const given = ["given()"];
+    if (status !== 401 && c.rejectBody) given.push('.contentType(ContentType.TEXT).body("not json")');
+    else if (c.body) given.push(".contentType(ContentType.JSON)", `.body(${c.body})`);
+    const then = [`.statusCode(${status})`];
+    if (status !== 401 && c.json) {
+      then.push(".contentType(ContentType.JSON)");
+      if (c.json === "array") then.push('.body("$", instanceOf(java.util.List.class))');
+      for (const k of c.keys ?? []) then.push(`.body("$", hasKey(${javaStr(k)}))`);
+    }
+    return `
+    @Test${principal ? `\n    @TestSecurity(user = "test")` : ""}
+    void ${fn}() {
+${c.createFor ? `        String id = create${c.createFor}();\n` : ""}        ${given.join("")}
+            .when().request(${javaStr(c.method)}, ${c.path})
+            .then()${then.join("")};
+    }
+`;
+  };
+  const helpers = entities.map((e) => {
+    const pascal = toPascal(e.name);
+    return `
+    private static String body${pascal}() {
+        return ${javaEntityBody(e)};
+    }
+
+${withAuth ? "    // Runs inside the calling test, so it inherits that test's @TestSecurity principal.\n" : ""}    private static String create${pascal}() {
+        Object id = given().contentType(ContentType.JSON).body(body${pascal}())
+            .when().post(${javaStr(`/${toKebab(e.name)}s`)})
+            .then().statusCode(201)
+            .extract().path(${javaStr(toCamel(pkField(e)?.name ?? "id"))});
+        return id.toString();
+    }
+`;
+  }).join("");
+  return `package dev.helios.app;
+
+import io.quarkus.test.junit.QuarkusTest;
+${withAuth ? "import io.quarkus.test.security.TestSecurity;\n" : ""}import io.restassured.http.ContentType;
+import org.junit.jupiter.api.Test;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.*;
+
+/**
+ * Contract tests: every route is served (not 404), protected routes reject a
+ * missing token and accept an authenticated principal (@TestSecurity), JSON
+ * responses carry the expected shape, and entity CRUD round-trips. The %test
+ * profile runs on in-memory H2 with brokers and exporters off.
+ */
+@QuarkusTest
+class ApiContractTest {
+
+    private static String unique() {
+        return "test-" + java.util.UUID.randomUUID();
+    }
+${helpers}${javaContractMethods(cases, render)}}
+`;
+}
+
+/** ApiContractTest.java per framework; emitted from contract-tests.ts. */
+export function javaContractTestFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
+  const withAuth = needsAuth(config, endpoints.some((e) => e.auth));
+  const spring = config.framework !== "quarkus";
+  const cases = javaContractCases(config, endpoints, entities, withAuth, spring);
+  return [{
+    path: "src/test/java/dev/helios/app/ApiContractTest.java",
+    content: spring ? springContractTest(cases, entities, withAuth) : quarkusContractTest(cases, entities, withAuth),
+  }];
 }
 
 // ─── Suppress unused-import warnings for re-exported symbols ─────────────────

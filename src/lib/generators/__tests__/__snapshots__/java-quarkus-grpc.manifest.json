@@ -106,8 +106,8 @@
   },
   {
     "path": "pom.xml",
-    "lines": 102,
-    "size": 3194
+    "lines": 108,
+    "size": 3435
   },
   {
     "path": "QUICKSTART.md",
@@ -146,8 +146,8 @@
   },
   {
     "path": "src/main/java/dev/helios/app/infra/RateLimitFilter.java",
-    "lines": 48,
-    "size": 2071
+    "lines": 53,
+    "size": 2325
   },
   {
     "path": "src/main/java/dev/helios/app/messaging/NotificationConsumer.java",
@@ -186,8 +186,8 @@
   },
   {
     "path": "src/main/resources/application.properties",
-    "lines": 44,
-    "size": 2388
+    "lines": 46,
+    "size": 2420
   },
   {
     "path": "src/main/resources/db/migration/V1__init.sql",
@@ -195,18 +195,18 @@
     "size": 791
   },
   {
-    "path": "src/test/java/com/example/testapp/ApiContractTest.java",
-    "lines": 99,
-    "size": 3449
+    "path": "src/test/java/dev/helios/app/ApiContractTest.java",
+    "lines": 213,
+    "size": 6997
   },
   {
     "path": "src/test/java/dev/helios/app/PostResourceTest.java",
-    "lines": 25,
-    "size": 575
+    "lines": 28,
+    "size": 704
   },
   {
     "path": "src/test/java/dev/helios/app/UserResourceTest.java",
-    "lines": 25,
-    "size": 575
+    "lines": 28,
+    "size": 740
   }
 ]

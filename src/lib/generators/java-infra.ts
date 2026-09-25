@@ -109,6 +109,7 @@ management.datadog.metrics.export.step=30s`);
 
   if (config.rateLimit) {
     deps.push(BUCKET4J());
+    testProps.push("rate-limit.enabled=false");
     files.push({ path: `${SRC}/infra/RateLimitFilter.java`, content: springRateLimitFilter() });
   }
   if (config.audit) {
@@ -183,6 +184,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.concurrent.ConcurrentHashMap;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
@@ -195,6 +197,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
+// The test profile turns this off: contract tests fire more requests than one burst allows.
+@ConditionalOnProperty(name = "rate-limit.enabled", havingValue = "true", matchIfMissing = true)
 public class RateLimitFilter extends OncePerRequestFilter {
 
 ${RATE_LIMIT_CONSTANTS}
@@ -637,6 +641,7 @@ quarkus.micrometer.export.datadog.step=30s
 
   if (config.rateLimit) {
     deps.push(BUCKET4J());
+    props.push("%test.rate-limit.enabled=false");
     files.push({ path: `${SRC}/infra/RateLimitFilter.java`, content: quarkusRateLimitFilter() });
   }
   if (config.audit) {
@@ -737,6 +742,7 @@ import jakarta.ws.rs.core.Response;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.resteasy.reactive.server.ServerRequestFilter;
 
 /**
@@ -748,10 +754,14 @@ public class RateLimitFilter {
 
 ${RATE_LIMIT_CONSTANTS}
 
+    // %test turns this off: contract tests fire more requests than one burst allows.
+    @ConfigProperty(name = "rate-limit.enabled", defaultValue = "true")
+    boolean enabled;
+
     @ServerRequestFilter(preMatching = true)
     public Optional<Response> rateLimit(HttpServerRequest request) {
         String ip = request.remoteAddress() == null ? "unknown" : request.remoteAddress().host();
-        if (allow(ip)) return Optional.empty();
+        if (!enabled || allow(ip)) return Optional.empty();
         return Optional.of(Response.status(429)
             .header("Retry-After", "1")
             .type(MediaType.APPLICATION_JSON)

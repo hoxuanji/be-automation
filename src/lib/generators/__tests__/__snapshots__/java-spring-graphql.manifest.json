@@ -166,8 +166,8 @@
   },
   {
     "path": "src/main/java/dev/helios/app/infra/RateLimitFilter.java",
-    "lines": 56,
-    "size": 2413
+    "lines": 59,
+    "size": 2682
   },
   {
     "path": "src/main/java/dev/helios/app/messaging/MessagingConfig.java",
@@ -235,9 +235,9 @@
     "size": 815
   },
   {
-    "path": "src/test/java/com/example/testapp/ApiContractTest.java",
-    "lines": 99,
-    "size": 3449
+    "path": "src/test/java/dev/helios/app/ApiContractTest.java",
+    "lines": 242,
+    "size": 9365
   },
   {
     "path": "src/test/java/dev/helios/app/PostControllerTest.java",
@@ -251,7 +251,7 @@
   },
   {
     "path": "src/test/resources/application-test.properties",
-    "lines": 12,
-    "size": 403
+    "lines": 13,
+    "size": 428
   }
 ]

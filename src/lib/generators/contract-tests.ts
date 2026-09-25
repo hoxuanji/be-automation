@@ -2,6 +2,7 @@ import type { Endpoint, Entity, GeneratedFile, StackConfig } from "./types";
 import { isGraphqlSupported, safeName, toPascal } from "./types";
 import { goAuthMode, goDbKind } from "./go";
 import { kotlinContractTestFiles } from "./kotlin";
+import { javaContractTestFiles } from "./java";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -270,57 +271,6 @@ ${tests}
 `;
 }
 
-// ─── Java (Spring Boot Test) ──────────────────────────────────────────────────
-
-function javaContractTests(config: StackConfig, endpoints: Endpoint[]): string {
-  const appClass = toPascal(safeName(config.name)) + "Application";
-  const tests = endpoints.map((ep) => {
-    const method = ep.method;
-    const testPath = pathToParam(ep.path);
-    const status = expectedStatus(ep.method, ep.auth);
-    const authSetup = ep.auth
-      ? `\n        headers.set("Authorization", "Bearer test-token");\n        HttpEntity<String> entity = new HttpEntity<>(${["POST","PUT","PATCH"].includes(method) ? '"{}"' : "null"}, headers);`
-      : `\n        HttpEntity<String> entity = new HttpEntity<>(${["POST","PUT","PATCH"].includes(method) ? '"{}"' : "null"}, headers);`;
-
-    return `
-    @Test
-    void test${toPascal(method)}${toPascal(ep.path.replace(/[/:]/g, "_"))}() {
-        // ${ep.summary}
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);${authSetup}
-        ResponseEntity<String> response = restTemplate.exchange(
-            "http://localhost:" + port + "${testPath}",
-            HttpMethod.${method},
-            entity,
-            String.class
-        );
-        assertEquals(${status}, response.getStatusCode().value());
-    }`;
-  }).join("\n");
-
-  return `package com.example.${safeName(config.name).replace(/-/g, "")};
-
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.web.client.TestRestTemplate;
-import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.http.*;
-import static org.junit.jupiter.api.Assertions.*;
-
-@SpringBootTest(classes = ${appClass}.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-class ApiContractTest {
-
-    @LocalServerPort
-    private int port;
-
-    @Autowired
-    private TestRestTemplate restTemplate;
-${tests}
-}
-`;
-}
-
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 export function contractTestFiles(
@@ -330,6 +280,7 @@ export function contractTestFiles(
 ): GeneratedFile[] {
   // Kotlin covers entity CRUD routes too, so it doesn't need user endpoints.
   if (config.language === "kotlin") return kotlinContractTestFiles(config, endpoints, entities);
+  if (config.language === "java") return javaContractTestFiles(config, endpoints, entities);
   if (endpoints.length === 0) return [];
 
   switch (config.language) {
@@ -343,8 +294,6 @@ export function contractTestFiles(
       return [{ path: "tests/test_contracts.py", content: pythonContractTests(config, endpoints) }];
     case "rust":
       return [{ path: "tests/contract_tests.rs", content: rustContractTests(config, endpoints) }];
-    case "java":
-      return [{ path: `src/test/java/com/example/${safeName(config.name).replace(/-/g, "")}/ApiContractTest.java`, content: javaContractTests(config, endpoints) }];
     default:
       return [];
   }
