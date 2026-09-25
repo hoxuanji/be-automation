@@ -29,6 +29,7 @@ import { useStackStore, type GithubRepo } from "@/lib/store";
 import { deployments } from "@/data/stack-options";
 import { toast } from "@/components/ui/toast";
 import { BrandIcon } from "@/components/shared/brand-icon";
+import { CLOUD_META, CLOUD_PROVIDERS, isCloudProvider, type CloudProvider } from "@/lib/cloud-providers";
 
 
 export default function DeployPage() {
@@ -61,8 +62,7 @@ export default function DeployPage() {
               <CardContent>
                 <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
                   {deployments.map((d) => {
-                    const isLive = d.id === "railway" || d.id === "render" || d.id === "fly" || d.id === "vercel";
-                    if (!isLive) {
+                    if (!isLiveProvider(d.id)) {
                       return (
                         <div
                           key={d.id}
@@ -435,10 +435,20 @@ function BranchGateCard() {
 
 // ─── Provider-aware helpers ──────────────────────────────────────────────────
 
-type LiveProvider = "railway" | "render" | "fly" | "vercel";
+type TokenProvider = "railway" | "render" | "fly" | "vercel";
+type LiveProvider = TokenProvider | CloudProvider;
 
 function isLiveProvider(id: string): id is LiveProvider {
-  return id === "railway" || id === "render" || id === "fly" || id === "vercel";
+  return id === "railway" || id === "render" || id === "fly" || id === "vercel" || isCloudProvider(id);
+}
+
+type MaskedCreds = { creds?: Record<string, Record<string, string>> };
+
+// Token providers store a single `token`; cloud providers store several
+// schema-validated fields (all required), so any saved entry counts.
+function hasProviderCreds(provider: LiveProvider, d: MaskedCreds): boolean {
+  const entry = d.creds?.[provider];
+  return isCloudProvider(provider) ? !!entry && Object.keys(entry).length > 0 : !!entry?.token;
 }
 
 // Narrows the deployment id to a known live provider, defaulting to railway
@@ -453,6 +463,9 @@ const PROVIDER_META: Record<LiveProvider, { label: string; tokenLabel: string }>
   render:  { label: "Render",   tokenLabel: "Render Personal API Key" },
   fly:     { label: "Fly",      tokenLabel: "Fly Personal Access Token" },
   vercel:  { label: "Vercel",   tokenLabel: "Vercel Personal Access Token" },
+  ...(Object.fromEntries(
+    CLOUD_PROVIDERS.map((p) => [p, { label: CLOUD_META[p].label, tokenLabel: `${CLOUD_META[p].label} ${CLOUD_META[p].credsLabel}` }])
+  ) as Record<CloudProvider, { label: string; tokenLabel: string }>),
 };
 
 // Status-only panel — full token management lives in Settings → Integrations
@@ -463,8 +476,8 @@ function CredentialsPanel({ provider }: { provider: LiveProvider }) {
   React.useEffect(() => {
     fetch("/api/deploy/credentials")
       .then((r) => r.json())
-      .then((d: { creds?: Record<string, { token?: string }> }) => {
-        setHasToken(!!d.creds?.[provider]?.token);
+      .then((d: MaskedCreds) => {
+        setHasToken(hasProviderCreds(provider, d));
       })
       .catch(() => setHasToken(false));
   }, [provider]);
@@ -490,11 +503,11 @@ function CredentialsPanel({ provider }: { provider: LiveProvider }) {
         ) : hasToken ? (
           <div className="flex items-center gap-2 text-xs">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-            <span className="text-emerald-300">Token saved</span>
+            <span className="text-emerald-300">{isCloudProvider(provider) ? "Credentials saved" : "Token saved"}</span>
           </div>
         ) : (
           <div className="flex items-center justify-between gap-3">
-            <p className="text-xs text-muted-foreground">No token saved yet.</p>
+            <p className="text-xs text-muted-foreground">{isCloudProvider(provider) ? "No credentials saved yet." : "No token saved yet."}</p>
             <Button asChild variant="secondary" size="sm">
               <a href="/settings">Add in Settings →</a>
             </Button>
@@ -516,22 +529,53 @@ type DeployResult = {
   domain: string | null;
   fullName: string;
   githubUrl: string;
+  runUrl?: string;
   nextStep?: { message: string; command?: string };
 };
+
+type ProviderUi = {
+  stages: readonly string[];
+  labels: Record<string, string>;
+  mapServerStage: (s: string) => string | null;
+  deployingMessage: string;
+  successMessage: string;
+};
+
+// Cloud targets share one timeline: push → Actions secrets → dispatch → run.
+function cloudUi(p: CloudProvider): ProviderUi {
+  const label = CLOUD_META[p].label;
+  return {
+    stages: ["push", "secrets", "dispatch", "run"] as const,
+    labels: {
+      push: "Pushing code to GitHub",
+      secrets: `Storing ${label} credentials as Actions secrets`,
+      dispatch: "Triggering deploy workflow",
+      run: "Running deploy workflow",
+    },
+    mapServerStage(s) {
+      switch (s) {
+        case "generate":
+        case "github_push":
+          return "push";
+        case "actions_secrets":
+          return "secrets";
+        case "workflow_dispatch":
+          return "dispatch";
+        case "workflow_run":
+          return "run";
+        default:
+          return null;
+      }
+    },
+    deployingMessage: `The GitHub Actions workflow deployed your stack to ${label}. Open the run for logs and the service URL.`,
+    successMessage: "Deployment succeeded",
+  };
+}
 
 // Per-provider UI stage list. We collapse server-side micro-stages into
 // user-facing rows so the timeline is readable at a glance. The keys
 // double as a deterministic render order.
-const PROVIDER_UI: Record<
-  LiveProvider,
-  {
-    stages: readonly string[];
-    labels: Record<string, string>;
-    mapServerStage: (s: string) => string | null;
-    deployingMessage: string;
-    successMessage: string;
-  }
-> = {
+const PROVIDER_UI: Record<LiveProvider, ProviderUi> = {
   railway: {
     stages: ["push", "project", "service", "variables", "domain"] as const,
     labels: {
@@ -644,6 +688,10 @@ const PROVIDER_UI: Record<
       "Vercel is building your first deployment from the GitHub repo. It will be live at your .vercel.app URL in moments.",
     successMessage: "Project created",
   },
+  aws: cloudUi("aws"),
+  gcp: cloudUi("gcp"),
+  azure: cloudUi("azure"),
+  k8s: cloudUi("k8s"),
 };
 
 type StageState = "waiting" | "active" | "done" | "skipped";
@@ -692,7 +740,7 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
   const [result, setResult] = React.useState<DeployResult | null>(null);
   const [errorMsg, setErrorMsg] = React.useState("");
   const [errorHint, setErrorHint] = React.useState("");
-  const [errorPartial, setErrorPartial] = React.useState<{ projectId?: string; serviceId?: string; appName?: string } | null>(null);
+  const [errorPartial, setErrorPartial] = React.useState<{ projectId?: string; serviceId?: string; appName?: string; runUrl?: string } | null>(null);
   const [hasToken, setHasToken] = React.useState<boolean | null>(null);
   const [ghConnected, setGhConnected] = React.useState<boolean | null>(null);
   const [stages, setStages] = React.useState<Record<string, StageState>>(() => initialStages(stagesList));
@@ -701,11 +749,11 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
 
   React.useEffect(() => {
     Promise.all([
-      fetch("/api/deploy/credentials").then((r) => r.json()) as Promise<{ creds?: Record<string, { token?: string }> }>,
+      fetch("/api/deploy/credentials").then((r) => r.json()) as Promise<MaskedCreds>,
       fetch("/api/auth/github/status").then((r) => r.json()) as Promise<{ connected: boolean }>,
     ])
       .then(([creds, gh]) => {
-        setHasToken(!!creds.creds?.[provider]?.token);
+        setHasToken(hasProviderCreds(provider, creds));
         setGhConnected(gh.connected);
       })
       .catch(() => { setHasToken(false); setGhConnected(false); });
@@ -766,7 +814,7 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
           error?: string;
           message?: string;
           hint?: string;
-          partial?: { projectId?: string; serviceId?: string; appName?: string };
+          partial?: { projectId?: string; serviceId?: string; appName?: string; runUrl?: string };
         };
         setPhase("error");
         setErrorMsg(data.message ?? data.error ?? "Deployment failed");
@@ -812,7 +860,7 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
               error?: string;
               message?: string;
               hint?: string;
-              partial?: { projectId?: string; serviceId?: string; appName?: string };
+              partial?: { projectId?: string; serviceId?: string; appName?: string; runUrl?: string };
             };
           };
           const err = p.error ?? {};
@@ -830,6 +878,7 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
               domain: string | null;
               fullName: string;
               githubUrl: string;
+              runUrl?: string;
               nextStep?: { message: string; command?: string };
             };
           };
@@ -840,6 +889,7 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
             domain: p.result.domain,
             fullName: p.result.fullName,
             githubUrl: p.result.githubUrl,
+            runUrl: p.result.runUrl,
             nextStep: p.result.nextStep,
           });
           setPhase("done");
@@ -877,6 +927,11 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
       href: `https://fly.io/apps/${errorPartial.appName}`,
       label: "open in Fly",
     };
+  } else if (errorPartial?.runUrl && isCloudProvider(provider)) {
+    partialRecovery = {
+      href: errorPartial.runUrl,
+      label: "open the GitHub Actions run",
+    };
   } else if (errorPartial?.projectId && provider === "vercel") {
     partialRecovery = {
       href: `https://vercel.com/dashboard`,
@@ -912,7 +967,7 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
               }
             />
             <PrereqRow
-              label={`${meta.label} token saved`}
+              label={isCloudProvider(provider) ? `${meta.label} credentials saved` : `${meta.label} token saved`}
               ok={hasToken === true}
               loading={hasToken === null}
               action={
@@ -991,7 +1046,7 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
                   rel="noreferrer"
                   className="inline-flex items-center gap-1.5 text-xs text-brand-300 hover:underline"
                 >
-                  <Rocket className="h-3 w-3" /> Open {meta.label} dashboard
+                  <Rocket className="h-3 w-3" /> {result.runUrl ? "Open GitHub Actions run" : `Open ${meta.label} dashboard`}
                 </a>
                 <a
                   href={result.githubUrl}
