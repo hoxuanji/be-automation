@@ -36,11 +36,6 @@ export function rustFiles(
   files.push({ path: "Cargo.toml", content: cargoToml(safe, config.framework, sql, withAuth, metrics, feat) });
   files.push({ path: "Dockerfile", content: rustDockerfile(safe, feat) });
   files.push({ path: ".dockerignore", content: "target/\n.git/\n.env\n" });
-  if (feat.queue === "kafka") {
-    // librdkafka's bundled CMake files declare a pre-3.5 minimum, which CMake 4 (current
-    // runners, Homebrew) rejects. Cargo passes this to the rdkafka-sys build script everywhere.
-    files.push({ path: ".cargo/config.toml", content: `[env]\nCMAKE_POLICY_VERSION_MINIMUM = "3.5"\n` });
-  }
   files.push({ path: "src/config.rs", content: rustConfig(sql) });
   files.push({ path: "src/db.rs", content: rustDb(sql) });
   files.push({ path: "src/main.rs", content: rustMain(config.framework, entities, endpoints, sql, withAuth, metrics, feat) });
@@ -185,10 +180,6 @@ tokio = { version = "1", features = ["full"] }
 // ─── Dockerfile ───────────────────────────────────────────────────────────────
 
 function rustDockerfile(safeName: string, feat: RustFeatures): string {
-  // rdkafka's cmake-build compiles the bundled librdkafka.
-  const buildTools = feat.queue === "kafka"
-    ? "RUN apt-get update && apt-get install -y --no-install-recommends cmake g++ make && rm -rf /var/lib/apt/lists/*\n"
-    : "";
   // Same image, different entrypoint: run the queue worker with `command: ["/worker"]`.
   const worker = feat.queue ? `COPY --from=build /src/target/release/worker /worker\n` : "";
   // No Cargo.lock ships in the zip and the crate has several bins (api, worker), so the
@@ -196,7 +187,7 @@ function rustDockerfile(safeName: string, feat: RustFeatures): string {
   // ponytail: add cargo-chef if image build time matters.
   return `# syntax=docker/dockerfile:1
 FROM rust:1-slim AS build
-${buildTools}WORKDIR /src
+WORKDIR /src
 COPY . .
 RUN cargo build --release
 

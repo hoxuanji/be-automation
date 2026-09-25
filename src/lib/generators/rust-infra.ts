@@ -59,9 +59,9 @@ export function rustInfraDeps(framework: string, f: RustFeatures): string {
       deps.push(`lapin = "2"`, `futures-util = "0.3"`);
       break;
     case "kafka":
-      // cmake-build compiles the bundled librdkafka: no system librdkafka needed
-      // (the Dockerfile installs cmake + g++ for it).
-      deps.push(`rdkafka = { version = "0.37", features = ["cmake-build"] }`);
+      // Pure-Rust client: no librdkafka / C toolchain, so it builds anywhere and runs
+      // on distroless. No default features = no C-backed compression codecs.
+      deps.push(`rskafka = { version = "0.6", default-features = false }`, `futures-util = "0.3"`);
       break;
     case "nats":
       deps.push(`async-nats = "0.38"`, `futures-util = "0.3"`);
@@ -252,64 +252,95 @@ pub async fn consume<F: Fn(&[u8])>(handle: F, shutdown: impl Future<Output = ()>
     }
 }
 `,
-  kafka: () => `//! Message queue: Kafka / Redpanda (KAFKA_BROKERS) via rdkafka. The topic is
-//! created on startup if missing. The worker joins consumer group "worker";
-//! offsets are auto-committed (at-most-once if the worker crashes mid-message).
+  kafka: () => `//! Message queue: Kafka / Redpanda (KAFKA_BROKERS, comma-separated) via rskafka,
+//! a pure-Rust client (no librdkafka, so it builds anywhere and runs on distroless).
+//! The single-partition topic is created on startup if missing.
+//!
+//! ponytail: rskafka has no consumer groups. The worker reads partition 0 from the
+//! earliest offset and tracks its position in memory only, so run ONE worker
+//! replica: a restart replays the topic's retained messages (at-least-once) and a
+//! second replica would handle everything twice. Upgrade path: rdkafka against a
+//! system librdkafka (with a runtime image that ships it), or a group-coordinating
+//! client, once you need several consumers or committed offsets.
 
-use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
-use rdkafka::client::DefaultClientContext;
-use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{Consumer, StreamConsumer};
-use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::Message;
+use futures_util::StreamExt;
+use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
+use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
+use rskafka::client::ClientBuilder;
+use rskafka::record::Record;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
-type Client = FutureProducer;
+type Client = Arc<PartitionClient>;
 
-fn config() -> ClientConfig {
-    let mut cfg = ClientConfig::new();
-    cfg.set("bootstrap.servers", std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".to_string()));
-    cfg
+fn err(e: rskafka::client::error::Error) -> String {
+    e.to_string()
 }
 
-// Brokers with auto-create enabled don't need this; "already exists" is ignored.
-async fn ensure_topic() {
-    if let Ok(admin) = config().create::<AdminClient<DefaultClientContext>>() {
-        let topic = NewTopic::new(QUEUE, 1, TopicReplication::Fixed(1));
-        let _ = admin.create_topics(&[topic], &AdminOptions::new()).await;
+async fn open() -> Result<Client, String> {
+    let brokers: Vec<String> = std::env::var("KAFKA_BROKERS")
+        .unwrap_or_else(|_| "localhost:9092".to_string())
+        .split(',')
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty())
+        .collect();
+    let client = ClientBuilder::new(brokers).build().await.map_err(err)?;
+    // "Topic already exists" (or a broker that auto-creates) is fine: ignore the result.
+    if let Ok(controller) = client.controller_client() {
+        let _ = controller.create_topic(QUEUE, 1, 1, 5_000).await;
     }
+    let partition = client.partition_client(QUEUE, 0, UnknownTopicHandling::Retry).await.map_err(err)?;
+    Ok(Arc::new(partition))
 }
 
+// rskafka retries unreachable brokers indefinitely; bound it so a publish from a
+// request handler fails (503) instead of hanging.
 async fn connect() -> Result<Client, String> {
-    ensure_topic().await;
-    config().set("message.timeout.ms", "5000").create::<FutureProducer>().map_err(|e| e.to_string())
+    tokio::time::timeout(Duration::from_secs(10), open())
+        .await
+        .map_err(|_| "kafka: timed out connecting to KAFKA_BROKERS".to_string())?
 }
 
 async fn send(p: &Client, payload: &[u8]) -> Result<(), String> {
-    p.send(FutureRecord::<(), [u8]>::to(QUEUE).payload(payload), Duration::from_secs(5))
-        .await
-        .map(|_| ())
-        .map_err(|(e, _)| e.to_string())
+    let record = Record {
+        key: None,
+        value: Some(payload.to_vec()),
+        headers: BTreeMap::new(),
+        timestamp: chrono::Utc::now(),
+    };
+    p.produce(vec![record], Compression::NoCompression).await.map(|_| ()).map_err(err)
 }
 
 pub async fn consume<F: Fn(&[u8])>(handle: F, shutdown: impl Future<Output = ()>) -> Result<(), String> {
-    ensure_topic().await;
-    let consumer = config()
-        .set("group.id", "worker")
-        .set("auto.offset.reset", "earliest")
-        .create::<StreamConsumer>()
-        .map_err(|e| e.to_string())?;
-    consumer.subscribe(&[QUEUE]).map_err(|e| e.to_string())?;
+    let partition = connect().await?;
+    let mut next: Option<i64> = None; // in-memory position (see the limitation above)
     tokio::pin!(shutdown);
     loop {
+        let start = next.map_or(StartOffset::Earliest, StartOffset::At);
+        let mut stream = StreamConsumerBuilder::new(Arc::clone(&partition), start).with_max_wait_ms(500).build();
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => return Ok(()),
+                item = stream.next() => match item {
+                    Some(Ok((r, _high_watermark))) => {
+                        if let Some(value) = &r.record.value {
+                            handle(value);
+                        }
+                        next = Some(r.offset + 1);
+                    }
+                    // Broker blip: rebuild the stream and resume after the last handled offset.
+                    Some(Err(e)) => {
+                        tracing::warn!("kafka fetch failed, retrying: {}", e);
+                        break;
+                    }
+                    None => return Err("kafka consumer stream ended".to_string()),
+                },
+            }
+        }
         tokio::select! {
             _ = &mut shutdown => return Ok(()),
-            msg = consumer.recv() => {
-                let msg = msg.map_err(|e| e.to_string())?;
-                if let Some(payload) = msg.payload() {
-                    handle(payload);
-                }
-            }
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
         }
     }
 }

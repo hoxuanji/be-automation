@@ -1159,7 +1159,6 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
         assert.match(main, /queue::publish\(/);
       }
     }
-    assert.match(gen({ language: "rust", framework: "axum", queue: "kafka" }).get("Dockerfile")!, /apt-get install[^\n]*cmake/, "rdkafka cmake-build needs cmake in the build image");
     assert.match(gen({ language: "rust", framework: "axum", queue: "bullmq" }).get("src/queue.rs")!, /does NOT speak\s*\/\/! BullMQ's format/, "the BullMQ limitation must be stated");
     const none = gen({ language: "rust", framework: "axum", queue: "none" }, eps, SAMPLE_ENTITIES).get("src/main.rs")!;
     assert.doesNotMatch(none, /send_notification|\/notifications/);
@@ -1834,6 +1833,31 @@ describe("Every deployment target gets a real CI deploy job", () => {
     for (const framework of ["ktor", "spring-kt"]) {
       const build = gen({ language: "kotlin", framework }).get("build.gradle.kts")!;
       if (build.includes("useJUnitPlatform()")) assert.match(build, /testRuntimeOnly\("org\.junit\.platform:junit-platform-launcher"\)/, framework);
+    }
+  });
+
+  it("Rust Kafka/Redpanda: pure-Rust rskafka, so the build needs no C toolchain and the binary runs on distroless", () => {
+    // rdkafka's bundled librdkafka needs cmake + libcurl headers at build time and libcurl.so at
+    // runtime, which gcr.io/distroless/cc-debian12 doesn't ship.
+    for (const queue of ["kafka", "redpanda"]) {
+      for (const framework of ["axum", "actix"]) {
+        const g = gen({ language: "rust", framework, queue });
+        const cargo = g.get("Cargo.toml")!;
+        assert.match(cargo, /^rskafka = \{ version = "[\d.]+", default-features = false \}$/m, `${framework}/${queue}: no C-backed codecs`);
+        assert.doesNotMatch(cargo, /rdkafka/, `${framework}/${queue}`);
+        assert.doesNotMatch(g.get("Dockerfile")!, /apt-get|cmake/, `${framework}/${queue}: no build toolchain needed`);
+        assert.match(g.get("Dockerfile")!, /FROM gcr\.io\/distroless\/cc-debian12/);
+        assert.ok(!g.get(".cargo/config.toml"), `${framework}/${queue}: the CMake policy override is obsolete`);
+        const q = g.get("src/queue.rs")!;
+        // Comma-separated broker list, topic created if missing, and the missing consumer group is documented.
+        assert.match(q, /env::var\("KAFKA_BROKERS"\)[\s\S]*\.split\(','\)/);
+        assert.match(q, /controller_client\(\)[\s\S]*create_topic\(QUEUE, 1, 1,/);
+        assert.match(q, /ponytail: rskafka has no consumer groups[\s\S]*Upgrade path: rdkafka/);
+        // A dead broker must fail a publish, not hang the request handler.
+        assert.match(q, /tokio::time::timeout\(Duration::from_secs\(\d+\), open\(\)\)/);
+        // After a fetch error the worker resumes after the last handled offset instead of replaying.
+        assert.match(q, /StartOffset::At[\s\S]*next = Some\(r\.offset \+ 1\)/);
+      }
     }
   });
 });
