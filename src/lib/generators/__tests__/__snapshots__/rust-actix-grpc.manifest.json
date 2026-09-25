@@ -31,8 +31,8 @@
   },
   {
     "path": "Cargo.toml",
-    "lines": 24,
-    "size": 774
+    "lines": 34,
+    "size": 1171
   },
   {
     "path": "DEPLOY.md",
@@ -101,8 +101,8 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 14,
-    "size": 422
+    "lines": 15,
+    "size": 475
   },
   {
     "path": "migrations/20240101000001_init.down.sql",
@@ -140,6 +140,16 @@
     "size": 3438
   },
   {
+    "path": "src/bin/worker.rs",
+    "lines": 50,
+    "size": 1570
+  },
+  {
+    "path": "src/cache.rs",
+    "lines": 56,
+    "size": 2161
+  },
+  {
     "path": "src/config.rs",
     "lines": 17,
     "size": 484
@@ -156,18 +166,18 @@
   },
   {
     "path": "src/handlers/post.rs",
-    "lines": 99,
-    "size": 3015
+    "lines": 114,
+    "size": 3618
   },
   {
     "path": "src/handlers/user.rs",
-    "lines": 101,
-    "size": 3133
+    "lines": 116,
+    "size": 3740
   },
   {
     "path": "src/main.rs",
-    "lines": 44,
-    "size": 1516
+    "lines": 87,
+    "size": 3512
   },
   {
     "path": "src/models/mod.rs",
@@ -183,6 +193,16 @@
     "path": "src/models/user.rs",
     "lines": 25,
     "size": 635
+  },
+  {
+    "path": "src/queue.rs",
+    "lines": 98,
+    "size": 3287
+  },
+  {
+    "path": "src/telemetry.rs",
+    "lines": 36,
+    "size": 1498
   },
   {
     "path": "tests/contract_tests.rs",
