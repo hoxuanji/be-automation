@@ -1,7 +1,7 @@
 // Generates a repo for the CI smoke-build matrix.
 // Run with: node --experimental-strip-types --no-warnings \
 //   --import ./src/lib/generators/__tests__/loader.mjs scripts/smoke-generate.mjs
-// Env: LANGUAGE, FRAMEWORK (required); PROFILE=minimal|full; DATABASE, AUTH, API, OUT (optional).
+// Env: LANGUAGE, FRAMEWORK (required); PROFILE=minimal|full; DATABASE, AUTH, API, QUEUE, DEPLOYMENT, OUT (optional).
 import { generate } from "../src/lib/generators/index.ts";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -15,10 +15,10 @@ const config = {
   framework: env.FRAMEWORK,
   database: env.DATABASE || "postgres",
   cache: "redis",
-  queue: "rabbitmq",
+  queue: env.QUEUE || "rabbitmq",
   api: env.API || "rest",
   auth: env.AUTH || (full ? "clerk" : "none"),
-  deployment: "k8s",
+  deployment: env.DEPLOYMENT || "k8s",
   scaling: "horizontal",
   monitoring: full ? "grafana" : "prometheus",
   cicd: "github-actions",

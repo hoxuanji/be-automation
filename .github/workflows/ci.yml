@@ -129,6 +129,33 @@ jobs:
           - { label: "ts-hono-full-selfauth", language: "typescript", framework: "hono", profile: "full", auth: "none" }
           - { label: "python-litestar-full-selfauth", language: "python", framework: "litestar", profile: "full", auth: "none" }
           - { label: "python-django-full-selfauth", language: "python", framework: "django", profile: "full", auth: "none" }
+          # Every queue option per language (rabbitmq is covered by the full profile above).
+          - { label: "go-gin-full-kafka", language: "go", framework: "gin", profile: "full", queue: "kafka" }
+          - { label: "ts-express-full-kafka", language: "typescript", framework: "express", profile: "full", queue: "kafka" }
+          - { label: "python-fastapi-full-kafka", language: "python", framework: "fastapi", profile: "full", queue: "kafka" }
+          - { label: "rust-axum-full-kafka", language: "rust", framework: "axum", profile: "full", queue: "kafka" }
+          - { label: "java-spring-full-kafka", language: "java", framework: "spring", profile: "full", queue: "kafka", javaVersion: "21" }
+          - { label: "kotlin-ktor-full-kafka", language: "kotlin", framework: "ktor", profile: "full", queue: "kafka", javaVersion: "21", runTests: true }
+          - { label: "go-gin-full-sqs", language: "go", framework: "gin", profile: "full", queue: "sqs" }
+          - { label: "ts-express-full-sqs", language: "typescript", framework: "express", profile: "full", queue: "sqs" }
+          - { label: "python-fastapi-full-sqs", language: "python", framework: "fastapi", profile: "full", queue: "sqs" }
+          - { label: "rust-axum-full-sqs", language: "rust", framework: "axum", profile: "full", queue: "sqs" }
+          - { label: "java-spring-full-sqs", language: "java", framework: "spring", profile: "full", queue: "sqs", javaVersion: "21" }
+          - { label: "kotlin-ktor-full-sqs", language: "kotlin", framework: "ktor", profile: "full", queue: "sqs", javaVersion: "21", runTests: true }
+          - { label: "go-gin-full-nats", language: "go", framework: "gin", profile: "full", queue: "nats" }
+          - { label: "ts-express-full-nats", language: "typescript", framework: "express", profile: "full", queue: "nats" }
+          - { label: "python-fastapi-full-nats", language: "python", framework: "fastapi", profile: "full", queue: "nats" }
+          - { label: "rust-axum-full-nats", language: "rust", framework: "axum", profile: "full", queue: "nats" }
+          - { label: "java-spring-full-nats", language: "java", framework: "spring", profile: "full", queue: "nats", javaVersion: "21" }
+          - { label: "kotlin-ktor-full-nats", language: "kotlin", framework: "ktor", profile: "full", queue: "nats", javaVersion: "21", runTests: true }
+          - { label: "go-gin-full-bullmq", language: "go", framework: "gin", profile: "full", queue: "bullmq" }
+          - { label: "ts-express-full-bullmq", language: "typescript", framework: "express", profile: "full", queue: "bullmq" }
+          - { label: "python-fastapi-full-bullmq", language: "python", framework: "fastapi", profile: "full", queue: "bullmq" }
+          - { label: "rust-axum-full-bullmq", language: "rust", framework: "axum", profile: "full", queue: "bullmq" }
+          - { label: "java-spring-full-bullmq", language: "java", framework: "spring", profile: "full", queue: "bullmq", javaVersion: "21" }
+          - { label: "kotlin-ktor-full-bullmq", language: "kotlin", framework: "ktor", profile: "full", queue: "bullmq", javaVersion: "21", runTests: true }
+          - { label: "java-quarkus-full-kafka", language: "java", framework: "quarkus", profile: "full", queue: "kafka", javaVersion: "21" }
+          - { label: "kotlin-spring-kt-full-kafka", language: "kotlin", framework: "spring-kt", profile: "full", queue: "kafka", javaVersion: "21", runTests: true }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -145,6 +172,7 @@ jobs:
           DATABASE: ${{ matrix.combo.database || 'postgres' }}
           AUTH: ${{ matrix.combo.auth || '' }}
           API: ${{ matrix.combo.api || 'rest' }}
+          QUEUE: ${{ matrix.combo.queue || 'rabbitmq' }}
         run: |
           node --experimental-strip-types --no-warnings \
             --import ./src/lib/generators/__tests__/loader.mjs \
