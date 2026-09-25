@@ -1,6 +1,7 @@
 import type { Endpoint, Entity, StackConfig } from "../types";
 import type { PatternId } from "./index";
 import { authProviderSpec } from "../auth/providers";
+import { tsQueueKind } from "../queue/typescript";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -343,14 +344,14 @@ ${x.bindBody}  const { currentPassword, newPassword } = ${x.getBody} as { curren
   }`;
 }
 
-function healthCheck(fw: TsFw, db: boolean, cache: boolean): string {
+function healthCheck(fw: TsFw, db: boolean, cache: boolean, queue: boolean): string {
   const x = tsCtx(fw);
   return `  const checks: Record<string, string> = { status: "ok" };
   let httpStatus: 200 | 503 = 200;
-${db ? `  try { await prisma.$queryRaw\`SELECT 1\`; checks.db = "ok"; } catch { checks.db = "degraded"; httpStatus = 503; }\n` : ""}${cache ? `  try { await redis.ping(); checks.cache = "ok"; } catch { checks.cache = "degraded"; httpStatus = 503; }\n` : ""}  ${x.sendJSON("httpStatus", "checks")}`;
+${db ? `  try { await prisma.$queryRaw\`SELECT 1\`; checks.db = "ok"; } catch { checks.db = "degraded"; httpStatus = 503; }\n` : ""}${cache ? `  try { await redis.ping(); checks.cache = "ok"; } catch { checks.cache = "degraded"; httpStatus = 503; }\n` : ""}${queue ? `  try { await queuePing(); checks.queue = "ok"; } catch { checks.queue = "degraded"; httpStatus = 503; }\n` : ""}  ${x.sendJSON("httpStatus", "checks")}`;
 }
 
-function webhookReceive(fw: TsFw): string {
+function webhookReceive(fw: TsFw, config: StackConfig): string {
   const x = tsCtx(fw);
   return `  const secret = process.env.WEBHOOK_SECRET || "";
   const sigHeader = ${fw === "express" ? 'req.headers["x-hub-signature-256"] as string' : fw === "fastify" ? 'request.headers["x-hub-signature-256"] as string' : fw === "hono" ? 'c.req.header("x-hub-signature-256") || ""' : 'req.headers["x-hub-signature-256"] as string'};
@@ -365,9 +366,22 @@ function webhookReceive(fw: TsFw): string {
     if (sigHeader !== expected) { ${x.sendErr(401, "invalid_signature")} }
   }
 
-  // TODO: enqueue event for async processing
-  console.log("webhook received", rawBody.length, "bytes");
-  ${x.sendJSON(200, '{ received: true }')}`;
+${queued(x, config, "webhook",
+    `await publish(TOPICS.webhooks, { receivedAt: new Date().toISOString(), body: rawBody });
+    ${x.sendJSON(202, "{ received: true }")}`)}`;
+}
+
+// Wraps a publish in the queue-unavailable handling; with no queue configured
+// the route answers 503 rather than pretending the event was accepted.
+function queued(x: TsFwCtx, config: StackConfig, what: string, body: string): string {
+  if (!tsQueueKind(config)) return `  // No message queue configured (Queue tab) — nothing can accept the ${what}.
+  ${andReturn(x.sendJSON(503, '{ error: "queue_not_configured" }'))}`;
+  return `  try {
+    ${body}
+  } catch (err) {
+    ${x.logErr(`publish ${what}`, "err")}
+    ${x.sendErr(503, "queue_unavailable")}
+  }`;
 }
 
 function fileUpload(fw: TsFw): string {
@@ -442,26 +456,14 @@ function aggregateStats(fw: TsFw, table: string): string {
 
 function sendNotification(fw: TsFw, config: StackConfig): string {
   const x = tsCtx(fw);
-  const queueNote = config.queue === "kafka"
-    ? "kafkajs producer"
-    : config.queue === "rabbitmq"
-    ? "amqplib channel"
-    : config.queue === "nats"
-    ? "nats.publish()"
-    : "your message broker";
   return `${x.bindBody}  const { recipient, channel, template, payload } = ${x.getBody} as {
     recipient: string; channel: "email" | "sms" | "push"; template: string; payload?: Record<string, unknown>;
   };
   if (!recipient || !channel) { ${x.sendErr(400, "recipient and channel required")} }
-  try {
-    // TODO: publish via ${queueNote}
-    // await broker.publish("notifications", { recipient, channel, template, payload });
-    console.info("notification queued", { channel, recipient });
-    ${x.sendJSON(200, '{ queued: true, channel }')}
-  } catch (err) {
-    ${x.logErr("send notification", "err")}
-    ${x.sendErr(500, "failed to queue notification")}
-  }`;
+${queued(x, config, "notification",
+    `// Delivered by the worker (src/worker.ts).
+    await publish(TOPICS.notifications, { recipient, channel, template, payload });
+    ${x.sendJSON(202, "{ queued: true, channel }")}`)}`;
 }
 
 function cacheRead(fw: TsFw, table: string, m: PrismaModel | null, cache: boolean): string {
@@ -548,8 +550,8 @@ export function tsPatternRoute(
     case "auth_logout":  body = authLogout(fw); break;
     case "auth_refresh": body = authRefresh(fw); break;
     case "auth_change_password": body = authChangePassword(fw); break;
-    case "health_check": body = healthCheck(fw, usesPrisma(config, entities), cache); break;
-    case "webhook_receive": body = webhookReceive(fw); break;
+    case "health_check": body = healthCheck(fw, usesPrisma(config, entities), cache, tsQueueKind(config) !== null); break;
+    case "webhook_receive": body = webhookReceive(fw, config); break;
     case "file_upload":  body = fileUpload(fw); break;
     case "paginated_search": body = paginatedSearch(fw, table, m); break;
     case "aggregate_stats":  body = aggregateStats(fw, table); break;

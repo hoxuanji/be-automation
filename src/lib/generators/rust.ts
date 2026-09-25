@@ -1,6 +1,8 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { toPascal, toSnake, toKebab } from "./types";
 import { needsAuth } from "./auth/providers";
+import { rustFeatures, rustInfraDeps, rustTelemetry, rustCache, rustQueue, rustWorker } from "./rust-infra";
+import type { RustFeatures } from "./rust-infra";
 
 // SQL backend for the sqlx code paths. `null` means no SQL database was
 // selected and handlers fall back to an in-memory store.
@@ -26,15 +28,25 @@ export function rustFiles(
   const sql = rustSql(config.database);
   const withAuth = needsAuth(config, endpoints.some((e) => e.auth));
   const metrics = config.monitoring === "grafana";
+  const feat = rustFeatures(config);
+  // Cache-aside only makes sense in front of a real database.
+  const cached = feat.cache && sql !== null;
   const files: GeneratedFile[] = [];
 
-  files.push({ path: "Cargo.toml", content: cargoToml(safe, config.framework, sql, withAuth, metrics) });
-  files.push({ path: "Dockerfile", content: rustDockerfile(safe) });
+  files.push({ path: "Cargo.toml", content: cargoToml(safe, config.framework, sql, withAuth, metrics, feat) });
+  files.push({ path: "Dockerfile", content: rustDockerfile(safe, feat) });
+  files.push({ path: ".dockerignore", content: "target/\n.git/\n.env\n" });
   files.push({ path: "src/config.rs", content: rustConfig(sql) });
   files.push({ path: "src/db.rs", content: rustDb(sql) });
-  files.push({ path: "src/main.rs", content: rustMain(config.framework, entities, endpoints, sql, withAuth, metrics) });
+  files.push({ path: "src/main.rs", content: rustMain(config.framework, entities, endpoints, sql, withAuth, metrics, feat) });
   if (withAuth) {
     files.push({ path: "src/auth.rs", content: rustAuth(config.framework) });
+  }
+  if (feat.tracing) files.push({ path: "src/telemetry.rs", content: rustTelemetry(safe, feat) });
+  if (feat.cache) files.push({ path: "src/cache.rs", content: rustCache() });
+  if (feat.queue) {
+    files.push({ path: "src/queue.rs", content: rustQueue(feat.queue, config.region || "us-east-1") });
+    files.push({ path: "src/bin/worker.rs", content: rustWorker() });
   }
 
   if (entities.length > 0) {
@@ -49,8 +61,8 @@ export function rustFiles(
       files.push({
         path: `src/handlers/${toSnake(entity.name)}.rs`,
         content: config.framework === "actix"
-          ? actixHandler(entity, sql)
-          : axumHandler(entity, sql),
+          ? actixHandler(entity, sql, cached)
+          : axumHandler(entity, sql, cached),
       });
       files.push({
         path: `tests/${toSnake(entity.name)}_test.rs`,
@@ -101,7 +113,7 @@ function modFile(entities: Entity[], _kind: string): string {
 
 // ─── Cargo.toml ───────────────────────────────────────────────────────────────
 
-function cargoToml(safeName: string, framework: string, sql: RustSql | null, withAuth: boolean, metrics: boolean): string {
+function cargoToml(safeName: string, framework: string, sql: RustSql | null, withAuth: boolean, metrics: boolean, feat: RustFeatures): string {
   const sqlxDriver = sql?.mysql ? "mysql" : "postgres";
   const sqlx = `sqlx = { version = "0.8", features = ["runtime-tokio", "${sqlxDriver}", "uuid", "chrono", "json", "macros"] }`;
   // JWKS-based JWT verification (src/auth.rs). rustls keeps the distroless
@@ -111,13 +123,16 @@ function cargoToml(safeName: string, framework: string, sql: RustSql | null, wit
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 `
     : "";
+  const infraDeps = rustInfraDeps(framework, feat);
+  // src/bin/worker.rs makes this a two-binary package; keep `cargo run` pointing at the API.
+  const defaultRun = feat.queue ? `default-run = "${safeName}"\n` : "";
 
   if (framework === "actix") {
     return `[package]
 name = "${safeName}"
 version = "0.1.0"
 edition = "2021"
-
+${defaultRun}
 [dependencies]
 actix-web = "4.9"
 actix-rt = "2"
@@ -130,7 +145,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
-${authDeps}${metrics ? `actix-web-prom = "0.8"\n` : ""}
+${authDeps}${metrics ? `actix-web-prom = "0.8"\n` : ""}${infraDeps}
 [dev-dependencies]
 actix-web = { version = "4", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
@@ -142,7 +157,7 @@ tokio = { version = "1", features = ["full"] }
 name = "${safeName}"
 version = "0.1.0"
 edition = "2021"
-
+${defaultRun}
 [dependencies]
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
@@ -155,7 +170,7 @@ tower-http = { version = "0.6", features = ["trace", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
-${authDeps}${metrics ? `axum-prometheus = "0.7"\n` : ""}
+${authDeps}${metrics ? `axum-prometheus = "0.7"\n` : ""}${infraDeps}
 [dev-dependencies]
 axum-test = "15"
 tokio = { version = "1", features = ["full"] }
@@ -164,18 +179,22 @@ tokio = { version = "1", features = ["full"] }
 
 // ─── Dockerfile ───────────────────────────────────────────────────────────────
 
-function rustDockerfile(safeName: string): string {
+function rustDockerfile(safeName: string, feat: RustFeatures): string {
+  // Same image, different entrypoint: run the queue worker with `command: ["/worker"]`.
+  const worker = feat.queue ? `COPY --from=build /src/target/release/worker /worker\n` : "";
+  // No Cargo.lock ships in the zip and the crate has several bins (api, worker), so the
+  // "stub main.rs" dependency-cache trick can't work — copy the tree and build once.
+  // ponytail: add cargo-chef if image build time matters.
   return `# syntax=docker/dockerfile:1
-FROM rust:1.82-slim AS build
+# bookworm = the runtime's Debian 12, so the binary links against the same glibc.
+FROM rust:1-slim-bookworm AS build
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -f target/release/${safeName}*
-COPY src ./src
-RUN touch src/main.rs && cargo build --release
+COPY . .
+RUN cargo build --release
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /src/target/release/${safeName} /api
-EXPOSE 8080
+${worker}EXPOSE 8080
 USER nonroot:nonroot
 ENTRYPOINT ["/api"]
 `;
@@ -409,7 +428,7 @@ ${updateFields}
 
 // ─── src/handlers/{snake}.rs (Axum) ──────────────────────────────────────────
 
-function axumHandler(entity: Entity, sql: RustSql | null): string {
+function axumHandler(entity: Entity, sql: RustSql | null, cached: boolean): string {
   const pascal = toPascal(entity.name);
   const snake = toSnake(entity.name);
   const kebab = toKebab(entity.name);
@@ -519,13 +538,25 @@ async fn get_by_id(
     State(pool): State<${pool}>,
     Path(${pkParam}): Path<${pkType}>,
 ) -> Result<Json<${pascal}>, StatusCode> {
-    sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} WHERE ${pkParam} = ${ph(1)}")
+${cached ? `    // Cache-aside: serve from Redis, else load from the database and populate.
+    let cache_key = format!("${plural}:{}", ${pkParam});
+    if let Some(hit) = crate::cache::get::<${pascal}>(&cache_key).await {
+        return Ok(Json(hit));
+    }
+    let row = sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} WHERE ${pkParam} = ${ph(1)}")
+        .bind(${pkParam})
+        .fetch_optional(&pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    crate::cache::set(&cache_key, &row).await;
+    Ok(Json(row))` : `    sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} WHERE ${pkParam} = ${ph(1)}")
         .bind(${pkParam})
         .fetch_optional(&pool)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(StatusCode::NOT_FOUND)`}
 }
 
 async fn create(
@@ -540,18 +571,25 @@ async fn update(
     Path(${pkParam}): Path<${pkType}>,
     Json(body): Json<Update${pascal}>,
 ) -> Result<Json<${pascal}>, StatusCode> {
-${update}
+${cached ? `    let cache_key = format!("${plural}:{}", ${pkParam});
+    let res = {
+${update.replace(/^/gm, "    ")}
+    };
+    crate::cache::del(&cache_key).await;
+    res` : update}
 }
 
 async fn delete(
     State(pool): State<${pool}>,
     Path(${pkParam}): Path<${pkType}>,
 ) -> StatusCode {
-    let result = sqlx::query("DELETE FROM ${plural} WHERE ${pkParam} = ${ph(1)}")
+${cached ? `    let cache_key = format!("${plural}:{}", ${pkParam});
+` : ""}    let result = sqlx::query("DELETE FROM ${plural} WHERE ${pkParam} = ${ph(1)}")
         .bind(${pkParam})
         .execute(&pool)
         .await;
-    match result {
+${cached ? `    crate::cache::del(&cache_key).await;
+` : ""}    match result {
         Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT,
         Ok(_) => StatusCode::NOT_FOUND,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -649,7 +687,7 @@ async fn delete(
 
 // ─── src/handlers/{snake}.rs (Actix) ─────────────────────────────────────────
 
-function actixHandler(entity: Entity, sql: RustSql | null): string {
+function actixHandler(entity: Entity, sql: RustSql | null, cached: boolean): string {
   const pascal = toPascal(entity.name);
   const snake = toSnake(entity.name);
   const kebab = toKebab(entity.name);
@@ -771,12 +809,20 @@ async fn get_by_id(
     path: web::Path<${pkType}>,
 ) -> impl Responder {
     let ${pkParam} = path.into_inner();
-    match sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} WHERE ${pkParam} = ${ph(1)}")
+${cached ? `    // Cache-aside: serve from Redis, else load from the database and populate.
+    let cache_key = format!("${plural}:{}", ${pkParam});
+    if let Some(hit) = crate::cache::get::<${pascal}>(&cache_key).await {
+        return HttpResponse::Ok().json(hit);
+    }
+` : ""}    match sqlx::query_as::<_, ${pascal}>("SELECT * FROM ${plural} WHERE ${pkParam} = ${ph(1)}")
         .bind(${pkParam})
         .fetch_optional(pool.get_ref())
         .await
     {
-        Ok(Some(row)) => HttpResponse::Ok().json(row),
+        Ok(Some(row)) => {${cached ? `
+            crate::cache::set(&cache_key, &row).await;` : ""}
+            HttpResponse::Ok().json(row)
+        }
         Ok(None) => HttpResponse::NotFound().finish(),
         Err(_) => HttpResponse::InternalServerError().finish(),
     }
@@ -795,7 +841,12 @@ async fn update(
     body: web::Json<Update${pascal}>,
 ) -> impl Responder {
     let ${pkParam} = path.into_inner();
-${update}
+${cached ? `    let cache_key = format!("${plural}:{}", ${pkParam});
+    let res = {
+${update.replace(/^/gm, "    ")}
+    };
+    crate::cache::del(&cache_key).await;
+    res` : update}
 }
 
 async fn delete(
@@ -803,11 +854,13 @@ async fn delete(
     path: web::Path<${pkType}>,
 ) -> impl Responder {
     let ${pkParam} = path.into_inner();
-    match sqlx::query("DELETE FROM ${plural} WHERE ${pkParam} = ${ph(1)}")
+${cached ? `    let cache_key = format!("${plural}:{}", ${pkParam});
+` : ""}    let result = sqlx::query("DELETE FROM ${plural} WHERE ${pkParam} = ${ph(1)}")
         .bind(${pkParam})
         .execute(pool.get_ref())
-        .await
-    {
+        .await;
+${cached ? `    crate::cache::del(&cache_key).await;
+` : ""}    match result {
         Ok(r) if r.rows_affected() > 0 => HttpResponse::NoContent().finish(),
         Ok(_) => HttpResponse::NotFound().finish(),
         Err(_) => HttpResponse::InternalServerError().finish(),
@@ -924,29 +977,78 @@ async fn delete(
 
 // ─── src/main.rs ──────────────────────────────────────────────────────────────
 
+// send_notification endpoints publish to the configured queue.
+const publishes = (e: Endpoint, feat: RustFeatures) =>
+  feat.queue !== null && e.pattern === "send_notification" && e.method === "POST";
+
 function rustMain(
   framework: string,
   entities: Entity[],
   endpoints: Endpoint[],
   sql: RustSql | null,
   withAuth: boolean,
-  metrics: boolean
+  metrics: boolean,
+  feat: RustFeatures
 ): string {
   // Endpoint stubs only when there are no entities (the entity CRUD routes
   // already serve those paths — axum panics on overlapping routes). /health is
-  // always registered by the template itself.
-  const stubs = entities.length === 0 ? endpoints.filter((e) => e.path !== "/health") : [];
+  // always registered by the template itself. Publishing endpoints are real
+  // handlers, so they're kept unless they sit under an entity's path.
+  const entityPaths = entities.map((e) => `/${toKebab(e.name)}s`);
+  const underEntity = (p: string) => entityPaths.some((ep) => p === ep || p.startsWith(ep + "/"));
+  const stubs = entities.length === 0
+    ? endpoints.filter((e) => e.path !== "/health")
+    : endpoints.filter((e) => publishes(e, feat) && !underEntity(e.path));
+  const mods = [
+    ...(withAuth ? ["auth"] : []),
+    ...(feat.cache ? ["cache"] : []),
+    "config", "db", "handlers", "models",
+    ...(feat.queue ? ["queue"] : []),
+    ...(feat.tracing ? ["telemetry"] : []),
+  ].map((m) => `mod ${m};\n`).join("");
   if (framework === "actix") {
-    return actixMain(entities, stubs, sql, withAuth, metrics);
+    return mods + actixMain(entities, stubs, sql, withAuth, metrics, feat);
   }
-  return axumMain(entities, stubs, sql, withAuth, metrics);
+  return mods + axumMain(entities, stubs, sql, withAuth, metrics, feat);
 }
 
-function axumMain(entities: Entity[], endpoints: Endpoint[], sql: RustSql | null, withAuth: boolean, metrics: boolean): string {
+function logInit(feat: RustFeatures): string {
+  const init = feat.tracing
+    ? `    dotenvy::dotenv().ok();
+    // JSON logs + OTLP traces when OTEL_EXPORTER_OTLP_ENDPOINT is set (src/telemetry.rs).
+    let otel = telemetry::init();
+`
+    : `    // JSON-formatted tracing output — parseable by Loki / Datadog / CloudWatch.
+    // RUST_LOG=debug narrows verbosity; the env-filter feature handles parsing.
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+    dotenvy::dotenv().ok();
+`;
+  const sentry = feat.sentry
+    ? `    // Sentry: panics and server errors are reported when SENTRY_DSN is set; a no-op otherwise.
+    let _sentry = sentry::init(sentry::ClientOptions {
+        dsn: std::env::var("SENTRY_DSN").ok().and_then(|dsn| dsn.parse().ok()),
+        release: sentry::release_name!(),
+        ..Default::default()
+    });
+`
+    : "";
+  return init + sentry;
+}
+
+const otelShutdown = `    if let Some(provider) = otel {
+        let _ = provider.shutdown(); // flush buffered spans
+    }
+`;
+
+function axumMain(entities: Entity[], endpoints: Endpoint[], sql: RustSql | null, withAuth: boolean, metrics: boolean, feat: RustFeatures): string {
   const entityRoutes = entities.map((e) => `        .merge(handlers::${toSnake(e.name)}::router())`);
 
   const stub = (e: Endpoint) => {
     const path = e.path.replace(/:([a-zA-Z0-9_]+)/g, ":$1");
+    if (publishes(e, feat)) return `        .route("${path}", axum::routing::post(send_notification))`;
     const method = e.method.toLowerCase();
     return `        .route("${path}", axum::routing::${method}(|| async { axum::Json(serde_json::json!({"ok": true, "op": "${e.method} ${e.path}"})) }))`;
   };
@@ -967,46 +1069,126 @@ ${protectedRoutes.join("\n")}
     ? `    let pool = db::connect(&cfg.database_url).await;\n`
     : `    let store = db::new_store();\n`;
 
+  const rateLimit = feat.rateLimit
+    ? `    // Per-client rate limit: 10 req/s sustained, bursts of 20; over the limit → 429.
+    // Keyed by X-Forwarded-For / X-Real-IP / Forwarded, falling back to the peer IP.
+    // ponytail: buckets live in process memory, so each replica limits on its own —
+    // move them to Redis if the limit must be global.
+    let governor_conf = std::sync::Arc::new(
+        tower_governor::governor::GovernorConfigBuilder::default()
+            .key_extractor(tower_governor::key_extractor::SmartIpKeyExtractor)
+            .per_millisecond(100)
+            .burst_size(20)
+            .finish()
+            .expect("valid rate-limit config"),
+    );
+    let limiter = governor_conf.limiter().clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        limiter.retain_recent(); // drop idle client buckets
+    });
+`
+    : "";
+
+  // Router::layer wraps everything added before it; the last layer runs first.
+  const layers = [
+    ...(feat.audit ? [`        .layer(axum::middleware::from_fn(audit))`] : []),
+    ...(feat.rateLimit ? [`        .layer(tower_governor::GovernorLayer { config: governor_conf })`] : []),
+    ...(feat.tracing ? [`        .layer(tower_http::trace::TraceLayer::new_for_http().make_span_with(tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO)))`] : []),
+    ...(feat.sentry ? [
+      `        .layer(sentry_tower::SentryHttpLayer::with_transaction())`,
+      `        .layer(sentry_tower::NewSentryLayer::<axum::extract::Request>::new_from_top())`,
+    ] : []),
+  ];
+
   const tail = [
     ...mainRoutes,
     ...(protectedBlock ? [`        .merge(protected)`] : []),
     ...(metrics ? [`        .route("/metrics", axum::routing::get(|| async move { metric_handle.render() }))`, `        .layer(prometheus_layer)`] : []),
+    ...layers,
     sql ? `        .with_state(pool);` : `        .with_state(store);`,
   ].join("\n");
 
-  return `${withAuth ? "mod auth;\n" : ""}mod config;
-mod db;
-mod handlers;
-mod models;
+  // The rate limiter and audit log need the client's socket address.
+  const connectInfo = feat.rateLimit || feat.audit;
+  const service = connectInfo ? "app.into_make_service_with_connect_info::<std::net::SocketAddr>()" : "app";
 
+  const health = feat.cache
+    ? `
+// Liveness: GET /health. Readiness: GET /health?ready=1 also requires Redis to answer PING.
+async fn health(uri: axum::http::Uri) -> (axum::http::StatusCode, &'static str) {
+    let ready = uri.query().is_some_and(|q| q.split('&').any(|p| p == "ready=1"));
+    if ready && !cache::ping().await {
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "cache unavailable");
+    }
+    (axum::http::StatusCode::OK, "ok")
+}
+`
+    : "";
+
+  const audit = feat.audit
+    ? `
+// Audit log: one structured line per request with method, path, status and client IP.
+async fn audit(
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_owned();
+    let ip = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().to_owned())
+        .unwrap_or_else(|| peer.ip().to_string());
+    let res = next.run(req).await;
+    tracing::info!(target: "audit", method = %method, path = %path, status = res.status().as_u16(), ip = %ip, "audit");
+    res
+}
+`
+    : "";
+
+  const notify = endpoints.some((e) => publishes(e, feat))
+    ? `
+// send_notification: enqueue the JSON body; src/bin/worker.rs consumes it.
+async fn send_notification(
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    match queue::publish(body.to_string().as_bytes()).await {
+        Ok(()) => (axum::http::StatusCode::ACCEPTED, axum::Json(serde_json::json!({"queued": true}))),
+        Err(e) => {
+            tracing::error!("queue publish failed: {}", e);
+            (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({"queued": false})))
+        }
+    }
+}
+`
+    : "";
+
+  return `
 use axum::Router;
 
 #[tokio::main]
 async fn main() {
-    // JSON-formatted tracing output — parseable by Loki / Datadog / CloudWatch.
-    // RUST_LOG=debug narrows verbosity; the env-filter feature handles parsing.
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-    dotenvy::dotenv().ok();
-    let cfg = config::Config::from_env();
+${logInit(feat)}    let cfg = config::Config::from_env();
 ${poolSetup}${metrics ? `    // Prometheus: per-route request counters + latency histograms, scraped at /metrics.
     let (prometheus_layer, metric_handle) = axum_prometheus::PrometheusMetricLayer::pair();
-` : ""}${protectedBlock}
+` : ""}${rateLimit}${protectedBlock}
     let app = Router::new()
-        .route("/health", axum::routing::get(|| async { "ok" }))
+        .route("/health", axum::routing::get(${feat.cache ? "health" : `|| async { "ok" }`}))
 ${tail}
 
     let addr = format!("0.0.0.0:{}", cfg.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!("listening on {}", addr);
-    axum::serve(listener, app)
+    axum::serve(listener, ${service})
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
-}
-
+${feat.tracing ? otelShutdown : ""}}
+${health}${audit}${notify}
 // Waits for SIGTERM (K8s rolling deploys) or SIGINT (Ctrl-C). Axum drains
 // in-flight requests before exiting, bounded by the pod's terminationGracePeriodSeconds.
 async fn shutdown_signal() {
@@ -1032,11 +1214,12 @@ async fn shutdown_signal() {
 `;
 }
 
-function actixMain(entities: Entity[], endpoints: Endpoint[], sql: RustSql | null, withAuth: boolean, metrics: boolean): string {
+function actixMain(entities: Entity[], endpoints: Endpoint[], sql: RustSql | null, withAuth: boolean, metrics: boolean, feat: RustFeatures): string {
   const entityConfigs = entities.map((e) => `.configure(handlers::${toSnake(e.name)}::config)`);
 
   const stub = (e: Endpoint) => {
     const path = e.path.replace(/:([a-zA-Z0-9_]+)/g, "{$1}");
+    if (publishes(e, feat)) return `.route("${path}", web::post().to(send_notification))`;
     const method = e.method.toLowerCase();
     return `.route("${path}", web::${method}().to(|| async { actix_web::HttpResponse::Ok().json(serde_json::json!({"ok": true, "op": "${e.method} ${e.path}"})) }))`;
   };
@@ -1060,40 +1243,100 @@ ${protectedRoutes.map((r) => `                    ${r}`).join("\n")},
 
   const appData = sql ? `            .app_data(pool_data.clone())` : `            .app_data(store_data.clone())`;
 
+  const rateLimit = feat.rateLimit
+    ? `    // Per-client rate limit: 10 req/s sustained, bursts of 20; over the limit → 429.
+    // ponytail: keyed by the peer IP and kept in process memory (per replica). Behind a
+    // proxy every client shares the proxy's IP — implement actix_governor::KeyExtractor
+    // over connection_info().realip_remote_addr() if you trust X-Forwarded-For.
+    let governor_conf = actix_governor::GovernorConfigBuilder::default()
+        .per_millisecond(100)
+        .burst_size(20)
+        .finish()
+        .expect("valid rate-limit config");
+`
+    : "";
+
+  // App::wrap: the last middleware registered runs first.
   const body = [
     ...(metrics ? [`            .wrap(prometheus.clone())`] : []),
+    ...(feat.audit ? [`            .wrap(actix_web::middleware::from_fn(audit))`] : []),
+    ...(feat.rateLimit ? [`            .wrap(actix_governor::Governor::new(&governor_conf))`] : []),
+    ...(feat.tracing ? [`            .wrap(tracing_actix_web::TracingLogger::default())`] : []),
+    ...(feat.sentry ? [`            .wrap(sentry_actix::Sentry::new())`] : []),
     appData,
-    `            .route("/health", web::get().to(|| async { actix_web::HttpResponse::Ok().body("ok") }))`,
+    feat.cache
+      ? `            .route("/health", web::get().to(health))`
+      : `            .route("/health", web::get().to(|| async { actix_web::HttpResponse::Ok().body("ok") }))`,
     ...mainRoutes.map((r) => `            ${r}`),
     ...protectedScope,
   ].join("\n");
 
-  return `${withAuth ? "mod auth;\n" : ""}mod config;
-mod db;
-mod handlers;
-mod models;
+  const health = feat.cache
+    ? `
+// Liveness: GET /health. Readiness: GET /health?ready=1 also requires Redis to answer PING.
+async fn health(req: actix_web::HttpRequest) -> actix_web::HttpResponse {
+    let ready = req.query_string().split('&').any(|p| p == "ready=1");
+    if ready && !cache::ping().await {
+        return actix_web::HttpResponse::ServiceUnavailable().body("cache unavailable");
+    }
+    actix_web::HttpResponse::Ok().body("ok")
+}
+`
+    : "";
 
+  const audit = feat.audit
+    ? `
+// Audit log: one structured line per request with method, path, status and client IP.
+// Errors (e.g. a 401 from the auth middleware) are logged with their status too.
+async fn audit(
+    req: actix_web::dev::ServiceRequest,
+    next: actix_web::middleware::Next<impl actix_web::body::MessageBody>,
+) -> Result<actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>, actix_web::Error> {
+    let method = req.method().clone();
+    let path = req.path().to_owned();
+    let ip = req.connection_info().realip_remote_addr().unwrap_or("-").to_owned();
+    let res = next.call(req).await;
+    let status = match &res {
+        Ok(r) => r.status(),
+        Err(e) => e.as_response_error().status_code(),
+    };
+    tracing::info!(target: "audit", method = %method, path = %path, status = status.as_u16(), ip = %ip, "audit");
+    res
+}
+`
+    : "";
+
+  const notify = endpoints.some((e) => publishes(e, feat))
+    ? `
+// send_notification: enqueue the JSON body; src/bin/worker.rs consumes it.
+async fn send_notification(body: web::Json<serde_json::Value>) -> actix_web::HttpResponse {
+    match queue::publish(body.into_inner().to_string().as_bytes()).await {
+        Ok(()) => actix_web::HttpResponse::Accepted().json(serde_json::json!({"queued": true})),
+        Err(e) => {
+            tracing::error!("queue publish failed: {}", e);
+            actix_web::HttpResponse::ServiceUnavailable().json(serde_json::json!({"queued": false}))
+        }
+    }
+}
+`
+    : "";
+
+  return `
 use actix_web::{web, App, HttpServer};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // JSON-formatted tracing output — parseable by Loki / Datadog / CloudWatch.
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-    dotenvy::dotenv().ok();
-    let cfg = config::Config::from_env();
+${logInit(feat)}    let cfg = config::Config::from_env();
 ${poolSetup}${metrics ? `    // Prometheus: per-route request counters + latency histograms, served at /metrics.
     let prometheus = actix_web_prom::PrometheusMetricsBuilder::new("api")
         .endpoint("/metrics")
         .build()
         .expect("build prometheus metrics");
-` : ""}
+` : ""}${rateLimit}
     let addr = format!("0.0.0.0:{}", cfg.port);
     tracing::info!("listening on {}", addr);
 
-    HttpServer::new(move || {
+    ${feat.tracing ? "let res = " : ""}HttpServer::new(move || {
         App::new()
 ${body}
     })
@@ -1103,9 +1346,10 @@ ${body}
     // default terminationGracePeriodSeconds. Tune via \`.shutdown_timeout(...)\`
     // if your pod spec overrides the grace period.
     .run()
-    .await
+    .await${feat.tracing ? `;
+${otelShutdown}    res` : ""}
 }
-`;
+${health}${audit}${notify}`;
 }
 
 // ─── tests/{snake}_test.rs ────────────────────────────────────────────────────

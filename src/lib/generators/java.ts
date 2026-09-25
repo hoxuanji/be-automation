@@ -1,6 +1,7 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { toPascal, toSnake, toKebab, toCamel } from "./types";
 import { needsAuth } from "./auth/providers";
+import { springInfra, quarkusInfra, javaQueue, type JavaInfra } from "./java-infra";
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
@@ -29,7 +30,7 @@ function javaShortType(t: FieldType): string {
     case "uuid":    return "UUID";
     case "string":  return "String";
     case "text":    return "String";
-    case "number":  return "Long";
+    case "number":  return "Double"; // migrations create DOUBLE PRECISION; Hibernate validate rejects Long
     case "boolean": return "Boolean";
     case "date":    return "Instant";
     case "json":    return "JsonNode";
@@ -93,8 +94,9 @@ function springFiles(
   const withAuth = needsAuth(config, anyProtected);
   const mysql = isMysql(config.database);
   const metrics = config.monitoring === "grafana";
+  const infra = springInfra(config);
 
-  files.push({ path: "pom.xml",    content: springPom(artifact, withAuth, mysql, metrics) });
+  files.push({ path: "pom.xml",    content: springPom(artifact, withAuth, mysql, metrics, infra.deps) });
   files.push({ path: "Dockerfile", content: springDockerfile() });
   files.push({
     path: "src/main/resources/logback-spring.xml",
@@ -110,8 +112,14 @@ function springFiles(
   });
   files.push({
     path: "src/main/resources/application.properties",
-    content: springAppProperties(config.name, withAuth, mysql, metrics),
+    content: springAppProperties(config.name, withAuth, mysql, metrics) + infra.props,
   });
+  // Tests run on in-memory H2 with brokers / Redis / exporters switched off (@ActiveProfiles("test")).
+  files.push({
+    path: "src/test/resources/application-test.properties",
+    content: springTestProperties(mysql) + infra.testProps,
+  });
+  files.push(...infra.files);
 
   if (withAuth) {
     files.push({
@@ -124,7 +132,7 @@ function springFiles(
   if (entities.length === 0 && endpoints.length > 0) {
     files.push({
       path: "src/main/java/dev/helios/app/ApiController.java",
-      content: scaffoldApiController(endpoints.filter((e) => e.path !== "/health")),
+      content: scaffoldApiController(endpoints.filter((e) => e.path !== "/health"), infra.publisher),
     });
   }
 
@@ -132,7 +140,7 @@ function springFiles(
     const pascal = toPascal(entity.name);
     files.push({
       path: `src/main/java/dev/helios/app/model/${pascal}.java`,
-      content: entityClass(entity, mysql),
+      content: entityClass(entity, mysql, infra.cache),
     });
     files.push({
       path: `src/main/java/dev/helios/app/repository/${pascal}Repository.java`,
@@ -140,7 +148,7 @@ function springFiles(
     });
     files.push({
       path: `src/main/java/dev/helios/app/service/${pascal}Service.java`,
-      content: serviceClass(entity),
+      content: serviceClass(entity, infra.cache),
     });
     files.push({
       path: `src/main/java/dev/helios/app/controller/${pascal}Controller.java`,
@@ -155,7 +163,7 @@ function springFiles(
   return files;
 }
 
-function springPom(artifactId: string, withAuth = false, mysql = false, metrics = false): string {
+function springPom(artifactId: string, withAuth = false, mysql = false, metrics = false, extraDeps = ""): string {
   const driver = mysql
     ? `    <dependency>
       <groupId>com.mysql</groupId>
@@ -169,10 +177,6 @@ function springPom(artifactId: string, withAuth = false, mysql = false, metrics 
     </dependency>`;
   const metricsDeps = metrics
     ? `    <!-- Prometheus metrics at /actuator/prometheus. -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-actuator</artifactId>
-    </dependency>
     <dependency>
       <groupId>io.micrometer</groupId>
       <artifactId>micrometer-registry-prometheus</artifactId>
@@ -238,7 +242,12 @@ ${driver}
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-validation</artifactId>
     </dependency>
-${authDeps}${metricsDeps}    <dependency>
+    <!-- Health indicators (database, Redis, broker) behind /health?ready=1. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+${authDeps}${metricsDeps}${extraDeps}    <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
       <scope>test</scope>
@@ -268,8 +277,28 @@ ${authDeps}${metricsDeps}    <dependency>
 `;
 }
 
+// Quarkus packages a fast-jar directory (target/quarkus-app), not a single runnable jar.
+function quarkusDockerfile(): string {
+  return `FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /src
+COPY pom.xml .
+RUN mvn dependency:go-offline -q 2>/dev/null || true
+COPY src ./src
+RUN mvn package -DskipTests -q
+
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+RUN groupadd --system --gid 1001 app \\
+ && useradd --system --uid 1001 --gid app --home /home/app --shell /bin/false app
+COPY --from=build --chown=app:app /src/target/quarkus-app/ ./
+EXPOSE 8080
+USER app
+ENTRYPOINT ["java", "-jar", "quarkus-run.jar"]
+`;
+}
+
 function springDockerfile(): string {
-  return `FROM eclipse-temurin:21-jdk AS build
+  return `FROM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /src
 COPY pom.xml .
 RUN mvn dependency:go-offline -q 2>/dev/null || true
@@ -330,18 +359,46 @@ public class Application {
 function healthController(): string {
   return `package dev.helios.app;
 
+import org.springframework.boot.actuate.health.HealthEndpoint;
+import org.springframework.boot.actuate.health.Status;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import java.util.Map;
 
+/**
+ * Liveness: GET /health. Readiness: GET /health?ready=1 aggregates every
+ * actuator health indicator (database, Redis, message broker) and answers 503
+ * while any of them is down, so Kubernetes stops routing traffic here.
+ */
 @RestController
 public class HealthController {
 
+    private final HealthEndpoint healthEndpoint;
+
+    public HealthController(HealthEndpoint healthEndpoint) {
+        this.healthEndpoint = healthEndpoint;
+    }
+
     @GetMapping("/health")
-    public Map<String, Object> health() {
-        return Map.of("ok", true);
+    public ResponseEntity<Map<String, Object>> health(@RequestParam(required = false) String ready) {
+        if (ready == null) return ResponseEntity.ok(Map.of("ok", true));
+        Status status = healthEndpoint.health().getStatus();
+        boolean up = Status.UP.equals(status);
+        return ResponseEntity.status(up ? 200 : 503).body(Map.of("ok", up, "status", status.getCode()));
     }
 }
+`;
+}
+
+function springTestProperties(mysql: boolean): string {
+  return `spring.datasource.url=jdbc:h2:mem:test;MODE=${mysql ? "MySQL" : "PostgreSQL"};DB_CLOSE_DELAY=-1
+spring.datasource.driver-class-name=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.jpa.hibernate.ddl-auto=create-drop
+spring.flyway.enabled=false
 `;
 }
 
@@ -477,10 +534,20 @@ public class SecurityConfig {
 `;
 }
 
-function scaffoldApiController(endpoints: Endpoint[]): string {
+function scaffoldApiController(endpoints: Endpoint[], withPublisher = false): string {
+  const publishes = (e: Endpoint) => withPublisher && e.pattern === "send_notification";
+  const anyPublish = endpoints.some(publishes);
   const methods = endpoints.map(e => {
     const mapping = methodAnnotation(e.method);
     const name = handlerMethodName(e);
+    if (publishes(e)) {
+      // send_notification: hand the JSON body to the queue and acknowledge with 202.
+      return `    @${mapping}(${JSON.stringify(springPath(e.path))})
+    public ResponseEntity<Map<String, Object>> ${name}(@RequestBody String payload) {
+        publisher.publish(payload);
+        return ResponseEntity.accepted().body(Map.of("queued", true));
+    }`;
+    }
     return `    @${mapping}(${JSON.stringify(springPath(e.path))})
     public Map<String, Object> ${name}() {
         return Map.of("ok", true, "op", "${e.method} ${e.path}");
@@ -489,12 +556,18 @@ function scaffoldApiController(endpoints: Endpoint[]): string {
 
   return `package dev.helios.app;
 
-import org.springframework.web.bind.annotation.*;
+${anyPublish ? "import dev.helios.app.messaging.NotificationPublisher;\nimport org.springframework.http.ResponseEntity;\n" : ""}import org.springframework.web.bind.annotation.*;
 import java.util.Map;
 
 @RestController
 public class ApiController {
+${anyPublish ? `
+    private final NotificationPublisher publisher;
 
+    public ApiController(NotificationPublisher publisher) {
+        this.publisher = publisher;
+    }
+` : ""}
 ${methods}
 }
 `;
@@ -525,7 +598,7 @@ function cap(s: string): string {
 
 // ─── Entity class ─────────────────────────────────────────────────────────────
 
-function entityClass(entity: Entity, mysql = false): string {
+function entityClass(entity: Entity, mysql = false, cached = false): string {
   const pascal = toPascal(entity.name);
   const tableName = toSnake(entity.name);
   const pk = pkField(entity);
@@ -549,12 +622,13 @@ function entityClass(entity: Entity, mysql = false): string {
     if (f.primaryKey || f === pk) {
       lines.push("    @Id");
       lines.push("    @GeneratedValue(strategy = GenerationType.UUID)");
+    } else if (f.name === "createdAt") {
+      // One @Column: it isn't repeatable, so updatable=false merges into the field's own attributes.
+      const col = columnAnnotation(f, mysql);
+      lines.push(`    ${col === "@Column" ? "@Column(updatable = false)" : col.replace(/\)$/, ", updatable = false)")}`);
+      lines.push("    @CreationTimestamp");
     } else {
       lines.push(`    ${columnAnnotation(f, mysql)}`);
-      if (f.name === "createdAt") {
-        lines.push("    @CreationTimestamp");
-        lines.push("    @Column(updatable = false)");
-      }
     }
     lines.push(`    private ${javaShortType(f.type)} ${toCamel(f.name)};`);
     return lines.join("\n");
@@ -610,7 +684,7 @@ ${importLines}
 ${validationImports ? validationImports + "\n" : ""}
 @Entity
 @Table(name = "${tableName}s")
-public class ${pascal} {
+public class ${pascal}${cached ? " implements java.io.Serializable" : ""} {
 
 ${fieldDeclarations}
 
@@ -637,7 +711,7 @@ function repositoryInterface(entity: Entity): string {
   const pascal = toPascal(entity.name);
   const pk = pkField(entity);
   const idType = pk ? javaShortType(pk.type) : "UUID";
-  const idImport = pk && pk.type === "uuid" ? "import java.util.UUID;" : pk && pk.type === "number" ? "import java.lang.Long;" : "import java.util.UUID;";
+  const idImport = pk && pk.type === "number" ? "" : "import java.util.UUID;";
 
   return `package dev.helios.app.repository;
 
@@ -651,7 +725,7 @@ public interface ${pascal}Repository extends JpaRepository<${pascal}, ${idType}>
 
 // ─── Service class ────────────────────────────────────────────────────────────
 
-function serviceClass(entity: Entity): string {
+function serviceClass(entity: Entity, cached = false): string {
   const pascal = toPascal(entity.name);
   const pk = pkField(entity);
   const idType = pk ? javaShortType(pk.type) : "UUID";
@@ -660,6 +734,11 @@ function serviceClass(entity: Entity): string {
     : "import java.util.UUID;";
 
   const nonPkFields = entity.fields.filter(f => !f.primaryKey && f !== pk);
+  // Redis cache-aside via Spring's cache abstraction: reads hit Redis first,
+  // writes evict so the next read reloads from the database.
+  const cacheName = `${toCamel(entity.name)}s`;
+  const cacheable = cached ? `    @Cacheable(cacheNames = "${cacheName}", key = "#id", unless = "#result == null")\n` : "";
+  const evict = cached ? `    @CacheEvict(cacheNames = "${cacheName}", key = "#id")\n` : "";
   const nullChecks = nonPkFields.map(f => {
     const capName = toPascal(f.name);
     return `            if (updates.get${capName}() != null) existing.set${capName}(updates.get${capName}());`;
@@ -669,7 +748,7 @@ function serviceClass(entity: Entity): string {
 
 import dev.helios.app.model.${pascal};
 import dev.helios.app.repository.${pascal}Repository;
-import org.springframework.stereotype.Service;
+${cached ? "import org.springframework.cache.annotation.CacheEvict;\nimport org.springframework.cache.annotation.Cacheable;\n" : ""}import org.springframework.stereotype.Service;
 ${idImport}
 import java.util.List;
 import java.util.Optional;
@@ -687,7 +766,7 @@ public class ${pascal}Service {
         return repo.findAll();
     }
 
-    public Optional<${pascal}> findById(${idType} id) {
+${cacheable}    public Optional<${pascal}> findById(${idType} id) {
         return repo.findById(id);
     }
 
@@ -695,14 +774,14 @@ public class ${pascal}Service {
         return repo.save(${toCamel(entity.name)});
     }
 
-    public Optional<${pascal}> update(${idType} id, ${pascal} updates) {
+${evict}    public Optional<${pascal}> update(${idType} id, ${pascal} updates) {
         return repo.findById(id).map(existing -> {
 ${nullChecks}
             return repo.save(existing);
         });
     }
 
-    public boolean delete(${idType} id) {
+${evict}    public boolean delete(${idType} id) {
         if (!repo.existsById(id)) return false;
         repo.deleteById(id);
         return true;
@@ -784,7 +863,8 @@ function controllerTest(entity: Entity, withAuth = false): string {
   const kebab = toKebab(entity.name);
 
   const requiredNonPk = entity.fields.filter(f => !f.primaryKey && f !== pkField(entity) && f.required);
-  const bodyPairs = requiredNonPk.slice(0, 5).map(f => `\\"${toCamel(f.name)}\\": ${testValue(f)}`).join(", ");
+  // Escape the value's quotes too: the pairs are embedded in a Java string literal.
+  const bodyPairs = requiredNonPk.slice(0, 5).map(f => `\\"${toCamel(f.name)}\\": ${testValue(f).replace(/"/g, '\\"')}`).join(", ");
   const createBody = requiredNonPk.length > 0
     ? `"{${bodyPairs}}"`
     : `"{}"`;
@@ -796,12 +876,14 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 ${withAuth ? "import org.springframework.boot.test.mock.mockito.MockBean;\n" : ""}import org.springframework.http.MediaType;
-${withAuth ? "import org.springframework.security.oauth2.jwt.JwtDecoder;\n" : ""}import org.springframework.test.web.servlet.MockMvc;
+${withAuth ? "import org.springframework.security.oauth2.jwt.JwtDecoder;\n" : ""}import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.web.servlet.MockMvc;
 ${withAuth ? "import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;\n" : ""}import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @SpringBootTest
 @AutoConfigureMockMvc
+@ActiveProfiles("test")
 class ${pascal}ControllerTest {
 
     @Autowired
@@ -842,18 +924,20 @@ function quarkusFiles(
   const withAuth = needsAuth(config, endpoints.some((e) => e.auth));
   const mysql = isMysql(config.database);
   const metrics = config.monitoring === "grafana";
+  const infra = quarkusInfra(config);
 
-  files.push({ path: "pom.xml",    content: quarkusPom(artifact, withAuth, mysql, metrics) });
-  files.push({ path: "Dockerfile", content: springDockerfile() }); // same JRE pattern
+  files.push({ path: "pom.xml",    content: quarkusPom(artifact, withAuth, mysql, metrics, infra) });
+  files.push({ path: "Dockerfile", content: quarkusDockerfile() });
   files.push({
     path: "src/main/resources/application.properties",
-    content: quarkusAppProperties(config.name, withAuth, mysql),
+    content: quarkusAppProperties(config.name, withAuth, mysql) + infra.props,
   });
   // Always served — the K8s probes and docker-compose healthcheck hit /health.
   files.push({
     path: "src/main/java/dev/helios/app/HealthResource.java",
     content: quarkusHealthResource(),
   });
+  files.push(...infra.files);
 
   for (const entity of entities) {
     const pascal = toPascal(entity.name);
@@ -864,7 +948,7 @@ function quarkusFiles(
     });
     files.push({
       path: `src/main/java/dev/helios/app/${pascal}Resource.java`,
-      content: quarkusResource(entity, pascal, kebab, withAuth),
+      content: quarkusResource(entity, pascal, kebab, withAuth, infra.cache),
     });
     // Smoke test mirrors what the Spring path emits — list returns 200,
     // create returns 201. Real assertion logic is left to the user, who
@@ -882,17 +966,29 @@ function quarkusFiles(
   if (entities.length === 0 && stubs.length > 0) {
     files.push({
       path: "src/main/java/dev/helios/app/ApiResource.java",
-      content: quarkusApiResource(stubs, withAuth),
+      content: quarkusApiResource(stubs, withAuth, infra.publisher),
     });
   }
 
   return files;
 }
 
-function quarkusApiResource(endpoints: Endpoint[], withAuth: boolean): string {
+function quarkusApiResource(endpoints: Endpoint[], withAuth: boolean, withPublisher = false): string {
+  const publishes = (e: Endpoint) => withPublisher && e.pattern === "send_notification";
+  const anyPublish = endpoints.some(publishes);
   const methods = endpoints.map((e) => {
     const verb = ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(e.method) ? e.method : "GET";
     const auth = withAuth && e.auth ? "\n    @Authenticated" : "";
+    if (publishes(e)) {
+      // send_notification: hand the JSON body to the queue and acknowledge with 202.
+      return `    @${verb}
+    @Path(${JSON.stringify(springPath(e.path))})${auth}
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response ${handlerMethodName(e)}(String payload) {
+        publisher.publish(payload);
+        return Response.accepted(Map.of("queued", true)).build();
+    }`;
+    }
     return `    @${verb}
     @Path(${JSON.stringify(springPath(e.path))})${auth}
     public Map<String, Object> ${handlerMethodName(e)}() {
@@ -902,25 +998,30 @@ function quarkusApiResource(endpoints: Endpoint[], withAuth: boolean): string {
 
   return `package dev.helios.app;
 
-${withAuth ? "import io.quarkus.security.Authenticated;\n" : ""}import jakarta.ws.rs.*;
+${anyPublish ? "import dev.helios.app.messaging.NotificationPublisher;\n" : ""}${withAuth ? "import io.quarkus.security.Authenticated;\n" : ""}${anyPublish ? "import jakarta.inject.Inject;\n" : ""}import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
-import java.util.Map;
+${anyPublish ? "import jakarta.ws.rs.core.Response;\n" : ""}import java.util.Map;
 
 @Path("/")
 @Produces(MediaType.APPLICATION_JSON)
 public class ApiResource {
-
+${anyPublish ? `
+    @Inject
+    NotificationPublisher publisher;
+` : ""}
 ${methods}
 }
 `;
 }
 
-function quarkusPom(artifactId: string, withAuth = false, mysql = false, metrics = false): string {
+function quarkusPom(artifactId: string, withAuth = false, mysql = false, metrics = false, infra?: JavaInfra): string {
   const extra = [
     // SmallRye JWT verifies Bearer tokens against AUTH_JWKS_URL (see application.properties).
     withAuth ? "quarkus-smallrye-jwt" : "",
     // Micrometer + Prometheus registry → /q/metrics.
     metrics ? "quarkus-micrometer-registry-prometheus" : "",
+    // /q/health/ready checks (datasource, Redis, broker) behind /health?ready=1.
+    "quarkus-smallrye-health",
   ]
     .filter(Boolean)
     .map((a) => `    <dependency>
@@ -949,7 +1050,7 @@ function quarkusPom(artifactId: string, withAuth = false, mysql = false, metrics
         <type>pom</type>
         <scope>import</scope>
       </dependency>
-    </dependencies>
+${infra?.boms ?? ""}    </dependencies>
   </dependencyManagement>
   <dependencies>
     <dependency>
@@ -968,7 +1069,7 @@ function quarkusPom(artifactId: string, withAuth = false, mysql = false, metrics
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-smallrye-openapi</artifactId>
     </dependency>
-${extra}    <dependency>
+${extra}${infra?.deps ?? ""}    <dependency>
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-junit5</artifactId>
       <scope>test</scope>
@@ -976,6 +1077,18 @@ ${extra}    <dependency>
     <dependency>
       <groupId>io.rest-assured</groupId>
       <artifactId>rest-assured</artifactId>
+      <scope>test</scope>
+    </dependency>
+${withAuth ? `    <!-- @TestSecurity: contract tests call protected routes as an authenticated user. -->
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-test-security</artifactId>
+      <scope>test</scope>
+    </dependency>
+` : ""}    <!-- Tests run on in-memory H2 (%test profile) instead of a live database. -->
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-jdbc-h2</artifactId>
       <scope>test</scope>
     </dependency>
   </dependencies>
@@ -1005,6 +1118,10 @@ function quarkusAppProperties(appName: string, withAuth = false, mysql = false):
 mp.jwt.verify.publickey.location=\${AUTH_JWKS_URL:}
 mp.jwt.verify.issuer=\${AUTH_ISSUER:}
 mp.jwt.verify.audiences=\${AUTH_AUDIENCE:}
+# SmallRye JWT refuses to start with an empty issuer / key location; tests never
+# present a token, so placeholders are enough (keys are only fetched to verify one).
+%test.mp.jwt.verify.issuer=https://issuer.test
+%test.mp.jwt.verify.publickey.location=https://issuer.test/.well-known/jwks.json
 `
     : "";
   return `quarkus.application.name=${appName}
@@ -1012,6 +1129,9 @@ quarkus.datasource.db-kind=${mysql ? "mysql" : "postgresql"}
 quarkus.datasource.jdbc.url=\${DATABASE_URL:${mysql ? `jdbc:mysql://localhost:3306/${appName}` : `jdbc:postgresql://localhost:5432/${appName}`}}
 quarkus.hibernate-orm.database.generation=update
 quarkus.http.port=\${PORT:8080}
+# Tests use in-memory H2 so \`mvn test\` needs no database.
+%test.quarkus.datasource.db-kind=h2
+%test.quarkus.datasource.jdbc.url=jdbc:h2:mem:test;DB_CLOSE_DELAY=-1
 ${authProps}`;
 }
 
@@ -1057,14 +1177,17 @@ ${fieldDeclarations}
 `;
 }
 
-function quarkusResource(entity: Entity, pascal: string, kebab: string, withAuth = false): string {
+function quarkusResource(entity: Entity, pascal: string, kebab: string, withAuth = false, cached = false): string {
   const pk = pkField(entity);
+  // Redis cache-aside (JsonCache): get-by-id reads Redis first; update/delete evict.
+  const key = `"${kebab}s:" + id`;
+  const evict = cached ? `\n        cache.evict(${key});` : "";
   const idType = pk ? javaShortType(pk.type) : "UUID";
   const idImport = "import java.util.UUID;";
 
   return `package dev.helios.app;
 
-${withAuth ? "import io.quarkus.security.Authenticated;\n" : ""}import jakarta.transaction.Transactional;
+${cached ? "import dev.helios.app.infra.JsonCache;\n" : ""}${withAuth ? "import io.quarkus.security.Authenticated;\n" : ""}${cached ? "import jakarta.inject.Inject;\n" : ""}import jakarta.transaction.Transactional;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -1075,7 +1198,10 @@ import java.util.List;
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class ${pascal}Resource {
-
+${cached ? `
+    @Inject
+    JsonCache cache;
+` : ""}
     @GET
     public List<${pascal}> list() {
         return ${pascal}.listAll();
@@ -1083,9 +1209,12 @@ public class ${pascal}Resource {
 
     @GET
     @Path("/{id}")
-    public Response getById(@PathParam("id") ${idType} id) {
+    public Response getById(@PathParam("id") ${idType} id) {${cached ? `
+        ${pascal} cached = cache.get(${key}, ${pascal}.class);
+        if (cached != null) return Response.ok(cached).build();` : ""}
         ${pascal} entity = ${pascal}.findById(id);
-        if (entity == null) return Response.status(Response.Status.NOT_FOUND).build();
+        if (entity == null) return Response.status(Response.Status.NOT_FOUND).build();${cached ? `
+        cache.put(${key}, entity);` : ""}
         return Response.ok(entity).build();
     }
 
@@ -1103,7 +1232,7 @@ public class ${pascal}Resource {
         ${pascal} existing = ${pascal}.findById(id);
         if (existing == null) return Response.status(Response.Status.NOT_FOUND).build();
         // merge non-null fields from updates
-        existing.persist();
+        existing.persist();${evict}
         return Response.ok(existing).build();
     }
 
@@ -1111,7 +1240,7 @@ public class ${pascal}Resource {
     @Path("/{id}")
     @Transactional
     public Response delete(@PathParam("id") ${idType} id) {
-        boolean deleted = ${pascal}.deleteById(id);
+        boolean deleted = ${pascal}.deleteById(id);${evict}
         return deleted
             ? Response.noContent().build()
             : Response.status(Response.Status.NOT_FOUND).build();
@@ -1123,41 +1252,56 @@ public class ${pascal}Resource {
 function quarkusHealthResource(): string {
   return `package dev.helios.app;
 
+import io.smallrye.health.SmallRyeHealth;
+import io.smallrye.health.SmallRyeHealthReporter;
+import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import java.util.Map;
 
+/**
+ * Liveness: GET /health. Readiness: GET /health?ready=1 runs every SmallRye
+ * readiness check (datasource, Redis, message broker) and answers 503 while
+ * any of them is down, so Kubernetes stops routing traffic here.
+ */
 @Path("/health")
 public class HealthResource {
 
+    @Inject
+    SmallRyeHealthReporter reporter;
+
     @GET
     @Produces(MediaType.APPLICATION_JSON)
-    public Map<String, Object> health() {
-        return Map.of("ok", true);
+    public Response health(@QueryParam("ready") String ready) {
+        if (ready == null) return Response.ok(Map.of("ok", true)).build();
+        SmallRyeHealth readiness = reporter.getReadiness();
+        boolean up = !readiness.isDown();
+        return Response.status(up ? 200 : 503).entity(Map.of("ok", up)).build();
     }
 }
 `;
 }
 
 function quarkusResourceTest(entity: Entity, pascal: string, kebab: string, withAuth = false): string {
-  // We assert only that the route table is wired and reachable. The exact
-  // status code on POST is left flexible (201 vs 200 vs 400) because Panache
-  // entity validation depends on the specific @NotNull annotations the
-  // generator emits — checking >= 200 < 500 catches "route not registered"
-  // without coupling the test to a particular validation policy.
-  void entity;
+  // A valid body (required fields filled, unique values fresh): "{}" violates the
+  // NOT NULL columns and answers 500 once auth is off. ApiContractTest covers the rest of CRUD.
   return `package dev.helios.app;
 
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.lessThan;
 
 @QuarkusTest
 class ${pascal}ResourceTest {
+
+    private static String unique() {
+        return "test-" + java.util.UUID.randomUUID();
+    }
 
     @Test
     void list${pascal}s_${withAuth ? "rejectsMissingToken" : "returnsOk"}() {
@@ -1166,13 +1310,265 @@ class ${pascal}ResourceTest {
     }
 
     @Test
-    void create${pascal}_isReachable() {
-        given().contentType("application/json").body("{}")
+    void create${pascal}_${withAuth ? "rejectsMissingToken" : "returnsCreated"}() {
+        given().contentType("application/json").body(${javaEntityBody(entity)})
                .when().post("/${kebab}s")
-               .then().statusCode(lessThan(500));
+               .then().statusCode(${withAuth ? 401 : 201});
     }
 }
 `;
+}
+
+// ─── API contract tests (emitted from contract-tests.ts) ──────────────────────
+
+type JavaContractCase = {
+  name: string;       // Java identifier stem, e.g. getUsersById
+  method: string;
+  path: string;       // Java expression for the request path
+  protected: boolean;
+  status: number;     // expected status with a principal (or with auth off)
+  body?: string;      // Java expression for a JSON body
+  createFor?: string; // entity pascal: the test first creates a row and binds `id`
+  json?: "object" | "array";
+  keys?: string[];    // top-level keys the response object must carry
+  // ponytail: publish stubs get a request rejected before the broker is touched
+  // (Spring: missing body → 400, Quarkus: wrong media type → 415). That proves the
+  // route is wired and authorized without a live queue during `mvn test`.
+  rejectBody?: boolean;
+};
+
+const javaStr = (s: string) => JSON.stringify(s);
+
+/** Required fields get fresh values per request so unique columns never collide across tests. */
+function javaEntityBody(entity: Entity): string {
+  const pk = pkField(entity);
+  const json = "{" + entity.fields.filter((f) => !f.primaryKey && f !== pk && f.required).map((f) => {
+    const k = `"${toCamel(f.name)}":`;
+    switch (f.type) {
+      case "string":
+      case "text": return `${k}"\u0000unique()\u0000"`;
+      case "uuid": return `${k}"\u0000java.util.UUID.randomUUID()\u0000"`;
+      default:     return k + testValue(f);
+    }
+  }).join(",") + "}";
+  // Odd segments (between \0 markers) are Java expressions, even ones JSON text.
+  return json.split("\u0000").map((seg, i) => (i % 2 ? seg : javaStr(seg))).join(" + ");
+}
+
+function javaContractCases(config: StackConfig, endpoints: Endpoint[], entities: Entity[], withAuth: boolean, spring: boolean): JavaContractCase[] {
+  const publisher = javaQueue(config.queue) !== null;
+  const cases: JavaContractCase[] = [
+    { name: "getHealth", method: "GET", path: javaStr("/health"), protected: false, status: 200, json: "object", keys: ["ok"] },
+  ];
+  // Same rule as the generators: stubs only when no entity CRUD owns the paths.
+  const stubs = entities.length === 0 ? endpoints.filter((e) => e.path !== "/health") : [];
+  for (const e of stubs) {
+    const method = ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(e.method) ? e.method : "GET";
+    const publishes = publisher && e.pattern === "send_notification";
+    cases.push({
+      name: handlerMethodName(e),
+      method,
+      path: javaStr(springPath(e.path).replace(/\{[^}]+\}/g, "1")),
+      // Spring's SecurityConfig protects every route but /health; Quarkus marks stubs @Authenticated one by one.
+      protected: withAuth && (spring || e.auth),
+      status: publishes ? (spring ? 400 : 415) : 200,
+      body: ["POST", "PUT", "PATCH"].includes(method) ? javaStr("{}") : undefined,
+      rejectBody: publishes,
+      json: publishes ? undefined : "object",
+      keys: publishes ? undefined : ["op"],
+    });
+  }
+  for (const entity of entities) {
+    const pascal = toPascal(entity.name);
+    const base = `/${toKebab(entity.name)}s`;
+    const pk = pkField(entity);
+    const pkName = toCamel(pk?.name ?? "id");
+    const keys = [pkName, ...entity.fields.filter((f) => !f.primaryKey && f !== pk && f.required).map((f) => toCamel(f.name))];
+    const body = `body${pascal}()`;
+    const byId = `${javaStr(`${base}/`)} + id`;
+    const n = (m: string, suffix = "") => `${m.toLowerCase()}${pascal}s${suffix}`;
+    cases.push(
+      { name: n("GET"), method: "GET", path: javaStr(base), protected: withAuth, status: 200, json: "array" },
+      { name: n("POST"), method: "POST", path: javaStr(base), protected: withAuth, status: 201, body, json: "object", keys },
+      { name: n("GET", "ById"), method: "GET", path: byId, protected: withAuth, status: 200, createFor: pascal, json: "object", keys: [pkName] },
+      { name: n("PUT", "ById"), method: "PUT", path: byId, protected: withAuth, status: 200, createFor: pascal, body, json: "object", keys: [pkName] },
+      { name: n("DELETE", "ById"), method: "DELETE", path: byId, protected: withAuth, status: 204, createFor: pascal },
+    );
+  }
+  return cases;
+}
+
+/** Unique, valid Java method names: stem_suffix, then stem_suffix2, … */
+function javaTestNames(): (stem: string, suffix: string) => string {
+  const seen = new Map<string, number>();
+  return (stem, suffix) => {
+    const base = `${stem.replace(/[^A-Za-z0-9_]/g, "") || "route"}_${suffix}`;
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return n === 1 ? base : `${base}${n}`;
+  };
+}
+
+type JavaRender = (fn: string, c: JavaContractCase, principal: boolean, status: number) => string;
+
+// Protected routes get a 401-without-principal test plus a with-principal test.
+function javaContractMethods(cases: JavaContractCase[], render: JavaRender): string {
+  const name = javaTestNames();
+  return cases.map((c) =>
+    c.protected
+      // The 401 check needs no row: a random id keeps it independent of the database.
+      ? render(name(c.name, "returns401WithoutToken"), { ...c, createFor: undefined, path: c.path.replace(/ \+ id$/, " + java.util.UUID.randomUUID()") }, false, 401) +
+        render(name(c.name, `returns${c.status}WithToken`), c, true, c.status)
+      : render(name(c.name, `returns${c.status}`), c, false, c.status)
+  ).join("");
+}
+
+function springContractTest(cases: JavaContractCase[], entities: Entity[], withAuth: boolean): string {
+  const jwt = (principal: boolean) => (principal ? ".with(jwt())" : "");
+  const render: JavaRender = (fn, c, principal, status) => {
+    const req = [`request(HttpMethod.${c.method}, ${c.path})${jwt(principal)}`];
+    if (c.body && !(status !== 401 && c.rejectBody)) req.push(".contentType(MediaType.APPLICATION_JSON)", `.content(${c.body})`);
+    const expects = [`.andExpect(status().is(${status}))`];
+    if (status !== 401 && c.json) {
+      expects.push(".andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))");
+      if (c.json === "array") expects.push('.andExpect(jsonPath("$").isArray())');
+      for (const k of c.keys ?? []) expects.push(`.andExpect(jsonPath(${javaStr(`$.${k}`)}).exists())`);
+    }
+    return `
+    @Test
+    void ${fn}() throws Exception {
+${c.createFor ? `        String id = create${c.createFor}();\n` : ""}        mvc.perform(${req.join("\n                ")})
+            ${expects.join("\n            ")};
+    }
+`;
+  };
+  const helpers = entities.map((e) => {
+    const pascal = toPascal(e.name);
+    return `
+    private static String body${pascal}() {
+        return ${javaEntityBody(e)};
+    }
+
+    private String create${pascal}() throws Exception {
+        String json = mvc.perform(post(${javaStr(`/${toKebab(e.name)}s`)})${jwt(withAuth)}
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body${pascal}()))
+            .andExpect(status().isCreated())
+            .andReturn().getResponse().getContentAsString();
+        Object id = JsonPath.read(json, ${javaStr(`$.${toCamel(pkField(e)?.name ?? "id")}`)});
+        return id.toString();
+    }
+`;
+  }).join("");
+  return `package dev.helios.app;
+
+${entities.length ? "import com.jayway.jsonpath.JsonPath;\n" : ""}import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+${withAuth ? "import org.springframework.boot.test.mock.mockito.MockBean;\n" : ""}import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+${withAuth ? "import org.springframework.security.oauth2.jwt.JwtDecoder;\n" : ""}import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.web.servlet.MockMvc;
+
+${withAuth ? "import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;\n" : ""}import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+
+/**
+ * Contract tests: every route is served (not 404), protected routes reject a
+ * missing token and accept an authenticated principal, JSON responses carry the
+ * expected shape, and entity CRUD round-trips. The "test" profile runs on
+ * in-memory H2 with brokers and exporters off, so no external services are needed.
+ */
+@SpringBootTest
+@AutoConfigureMockMvc
+@ActiveProfiles("test")
+class ApiContractTest {
+
+    @Autowired
+    MockMvc mvc;
+${withAuth ? `
+    // jwt() supplies the authenticated principal; the mock keeps the context off the JWKS endpoint.
+    @MockBean
+    JwtDecoder jwtDecoder;
+` : ""}
+    private static String unique() {
+        return "test-" + java.util.UUID.randomUUID();
+    }
+${helpers}${javaContractMethods(cases, render)}}
+`;
+}
+
+function quarkusContractTest(cases: JavaContractCase[], entities: Entity[], withAuth: boolean): string {
+  const render: JavaRender = (fn, c, principal, status) => {
+    const given = ["given()"];
+    if (status !== 401 && c.rejectBody) given.push('.contentType(ContentType.TEXT).body("not json")');
+    else if (c.body) given.push(".contentType(ContentType.JSON)", `.body(${c.body})`);
+    const then = [`.statusCode(${status})`];
+    if (status !== 401 && c.json) {
+      then.push(".contentType(ContentType.JSON)");
+      if (c.json === "array") then.push('.body("$", instanceOf(java.util.List.class))');
+      for (const k of c.keys ?? []) then.push(`.body("$", hasKey(${javaStr(k)}))`);
+    }
+    return `
+    @Test${principal ? `\n    @TestSecurity(user = "test")` : ""}
+    void ${fn}() {
+${c.createFor ? `        String id = create${c.createFor}();\n` : ""}        ${given.join("")}
+            .when().request(${javaStr(c.method)}, ${c.path})
+            .then()${then.join("")};
+    }
+`;
+  };
+  const helpers = entities.map((e) => {
+    const pascal = toPascal(e.name);
+    return `
+    private static String body${pascal}() {
+        return ${javaEntityBody(e)};
+    }
+
+${withAuth ? "    // Runs inside the calling test, so it inherits that test's @TestSecurity principal.\n" : ""}    private static String create${pascal}() {
+        Object id = given().contentType(ContentType.JSON).body(body${pascal}())
+            .when().post(${javaStr(`/${toKebab(e.name)}s`)})
+            .then().statusCode(201)
+            .extract().path(${javaStr(toCamel(pkField(e)?.name ?? "id"))});
+        return id.toString();
+    }
+`;
+  }).join("");
+  return `package dev.helios.app;
+
+import io.quarkus.test.junit.QuarkusTest;
+${withAuth ? "import io.quarkus.test.security.TestSecurity;\n" : ""}import io.restassured.http.ContentType;
+import org.junit.jupiter.api.Test;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.*;
+
+/**
+ * Contract tests: every route is served (not 404), protected routes reject a
+ * missing token and accept an authenticated principal (@TestSecurity), JSON
+ * responses carry the expected shape, and entity CRUD round-trips. The %test
+ * profile runs on in-memory H2 with brokers and exporters off.
+ */
+@QuarkusTest
+class ApiContractTest {
+
+    private static String unique() {
+        return "test-" + java.util.UUID.randomUUID();
+    }
+${helpers}${javaContractMethods(cases, render)}}
+`;
+}
+
+/** ApiContractTest.java per framework; emitted from contract-tests.ts. */
+export function javaContractTestFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
+  const withAuth = needsAuth(config, endpoints.some((e) => e.auth));
+  const spring = config.framework !== "quarkus";
+  const cases = javaContractCases(config, endpoints, entities, withAuth, spring);
+  return [{
+    path: "src/test/java/dev/helios/app/ApiContractTest.java",
+    content: spring ? springContractTest(cases, entities, withAuth) : quarkusContractTest(cases, entities, withAuth),
+  }];
 }
 
 // ─── Suppress unused-import warnings for re-exported symbols ─────────────────

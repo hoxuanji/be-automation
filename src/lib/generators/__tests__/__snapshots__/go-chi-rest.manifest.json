@@ -11,8 +11,13 @@
   },
   {
     "path": ".github/workflows/ci.yml",
-    "lines": 70,
-    "size": 1855
+    "lines": 62,
+    "size": 1669
+  },
+  {
+    "path": ".github/workflows/deploy.yml",
+    "lines": 69,
+    "size": 2418
   },
   {
     "path": ".gitignore",
@@ -40,9 +45,14 @@
     "size": 2170
   },
   {
+    "path": "cmd/worker/main.go",
+    "lines": 67,
+    "size": 1754
+  },
+  {
     "path": "DEPLOY.md",
-    "lines": 79,
-    "size": 2387
+    "lines": 92,
+    "size": 3281
   },
   {
     "path": "deploy/helm/Chart.yaml",
@@ -101,18 +111,18 @@
   },
   {
     "path": "docker-compose.yml",
-    "lines": 60,
-    "size": 1439
+    "lines": 77,
+    "size": 1860
   },
   {
     "path": "Dockerfile",
-    "lines": 14,
-    "size": 336
+    "lines": 17,
+    "size": 542
   },
   {
     "path": "go.mod",
-    "lines": 23,
-    "size": 696
+    "lines": 24,
+    "size": 736
   },
   {
     "path": "internal/api/contract/contract_test.go",
@@ -131,8 +141,8 @@
   },
   {
     "path": "internal/config/config.go",
-    "lines": 22,
-    "size": 476
+    "lines": 24,
+    "size": 518
   },
   {
     "path": "internal/db/gorm.go",
@@ -175,6 +185,11 @@
     "size": 344
   },
   {
+    "path": "internal/queue/queue.go",
+    "lines": 119,
+    "size": 3201
+  },
+  {
     "path": "internal/server/health.go",
     "lines": 34,
     "size": 927
@@ -196,8 +211,8 @@
   },
   {
     "path": "internal/server/server.go",
-    "lines": 109,
-    "size": 3601
+    "lines": 117,
+    "size": 3877
   },
   {
     "path": "internal/tracing/tracing.go",
@@ -211,8 +226,8 @@
   },
   {
     "path": "migrations/000001_init.up.sql",
-    "lines": 23,
-    "size": 791
+    "lines": 22,
+    "size": 756
   },
   {
     "path": "QUICKSTART.md",

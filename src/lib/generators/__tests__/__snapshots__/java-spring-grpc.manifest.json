@@ -6,13 +6,18 @@
   },
   {
     "path": ".env.example",
-    "lines": 37,
-    "size": 2016
+    "lines": 43,
+    "size": 2323
   },
   {
     "path": ".github/workflows/ci.yml",
-    "lines": 65,
-    "size": 1714
+    "lines": 57,
+    "size": 1528
+  },
+  {
+    "path": ".github/workflows/deploy.yml",
+    "lines": 64,
+    "size": 2268
   },
   {
     "path": ".gitignore",
@@ -31,8 +36,8 @@
   },
   {
     "path": "DEPLOY.md",
-    "lines": 79,
-    "size": 2387
+    "lines": 92,
+    "size": 3281
   },
   {
     "path": "deploy/helm/Chart.yaml",
@@ -81,8 +86,8 @@
   },
   {
     "path": "deploy/k8s/secrets.example.env",
-    "lines": 20,
-    "size": 442
+    "lines": 22,
+    "size": 490
   },
   {
     "path": "deploy/k8s/service.yaml",
@@ -97,22 +102,22 @@
   {
     "path": "Dockerfile",
     "lines": 16,
-    "size": 447
+    "size": 453
   },
   {
     "path": "pom.xml",
-    "lines": 88,
-    "size": 3052
+    "lines": 118,
+    "size": 4136
   },
   {
     "path": "QUICKSTART.md",
-    "lines": 105,
-    "size": 2572
+    "lines": 107,
+    "size": 2749
   },
   {
     "path": "README.md",
-    "lines": 63,
-    "size": 2182
+    "lines": 64,
+    "size": 2269
   },
   {
     "path": "sdk/test_app_client.py",
@@ -141,18 +146,48 @@
   },
   {
     "path": "src/main/java/dev/helios/app/HealthController.java",
-    "lines": 15,
-    "size": 331
+    "lines": 33,
+    "size": 1266
+  },
+  {
+    "path": "src/main/java/dev/helios/app/infra/AuditFilter.java",
+    "lines": 50,
+    "size": 1820
+  },
+  {
+    "path": "src/main/java/dev/helios/app/infra/CacheConfig.java",
+    "lines": 14,
+    "size": 464
+  },
+  {
+    "path": "src/main/java/dev/helios/app/infra/RateLimitFilter.java",
+    "lines": 59,
+    "size": 2682
+  },
+  {
+    "path": "src/main/java/dev/helios/app/messaging/MessagingConfig.java",
+    "lines": 16,
+    "size": 464
+  },
+  {
+    "path": "src/main/java/dev/helios/app/messaging/NotificationConsumer.java",
+    "lines": 21,
+    "size": 797
+  },
+  {
+    "path": "src/main/java/dev/helios/app/messaging/NotificationPublisher.java",
+    "lines": 25,
+    "size": 677
   },
   {
     "path": "src/main/java/dev/helios/app/model/Post.java",
     "lines": 64,
-    "size": 1739
+    "size": 1771
   },
   {
     "path": "src/main/java/dev/helios/app/model/User.java",
-    "lines": 79,
-    "size": 2162
+    "lines": 78,
+    "size": 2182
   },
   {
     "path": "src/main/java/dev/helios/app/repository/PostRepository.java",
@@ -171,23 +206,23 @@
   },
   {
     "path": "src/main/java/dev/helios/app/service/PostService.java",
-    "lines": 46,
-    "size": 1196
+    "lines": 51,
+    "size": 1487
   },
   {
     "path": "src/main/java/dev/helios/app/service/UserService.java",
-    "lines": 47,
-    "size": 1282
+    "lines": 52,
+    "size": 1573
   },
   {
     "path": "src/main/resources/application.properties",
-    "lines": 32,
-    "size": 1461
+    "lines": 51,
+    "size": 2404
   },
   {
     "path": "src/main/resources/db/migration/V1__init.sql",
-    "lines": 23,
-    "size": 791
+    "lines": 22,
+    "size": 756
   },
   {
     "path": "src/main/resources/logback-spring.xml",
@@ -195,18 +230,23 @@
     "size": 815
   },
   {
-    "path": "src/test/java/com/example/testapp/ApiContractTest.java",
-    "lines": 99,
-    "size": 3449
+    "path": "src/test/java/dev/helios/app/ApiContractTest.java",
+    "lines": 242,
+    "size": 9365
   },
   {
     "path": "src/test/java/dev/helios/app/PostControllerTest.java",
-    "lines": 43,
-    "size": 1586
+    "lines": 45,
+    "size": 1670
   },
   {
     "path": "src/test/java/dev/helios/app/UserControllerTest.java",
-    "lines": 43,
-    "size": 1622
+    "lines": 45,
+    "size": 1708
+  },
+  {
+    "path": "src/test/resources/application-test.properties",
+    "lines": 13,
+    "size": 428
   }
 ]

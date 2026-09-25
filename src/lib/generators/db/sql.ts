@@ -95,8 +95,11 @@ function tableSql(entity: Entity, dialect: SqlDialect): string {
   // consistent with the ORM models (which expect createdAt / updatedAt).
   const createdAtDefault =
     dialect === "sqlite" ? "CURRENT_TIMESTAMP" : dialect === "mysql" ? "CURRENT_TIMESTAMP(3)" : "now()";
+  // Entities often declare createdAt/updatedAt themselves; emitting both copies made
+  // Postgres/MySQL reject the migration. The managed column (with DEFAULT) wins.
+  const managed = new Set(["created_at", "updated_at"]);
   const cols = [
-    ...fields.map((f) => columnDef(f, dialect)),
+    ...fields.filter((f) => !managed.has(toSnake(f.name))).map((f) => columnDef(f, dialect)),
     `  created_at ${sqlType({ ...fields[0], type: "date" } as EntityField, dialect)} NOT NULL DEFAULT ${createdAtDefault}`,
     `  updated_at ${sqlType({ ...fields[0], type: "date" } as EntityField, dialect)} NOT NULL DEFAULT ${createdAtDefault}`,
   ];

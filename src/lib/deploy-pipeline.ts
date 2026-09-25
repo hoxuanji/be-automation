@@ -29,6 +29,18 @@ import {
   flyDashboardUrl,
   FlyError,
 } from "@/lib/fly";
+import {
+  ActionsError,
+  cloudSecretsFor,
+  putRepoSecrets,
+  getDefaultBranch,
+  dispatchWorkflow,
+  findDispatchedRun,
+  getRun,
+  getActiveStep,
+  type WorkflowRun,
+} from "@/lib/cloud-deploy";
+import type { CloudProvider, CloudCreds } from "@/lib/cloud-providers";
 import type { StackConfig, Endpoint, Entity } from "@/lib/generators/types";
 import {
   PipelineError,
@@ -897,4 +909,200 @@ export async function* runVercelDeployPipeline(
 
   yield { type: "stage", stage: "done", message: "Vercel project provisioned" };
   return result;
+}
+
+// ─── Cloud pipeline (AWS / GCP / Azure / K8s via GitHub Actions) ─────────────
+
+export type CloudDeployParams<P extends CloudProvider = CloudProvider> = {
+  githubToken: string;
+  provider: P;
+  creds: CloudCreds<P>;
+  config: StackConfig;
+  endpoints: Endpoint[];
+  entities: Entity[];
+  repoName: string;
+  isPrivate?: boolean;
+  signal?: AbortSignal;
+  // Tunables — overridden by tests only.
+  pollIntervalMs?: number;
+  maxWaitMs?: number;
+};
+
+const CLOUD_LABEL: Record<CloudProvider, string> = { aws: "AWS", gcp: "GCP", azure: "Azure", k8s: "Kubernetes" };
+
+function classifyActionsErr(err: unknown, stage: string): PipelineError {
+  if (err instanceof PipelineError) return err;
+  if (err instanceof ActionsError) {
+    switch (err.code) {
+      case "not_authorized":
+        return new PipelineError({ code: "token_invalid", status: 401, message: "GitHub token is missing or expired.", hint: "Reconnect GitHub from Settings → Integrations.", stage });
+      case "insufficient_scope":
+        return new PipelineError({ code: "insufficient_scope", status: 403, message: "GitHub token can't manage Actions on this repo.", hint: "Disconnect and reconnect GitHub to re-authorize with the repo and workflow scopes.", stage });
+      case "rate_limited":
+        return new PipelineError({ code: "rate_limited", status: 429, message: "GitHub rate limit hit.", hint: "Wait a minute and retry.", stage });
+      case "network_error":
+        return new PipelineError({ code: "network_error", status: 503, message: "Couldn't reach GitHub.", hint: "api.github.com wasn't reachable. Check connectivity and retry.", stage });
+      default:
+        break;
+    }
+  } else {
+    // Unknown error — log the error name only (never secret values); keep the client message generic.
+    console.error(`[deploy/cloud] unexpected error during ${stage}:`, err instanceof Error ? err.name : typeof err);
+  }
+  switch (stage) {
+    case "actions_secrets":
+      return new PipelineError({ code: "actions_secrets_failed", status: 502, message: "Couldn't store cloud credentials as GitHub Actions secrets.", hint: "Check that Actions is enabled for the repo and retry.", stage });
+    case "workflow_dispatch":
+      return new PipelineError({ code: "workflow_dispatch_failed", status: 502, message: "Couldn't start the deploy workflow.", hint: "Open the repo's Actions tab, check that deploy.yml is enabled, and run it manually.", stage });
+    default:
+      return new PipelineError({ code: "actions_error", status: 502, message: "Lost track of the deploy workflow run.", hint: "Open the repo's Actions tab to follow the run.", stage });
+  }
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+  });
+}
+
+/**
+ * Push → store creds as Actions secrets → dispatch deploy.yml → poll the run.
+ * The cloud-side work (build, push image, roll out) happens in the generated
+ * workflow; this generator only drives and observes it.
+ */
+export async function* runCloudDeployPipeline(
+  params: CloudDeployParams
+): AsyncGenerator<PipelineEvent, DeployResult, void> {
+  const { githubToken, provider, creds, config, endpoints, entities, repoName, isPrivate, signal } = params;
+  const pollIntervalMs = params.pollIntervalMs ?? 5_000;
+  const maxWaitMs = params.maxWaitMs ?? 25 * 60_000;
+  const label = CLOUD_LABEL[provider];
+
+  // ─── Stage 1: generate + push to GitHub ─────────────────────────────────────
+  yield { type: "stage", stage: "generate", message: "Generating repository files" };
+  let pushed: PushResult;
+  try {
+    yield { type: "stage", stage: "github_push", message: "Pushing code to GitHub" };
+    pushed = await pushGeneratedRepo({ token: githubToken, config, endpoints, entities, repoName, isPrivate });
+    yield { type: "progress", message: `Pushed ${pushed.fileCount} files to ${pushed.fullName}`, detail: pushed.url };
+  } catch (err) {
+    if (err instanceof PipelineError) {
+      err.stage = err.stage ?? "github_push";
+      throw err;
+    }
+    throw new PipelineError({ code: "commit_failed", status: 502, message: "GitHub push failed.", hint: "Retry the deploy.", stage: "github_push" });
+  }
+  const fullName = pushed.fullName;
+  const actionsUrl = `${pushed.url}/actions/workflows/deploy.yml`;
+  const base = {
+    provider,
+    domain: null,
+    fullName,
+    githubUrl: pushed.url,
+    commitUrl: pushed.commitUrl ?? undefined,
+    fileCount: pushed.fileCount,
+  };
+
+  // ─── Stage 2: cloud creds → Actions repository secrets ─────────────────────
+  yield { type: "stage", stage: "actions_secrets", message: `Storing ${label} credentials as GitHub Actions secrets` };
+  let secrets: Record<string, string>;
+  try {
+    secrets = cloudSecretsFor(provider, creds, config.envVars);
+  } catch {
+    throw new PipelineError({ code: "cloud_creds_missing", status: 400, message: `Saved ${label} credentials are incomplete.`, hint: `Re-save your ${label} credentials in Settings → Integrations.`, stage: "actions_secrets" });
+  }
+  try {
+    await putRepoSecrets(githubToken, fullName, secrets);
+  } catch (err) {
+    throw classifyActionsErr(err, "actions_secrets");
+  }
+  yield { type: "progress", message: `Stored ${Object.keys(secrets).length} secrets`, detail: Object.keys(secrets).join(", ") };
+
+  // ─── Stage 3: dispatch deploy.yml ───────────────────────────────────────────
+  yield { type: "stage", stage: "workflow_dispatch", message: "Triggering the deploy workflow" };
+  const dispatchedAt = Date.now();
+  try {
+    const ref = await getDefaultBranch(githubToken, fullName);
+    // GitHub indexes a freshly pushed workflow asynchronously; 404/422 right
+    // after the push usually means "not registered yet", so retry briefly.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await dispatchWorkflow(githubToken, fullName, ref);
+        break;
+      } catch (err) {
+        const indexing = err instanceof ActionsError && (err.code === "not_found" || err.code === "validation");
+        if (!indexing) throw err;
+        if (attempt >= 6) {
+          throw new PipelineError({
+            code: "workflow_not_found",
+            status: 404,
+            message: "GitHub didn't find a dispatchable deploy.yml workflow.",
+            hint: "Check that .github/workflows/deploy.yml exists with a workflow_dispatch trigger, then run it from the Actions tab.",
+            stage: "workflow_dispatch",
+          });
+        }
+        await sleep(Math.min(pollIntervalMs, 2_000) * attempt, signal);
+      }
+    }
+  } catch (err) {
+    throw classifyActionsErr(err, "workflow_dispatch");
+  }
+  yield { type: "progress", message: "Workflow dispatched", detail: actionsUrl };
+
+  // ─── Stage 4: follow the run ────────────────────────────────────────────────
+  yield { type: "stage", stage: "workflow_run", message: "Waiting for the workflow run" };
+  const deadline = dispatchedAt + maxWaitMs;
+  let run: WorkflowRun | null = null;
+  let lastStatus = "";
+  let lastStep: string | null = null;
+  try {
+    while (!signal?.aborted && Date.now() < deadline) {
+      run = run ? await getRun(githubToken, fullName, run.id) : await findDispatchedRun(githubToken, fullName, dispatchedAt);
+      if (run) {
+        if (run.status !== lastStatus) {
+          lastStatus = run.status;
+          yield { type: "progress", message: `Run ${run.status.replace("_", " ")}`, detail: run.html_url };
+        }
+        if (run.status === "completed") break;
+        if (run.status === "in_progress") {
+          const step = await getActiveStep(githubToken, fullName, run.id).catch(() => null);
+          if (step && step !== lastStep) {
+            lastStep = step;
+            yield { type: "progress", message: step, detail: run.html_url };
+          }
+        }
+      }
+      await sleep(pollIntervalMs, signal);
+    }
+  } catch (err) {
+    throw classifyActionsErr(err, "workflow_run");
+  }
+
+  const runUrl = run?.html_url ?? actionsUrl;
+  if (run?.status === "completed" && run.conclusion !== "success") {
+    throw new PipelineError({
+      code: "workflow_run_failed",
+      status: 502,
+      message: `The ${label} deploy workflow finished with "${run.conclusion ?? "unknown"}".`,
+      hint: `Open the run logs to see which step failed: ${runUrl}`,
+      stage: "workflow_run",
+      partial: { runUrl },
+    });
+  }
+
+  if (run?.status !== "completed") {
+    // Timed out (or client left) while the run is still going — not a failure.
+    yield { type: "warn", message: "The workflow is still running. Follow it on GitHub Actions." };
+    return {
+      ...base,
+      projectUrl: runUrl,
+      runUrl,
+      nextStep: { message: `The ${label} deploy is still running on GitHub Actions — follow the run for the final result.` },
+    };
+  }
+
+  yield { type: "stage", stage: "done", message: `Deployed to ${label}` };
+  return { ...base, projectUrl: runUrl, runUrl };
 }

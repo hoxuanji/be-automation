@@ -11,8 +11,13 @@
   },
   {
     "path": ".github/workflows/ci.yml",
-    "lines": 69,
-    "size": 1835
+    "lines": 61,
+    "size": 1649
+  },
+  {
+    "path": ".github/workflows/deploy.yml",
+    "lines": 68,
+    "size": 2379
   },
   {
     "path": ".gitignore",
@@ -31,8 +36,8 @@
   },
   {
     "path": "DEPLOY.md",
-    "lines": 79,
-    "size": 2387
+    "lines": 92,
+    "size": 3281
   },
   {
     "path": "deploy/helm/Chart.yaml",
@@ -42,7 +47,7 @@
   {
     "path": "deploy/helm/templates/deployment.yaml",
     "lines": 28,
-    "size": 702
+    "size": 710
   },
   {
     "path": "deploy/helm/templates/hpa.yaml",
@@ -62,7 +67,7 @@
   {
     "path": "deploy/k8s/deployment.yaml",
     "lines": 63,
-    "size": 2039
+    "size": 2047
   },
   {
     "path": "deploy/k8s/hpa.yaml",
@@ -91,18 +96,18 @@
   },
   {
     "path": "docker-compose.yml",
-    "lines": 60,
-    "size": 1439
+    "lines": 77,
+    "size": 1872
   },
   {
     "path": "Dockerfile",
-    "lines": 18,
-    "size": 355
+    "lines": 24,
+    "size": 778
   },
   {
     "path": "package.json",
-    "lines": 48,
-    "size": 1293
+    "lines": 51,
+    "size": 1400
   },
   {
     "path": "prisma/schema.prisma",
@@ -136,8 +141,8 @@
   },
   {
     "path": "src/app.controller.ts",
-    "lines": 43,
-    "size": 942
+    "lines": 52,
+    "size": 1510
   },
   {
     "path": "src/app.module.ts",
@@ -210,6 +215,11 @@
     "size": 562
   },
   {
+    "path": "src/queue.ts",
+    "lines": 100,
+    "size": 3810
+  },
+  {
     "path": "src/repositories/post.repository.ts",
     "lines": 32,
     "size": 995
@@ -243,6 +253,11 @@
     "path": "src/validators/user.validator.ts",
     "lines": 23,
     "size": 578
+  },
+  {
+    "path": "src/worker.ts",
+    "lines": 36,
+    "size": 1502
   },
   {
     "path": "tests/api.contract.test.ts",

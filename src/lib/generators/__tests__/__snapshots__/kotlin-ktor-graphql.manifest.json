@@ -6,13 +6,18 @@
   },
   {
     "path": ".env.example",
-    "lines": 37,
-    "size": 2016
+    "lines": 43,
+    "size": 2323
   },
   {
     "path": ".github/workflows/ci.yml",
-    "lines": 68,
-    "size": 1801
+    "lines": 60,
+    "size": 1615
+  },
+  {
+    "path": ".github/workflows/deploy.yml",
+    "lines": 67,
+    "size": 2355
   },
   {
     "path": ".gitignore",
@@ -31,13 +36,13 @@
   },
   {
     "path": "build.gradle.kts",
-    "lines": 37,
-    "size": 1692
+    "lines": 50,
+    "size": 2402
   },
   {
     "path": "DEPLOY.md",
-    "lines": 79,
-    "size": 2387
+    "lines": 92,
+    "size": 3281
   },
   {
     "path": "deploy/helm/Chart.yaml",
@@ -86,8 +91,8 @@
   },
   {
     "path": "deploy/k8s/secrets.example.env",
-    "lines": 20,
-    "size": 442
+    "lines": 22,
+    "size": 490
   },
   {
     "path": "deploy/k8s/service.yaml",
@@ -96,8 +101,8 @@
   },
   {
     "path": "docker-compose.yml",
-    "lines": 60,
-    "size": 1460
+    "lines": 77,
+    "size": 1927
   },
   {
     "path": "Dockerfile",
@@ -111,13 +116,13 @@
   },
   {
     "path": "QUICKSTART.md",
-    "lines": 105,
-    "size": 2560
+    "lines": 107,
+    "size": 2737
   },
   {
     "path": "README.md",
-    "lines": 63,
-    "size": 2247
+    "lines": 64,
+    "size": 2330
   },
   {
     "path": "sdk/test_app_client.py",
@@ -136,8 +141,8 @@
   },
   {
     "path": "src/main/kotlin/Application.kt",
-    "lines": 33,
-    "size": 1127
+    "lines": 45,
+    "size": 1921
   },
   {
     "path": "src/main/kotlin/Auth.kt",
@@ -145,9 +150,14 @@
     "size": 1553
   },
   {
+    "path": "src/main/kotlin/Cache.kt",
+    "lines": 29,
+    "size": 1510
+  },
+  {
     "path": "src/main/kotlin/Database.kt",
-    "lines": 48,
-    "size": 1564
+    "lines": 51,
+    "size": 1711
   },
   {
     "path": "src/main/kotlin/models/Post.kt",
@@ -160,19 +170,39 @@
     "size": 1141
   },
   {
+    "path": "src/main/kotlin/Observability.kt",
+    "lines": 67,
+    "size": 3118
+  },
+  {
+    "path": "src/main/kotlin/Queue.kt",
+    "lines": 76,
+    "size": 3087
+  },
+  {
     "path": "src/main/kotlin/routes/postRoutes.kt",
-    "lines": 66,
-    "size": 2610
+    "lines": 76,
+    "size": 3182
   },
   {
     "path": "src/main/kotlin/routes/userRoutes.kt",
-    "lines": 68,
-    "size": 2766
+    "lines": 78,
+    "size": 3338
+  },
+  {
+    "path": "src/main/kotlin/Worker.kt",
+    "lines": 12,
+    "size": 366
   },
   {
     "path": "src/main/resources/db/migration/V1__init.sql",
-    "lines": 23,
-    "size": 791
+    "lines": 22,
+    "size": 756
+  },
+  {
+    "path": "src/main/resources/logback.xml",
+    "lines": 7,
+    "size": 278
   },
   {
     "path": "src/test/kotlin/ApiContractTest.kt",
@@ -181,8 +211,8 @@
   },
   {
     "path": "src/test/kotlin/ApplicationTest.kt",
-    "lines": 30,
-    "size": 905
+    "lines": 78,
+    "size": 3100
   },
   {
     "path": "src/test/kotlin/PostRouteTest.kt",
@@ -191,8 +221,8 @@
   },
   {
     "path": "src/test/kotlin/TestSupport.kt",
-    "lines": 40,
-    "size": 1453
+    "lines": 63,
+    "size": 2582
   },
   {
     "path": "src/test/kotlin/UserRouteTest.kt",

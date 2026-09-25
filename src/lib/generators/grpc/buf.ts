@@ -57,6 +57,11 @@ modules:
 lint:
   use:
     - DEFAULT
+  # Get/Create/Update return the resource itself and Delete returns Empty
+  # (Google AIP style) instead of a unique <Rpc>Response wrapper per RPC.
+  except:
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - RPC_RESPONSE_STANDARD_NAME
 breaking:
   use:
     - FILE

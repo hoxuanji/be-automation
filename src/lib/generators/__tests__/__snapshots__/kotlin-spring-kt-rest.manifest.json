@@ -6,13 +6,18 @@
   },
   {
     "path": ".env.example",
-    "lines": 37,
-    "size": 2016
+    "lines": 43,
+    "size": 2323
   },
   {
     "path": ".github/workflows/ci.yml",
-    "lines": 68,
-    "size": 1801
+    "lines": 60,
+    "size": 1615
+  },
+  {
+    "path": ".github/workflows/deploy.yml",
+    "lines": 67,
+    "size": 2355
   },
   {
     "path": ".gitignore",
@@ -31,13 +36,13 @@
   },
   {
     "path": "build.gradle.kts",
-    "lines": 41,
-    "size": 1880
+    "lines": 51,
+    "size": 2637
   },
   {
     "path": "DEPLOY.md",
-    "lines": 79,
-    "size": 2387
+    "lines": 92,
+    "size": 3281
   },
   {
     "path": "deploy/helm/Chart.yaml",
@@ -47,7 +52,7 @@
   {
     "path": "deploy/helm/templates/deployment.yaml",
     "lines": 28,
-    "size": 702
+    "size": 710
   },
   {
     "path": "deploy/helm/templates/hpa.yaml",
@@ -67,7 +72,7 @@
   {
     "path": "deploy/k8s/deployment.yaml",
     "lines": 63,
-    "size": 2039
+    "size": 2047
   },
   {
     "path": "deploy/k8s/hpa.yaml",
@@ -86,8 +91,8 @@
   },
   {
     "path": "deploy/k8s/secrets.example.env",
-    "lines": 20,
-    "size": 442
+    "lines": 22,
+    "size": 490
   },
   {
     "path": "deploy/k8s/service.yaml",
@@ -106,13 +111,13 @@
   },
   {
     "path": "QUICKSTART.md",
-    "lines": 105,
-    "size": 2560
+    "lines": 107,
+    "size": 2737
   },
   {
     "path": "README.md",
-    "lines": 59,
-    "size": 1940
+    "lines": 60,
+    "size": 2023
   },
   {
     "path": "sdk/test_app_client.py",
@@ -135,19 +140,39 @@
     "size": 260
   },
   {
+    "path": "src/main/kotlin/dev/helios/test_app/CacheConfig.kt",
+    "lines": 10,
+    "size": 292
+  },
+  {
+    "path": "src/main/kotlin/dev/helios/test_app/HealthController.kt",
+    "lines": 28,
+    "size": 1334
+  },
+  {
+    "path": "src/main/kotlin/dev/helios/test_app/Observability.kt",
+    "lines": 69,
+    "size": 3067
+  },
+  {
     "path": "src/main/kotlin/dev/helios/test_app/Post.kt",
     "lines": 18,
-    "size": 314
+    "size": 376
   },
   {
     "path": "src/main/kotlin/dev/helios/test_app/PostController.kt",
-    "lines": 42,
-    "size": 1396
+    "lines": 43,
+    "size": 1507
   },
   {
     "path": "src/main/kotlin/dev/helios/test_app/PostRepository.kt",
-    "lines": 7,
-    "size": 166
+    "lines": 20,
+    "size": 705
+  },
+  {
+    "path": "src/main/kotlin/dev/helios/test_app/Queue.kt",
+    "lines": 39,
+    "size": 1308
   },
   {
     "path": "src/main/kotlin/dev/helios/test_app/SecurityConfig.kt",
@@ -157,27 +182,27 @@
   {
     "path": "src/main/kotlin/dev/helios/test_app/User.kt",
     "lines": 20,
-    "size": 376
+    "size": 438
   },
   {
     "path": "src/main/kotlin/dev/helios/test_app/UserController.kt",
-    "lines": 42,
-    "size": 1396
+    "lines": 43,
+    "size": 1507
   },
   {
     "path": "src/main/kotlin/dev/helios/test_app/UserRepository.kt",
-    "lines": 7,
-    "size": 166
+    "lines": 20,
+    "size": 705
   },
   {
     "path": "src/main/resources/application.properties",
-    "lines": 20,
-    "size": 729
+    "lines": 29,
+    "size": 1153
   },
   {
     "path": "src/main/resources/db/migration/V1__init.sql",
-    "lines": 23,
-    "size": 791
+    "lines": 22,
+    "size": 756
   },
   {
     "path": "src/main/resources/logback-spring.xml",
@@ -188,6 +213,16 @@
     "path": "src/test/kotlin/dev/helios/test_app/ApiContractTest.kt",
     "lines": 239,
     "size": 8181
+  },
+  {
+    "path": "src/test/kotlin/dev/helios/test_app/HealthTest.kt",
+    "lines": 39,
+    "size": 1448
+  },
+  {
+    "path": "src/test/kotlin/dev/helios/test_app/InMemoryJobPublisher.kt",
+    "lines": 15,
+    "size": 523
   },
   {
     "path": "src/test/kotlin/dev/helios/test_app/PostControllerTest.kt",
@@ -201,7 +236,7 @@
   },
   {
     "path": "src/test/resources/application-test.properties",
-    "lines": 7,
-    "size": 251
+    "lines": 10,
+    "size": 416
   }
 ]

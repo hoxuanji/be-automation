@@ -6,13 +6,18 @@
   },
   {
     "path": ".env.example",
-    "lines": 37,
-    "size": 2016
+    "lines": 43,
+    "size": 2323
   },
   {
     "path": ".github/workflows/ci.yml",
-    "lines": 65,
-    "size": 1714
+    "lines": 57,
+    "size": 1528
+  },
+  {
+    "path": ".github/workflows/deploy.yml",
+    "lines": 64,
+    "size": 2268
   },
   {
     "path": ".gitignore",
@@ -31,8 +36,8 @@
   },
   {
     "path": "DEPLOY.md",
-    "lines": 79,
-    "size": 2387
+    "lines": 92,
+    "size": 3281
   },
   {
     "path": "deploy/helm/Chart.yaml",
@@ -42,7 +47,7 @@
   {
     "path": "deploy/helm/templates/deployment.yaml",
     "lines": 28,
-    "size": 702
+    "size": 710
   },
   {
     "path": "deploy/helm/templates/hpa.yaml",
@@ -62,7 +67,7 @@
   {
     "path": "deploy/k8s/deployment.yaml",
     "lines": 63,
-    "size": 2039
+    "size": 2047
   },
   {
     "path": "deploy/k8s/hpa.yaml",
@@ -81,8 +86,8 @@
   },
   {
     "path": "deploy/k8s/secrets.example.env",
-    "lines": 20,
-    "size": 442
+    "lines": 22,
+    "size": 490
   },
   {
     "path": "deploy/k8s/service.yaml",
@@ -97,22 +102,22 @@
   {
     "path": "Dockerfile",
     "lines": 16,
-    "size": 447
+    "size": 463
   },
   {
     "path": "pom.xml",
-    "lines": 70,
-    "size": 2133
+    "lines": 108,
+    "size": 3435
   },
   {
     "path": "QUICKSTART.md",
-    "lines": 105,
-    "size": 2572
+    "lines": 107,
+    "size": 2749
   },
   {
     "path": "README.md",
-    "lines": 59,
-    "size": 1945
+    "lines": 60,
+    "size": 2032
   },
   {
     "path": "sdk/test_app_client.py",
@@ -126,8 +131,38 @@
   },
   {
     "path": "src/main/java/dev/helios/app/HealthResource.java",
+    "lines": 34,
+    "size": 1067
+  },
+  {
+    "path": "src/main/java/dev/helios/app/infra/AuditFilter.java",
+    "lines": 25,
+    "size": 1016
+  },
+  {
+    "path": "src/main/java/dev/helios/app/infra/JsonCache.java",
+    "lines": 57,
+    "size": 1859
+  },
+  {
+    "path": "src/main/java/dev/helios/app/infra/RateLimitFilter.java",
+    "lines": 53,
+    "size": 2325
+  },
+  {
+    "path": "src/main/java/dev/helios/app/messaging/NotificationConsumer.java",
     "lines": 18,
-    "size": 353
+    "size": 564
+  },
+  {
+    "path": "src/main/java/dev/helios/app/messaging/NotificationPublisher.java",
+    "lines": 20,
+    "size": 612
+  },
+  {
+    "path": "src/main/java/dev/helios/app/messaging/RabbitOptions.java",
+    "lines": 23,
+    "size": 760
   },
   {
     "path": "src/main/java/dev/helios/app/Post.java",
@@ -136,8 +171,8 @@
   },
   {
     "path": "src/main/java/dev/helios/app/PostResource.java",
-    "lines": 58,
-    "size": 1581
+    "lines": 68,
+    "size": 1922
   },
   {
     "path": "src/main/java/dev/helios/app/User.java",
@@ -146,32 +181,32 @@
   },
   {
     "path": "src/main/java/dev/helios/app/UserResource.java",
-    "lines": 58,
-    "size": 1581
+    "lines": 68,
+    "size": 1922
   },
   {
     "path": "src/main/resources/application.properties",
-    "lines": 12,
-    "size": 526
+    "lines": 46,
+    "size": 2420
   },
   {
     "path": "src/main/resources/db/migration/V1__init.sql",
-    "lines": 23,
-    "size": 791
+    "lines": 22,
+    "size": 756
   },
   {
-    "path": "src/test/java/com/example/testapp/ApiContractTest.java",
-    "lines": 99,
-    "size": 3449
+    "path": "src/test/java/dev/helios/app/ApiContractTest.java",
+    "lines": 213,
+    "size": 6997
   },
   {
     "path": "src/test/java/dev/helios/app/PostResourceTest.java",
-    "lines": 25,
-    "size": 575
+    "lines": 28,
+    "size": 704
   },
   {
     "path": "src/test/java/dev/helios/app/UserResourceTest.java",
-    "lines": 25,
-    "size": 575
+    "lines": 28,
+    "size": 740
   }
 ]

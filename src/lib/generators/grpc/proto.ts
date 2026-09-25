@@ -1,5 +1,5 @@
-import type { Entity, EntityField, FieldType, StackConfig } from "../types";
-import { safeName, toSnake } from "../types";
+import type { Endpoint, Entity, EntityField, FieldType, StackConfig } from "../types";
+import { safeName, toCamel, toKebab, toSnake } from "../types";
 
 // ─── Type mapping ────────────────────────────────────────────────────────────
 
@@ -63,20 +63,13 @@ export function generateProto(
   const wkt = new Set<"timestamp">();
   const body: string[] = [];
 
-  // Auto-include a base `FieldMask`-style set of server-side timestamps so
-  // clients can observe created/updated without the entity having to model it.
-  const SERVER_TIMESTAMPS: EntityField[] = [
-    { id: "_created_at", name: "createdAt", type: "date", required: false, unique: false } as EntityField,
-    { id: "_updated_at", name: "updatedAt", type: "date", required: false, unique: false } as EntityField,
-  ];
-
   if (entities.length === 0) {
     body.push("// No entities defined — gRPC output is empty. Add entities in the builder");
     body.push("// then regenerate to produce a service-per-entity proto file.");
   }
 
   for (const entity of entities) {
-    const msg = buildEntityMessages(entity, SERVER_TIMESTAMPS, wkt);
+    const msg = buildEntityMessages(entity, wkt);
     body.push(msg);
   }
 
@@ -87,12 +80,12 @@ export function generateProto(
   }
 
   if (endpointCount > 0) {
-    body.push(
+    body.push([
       "// NOTE: REST-style endpoints (method + path) don't translate cleanly to",
       "//       gRPC. They have been skipped in this proto. Switch `config.api`",
       "//       back to `rest` to regenerate their REST handlers, or model the",
-      "//       same operations as entities to get full gRPC coverage."
-    );
+      "//       same operations as entities to get full gRPC coverage.",
+    ].join("\n"));
   }
 
   const imports: string[] = [];
@@ -113,20 +106,53 @@ export function generateProto(
     ``,
   ].join("\n");
 
-  const content = header + body.join("\n\n") + "\n";
+  const content = header + "\n" + body.join("\n\n") + "\n";
   return {
     path: `proto/${pkg.split(".")[0]}/v1/service.proto`,
     content,
   };
 }
 
+// ─── Shared with the per-language servers ────────────────────────────────────
+
+// Server-managed created/updated timestamps every DB layer adds to an entity
+// (gorm, Prisma and SQLAlchemy models) unless the entity declares them itself.
+export function serverTimestamps(entity: Entity): EntityField[] {
+  return ["createdAt", "updatedAt"]
+    .filter((n) => !entity.fields.some((f) => f.name === n))
+    .map((name) => ({ id: `_${toSnake(name)}`, name, type: "date", required: false, unique: false }) as EntityField);
+}
+
+export const pkOf = (entity: Entity): EntityField => entity.fields.find((f) => f.primaryKey) ?? entity.fields[0];
+
+// Fields settable on Create: everything but a server-generated UUID primary key.
+export const creatableFields = (entity: Entity): EntityField[] =>
+  entity.fields.filter((f) => !(f.primaryKey && f.type === "uuid"));
+
+// proto3 field name (snake_case) and the lowerCamel JSON / proto-loader name.
+export const protoField = (f: EntityField) => snakeField(f.name);
+export const protoJsonName = (f: EntityField) => toCamel(snakeField(f.name));
+
+// Entity RPCs that require a bearer token: exactly those whose REST route does
+// (an endpoint on the same method + path with auth on). Update covers PUT and
+// PATCH. Returns RPC names like "GetUser".
+export function protectedRpcs(entity: Entity, endpoints: Endpoint[]): string[] {
+  const norm = (p: string) => p.replace(/(:[A-Za-z0-9_]+|\{[A-Za-z0-9_]+\})/g, ":p").replace(/(.)\/$/, "$1");
+  const authed = new Set(endpoints.filter((e) => e.auth).map((e) => `${e.method} ${norm(e.path)}`));
+  const base = `/${toKebab(entity.name)}s`;
+  const routes: [string, string[]][] = [
+    ["List", [`GET ${base}`]],
+    ["Get", [`GET ${base}/:p`]],
+    ["Create", [`POST ${base}`]],
+    ["Update", [`PUT ${base}/:p`, `PATCH ${base}/:p`]],
+    ["Delete", [`DELETE ${base}/:p`]],
+  ];
+  return routes.filter(([, keys]) => keys.some((k) => authed.has(k))).map(([rpc]) => `${rpc}${entity.name}`);
+}
+
 // ─── Messages ────────────────────────────────────────────────────────────────
 
-function buildEntityMessages(
-  entity: Entity,
-  serverTimestamps: EntityField[],
-  wkt: Set<"timestamp">
-): string {
+function buildEntityMessages(entity: Entity, wkt: Set<"timestamp">): string {
   const name = entity.name;
   const fields = entity.fields;
 
@@ -134,11 +160,11 @@ function buildEntityMessages(
   // created_at/updated_at timestamps at fixed high field numbers so adding
   // new user fields never collides.
   const entityFields = fields.map((f, i) => formatField(f, i + 1, wkt));
-  const timestampFields = serverTimestamps.map((f, i) => formatField(f, 90 + i, wkt));
+  const timestampFields = serverTimestamps(entity).map((f, i) => formatField(f, 90 + i, wkt));
   const entityMsg = `message ${name} {\n${[...entityFields, ...timestampFields].join("\n")}\n}`;
 
   // Request message for Get/Delete — keyed by the entity's primary key.
-  const pk = fields.find((f) => f.primaryKey) ?? fields[0];
+  const pk = pkOf(entity);
   const pkProto = protoType(pk.type);
   if (pkProto.wkt === "timestamp") wkt.add("timestamp");
   const keyReq = `message Get${name}Request {\n  ${pkProto.name} ${snakeField(pk.name)} = 1;\n}`;
@@ -146,8 +172,7 @@ function buildEntityMessages(
 
   // Request message for Create — user-settable fields only (no PK if it's
   // server-generated UUID, and no server timestamps).
-  const creatableFields = fields.filter((f) => !(f.primaryKey && f.type === "uuid"));
-  const createReq = `message Create${name}Request {\n${creatableFields.map((f, i) => formatField(f, i + 1, wkt)).join("\n")}\n}`;
+  const createReq = `message Create${name}Request {\n${creatableFields(entity).map((f, i) => formatField(f, i + 1, wkt)).join("\n")}\n}`;
 
   // Update is a full replace (PUT-style) for simplicity — PATCH semantics need
   // FieldMask which is more than we want to inflict on a first pass.
@@ -158,7 +183,7 @@ function buildEntityMessages(
 
   // List pagination: offset/limit is simpler than cursor tokens for a first
   // pass. Clients that want cursor paging can extend the proto later.
-  const listReq = `message List${name}Request {\n  uint32 page = 1;\n  uint32 page_size = 2;\n}`;
+  const listReq = `message List${name}Request {\n  uint32 page = 1; // 1-based; 0 means 1\n  uint32 page_size = 2; // 0 means 20; capped at 100\n}`;
   const listRes = `message List${name}Response {\n  repeated ${name} items = 1;\n  uint32 total = 2;\n  uint32 page = 3;\n  uint32 page_size = 4;\n}`;
 
   return [entityMsg, keyReq, deleteReq, createReq, updateReq, listReq, listRes].join("\n\n");

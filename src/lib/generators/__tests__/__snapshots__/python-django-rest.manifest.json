@@ -11,8 +11,13 @@
   },
   {
     "path": ".github/workflows/ci.yml",
-    "lines": 67,
-    "size": 1799
+    "lines": 59,
+    "size": 1613
+  },
+  {
+    "path": ".github/workflows/deploy.yml",
+    "lines": 66,
+    "size": 2358
   },
   {
     "path": ".gitignore",
@@ -56,8 +61,8 @@
   },
   {
     "path": "app/config.py",
-    "lines": 14,
-    "size": 299
+    "lines": 16,
+    "size": 422
   },
   {
     "path": "app/db.py",
@@ -71,8 +76,8 @@
   },
   {
     "path": "app/main.py",
-    "lines": 101,
-    "size": 3040
+    "lines": 123,
+    "size": 3906
   },
   {
     "path": "app/models.py",
@@ -80,9 +85,19 @@
     "size": 991
   },
   {
+    "path": "app/queue.py",
+    "lines": 98,
+    "size": 3412
+  },
+  {
+    "path": "app/worker.py",
+    "lines": 42,
+    "size": 1235
+  },
+  {
     "path": "DEPLOY.md",
-    "lines": 79,
-    "size": 2387
+    "lines": 92,
+    "size": 3281
   },
   {
     "path": "deploy/helm/Chart.yaml",
@@ -92,7 +107,7 @@
   {
     "path": "deploy/helm/templates/deployment.yaml",
     "lines": 28,
-    "size": 702
+    "size": 710
   },
   {
     "path": "deploy/helm/templates/hpa.yaml",
@@ -112,7 +127,7 @@
   {
     "path": "deploy/k8s/deployment.yaml",
     "lines": 63,
-    "size": 2039
+    "size": 2047
   },
   {
     "path": "deploy/k8s/hpa.yaml",
@@ -141,8 +156,8 @@
   },
   {
     "path": "docker-compose.yml",
-    "lines": 60,
-    "size": 1439
+    "lines": 77,
+    "size": 1876
   },
   {
     "path": "Dockerfile",
@@ -161,13 +176,13 @@
   },
   {
     "path": "migrations/versions/0001_init.py",
-    "lines": 39,
-    "size": 1362
+    "lines": 38,
+    "size": 1311
   },
   {
     "path": "pyproject.toml",
-    "lines": 28,
-    "size": 590
+    "lines": 29,
+    "size": 611
   },
   {
     "path": "QUICKSTART.md",
@@ -176,8 +191,8 @@
   },
   {
     "path": "README.md",
-    "lines": 59,
-    "size": 1960
+    "lines": 60,
+    "size": 2013
   },
   {
     "path": "sdk/test_app_client.py",

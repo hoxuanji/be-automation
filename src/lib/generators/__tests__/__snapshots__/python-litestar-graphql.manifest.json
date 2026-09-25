@@ -11,8 +11,13 @@
   },
   {
     "path": ".github/workflows/ci.yml",
-    "lines": 67,
-    "size": 1799
+    "lines": 59,
+    "size": 1613
+  },
+  {
+    "path": ".github/workflows/deploy.yml",
+    "lines": 66,
+    "size": 2358
   },
   {
     "path": ".gitignore",
@@ -51,13 +56,13 @@
   },
   {
     "path": "app/config.py",
-    "lines": 14,
-    "size": 299
+    "lines": 16,
+    "size": 422
   },
   {
-    "path": "app/graphql_store.py",
-    "lines": 13,
-    "size": 285
+    "path": "app/db.py",
+    "lines": 74,
+    "size": 2307
   },
   {
     "path": "app/logging_config.py",
@@ -66,13 +71,23 @@
   },
   {
     "path": "app/main.py",
-    "lines": 69,
-    "size": 2127
+    "lines": 74,
+    "size": 2338
+  },
+  {
+    "path": "app/models.py",
+    "lines": 30,
+    "size": 991
+  },
+  {
+    "path": "app/queue.py",
+    "lines": 98,
+    "size": 3412
   },
   {
     "path": "app/schema.py",
-    "lines": 171,
-    "size": 4071
+    "lines": 247,
+    "size": 6740
   },
   {
     "path": "app/tracing.py",
@@ -80,9 +95,14 @@
     "size": 719
   },
   {
+    "path": "app/worker.py",
+    "lines": 42,
+    "size": 1235
+  },
+  {
     "path": "DEPLOY.md",
-    "lines": 79,
-    "size": 2387
+    "lines": 92,
+    "size": 3281
   },
   {
     "path": "deploy/helm/Chart.yaml",
@@ -141,8 +161,8 @@
   },
   {
     "path": "docker-compose.yml",
-    "lines": 60,
-    "size": 1439
+    "lines": 77,
+    "size": 1876
   },
   {
     "path": "Dockerfile",
@@ -166,13 +186,13 @@
   },
   {
     "path": "migrations/versions/0001_init.py",
-    "lines": 39,
-    "size": 1362
+    "lines": 38,
+    "size": 1311
   },
   {
     "path": "pyproject.toml",
-    "lines": 29,
-    "size": 725
+    "lines": 34,
+    "size": 816
   },
   {
     "path": "QUICKSTART.md",
@@ -181,8 +201,8 @@
   },
   {
     "path": "README.md",
-    "lines": 64,
-    "size": 2159
+    "lines": 65,
+    "size": 2212
   },
   {
     "path": "sdk/test_app_client.py",

@@ -11,8 +11,13 @@
   },
   {
     "path": ".github/workflows/ci.yml",
-    "lines": 69,
-    "size": 1835
+    "lines": 61,
+    "size": 1649
+  },
+  {
+    "path": ".github/workflows/deploy.yml",
+    "lines": 68,
+    "size": 2379
   },
   {
     "path": ".gitignore",
@@ -31,8 +36,8 @@
   },
   {
     "path": "DEPLOY.md",
-    "lines": 79,
-    "size": 2387
+    "lines": 92,
+    "size": 3281
   },
   {
     "path": "deploy/helm/Chart.yaml",
@@ -91,13 +96,13 @@
   },
   {
     "path": "docker-compose.yml",
-    "lines": 60,
-    "size": 1439
+    "lines": 77,
+    "size": 1872
   },
   {
     "path": "Dockerfile",
-    "lines": 19,
-    "size": 396
+    "lines": 25,
+    "size": 819
   },
   {
     "path": "graphql/schema.graphql",
@@ -106,8 +111,13 @@
   },
   {
     "path": "package.json",
-    "lines": 40,
-    "size": 1021
+    "lines": 52,
+    "size": 1391
+  },
+  {
+    "path": "prisma/schema.prisma",
+    "lines": 28,
+    "size": 505
   },
   {
     "path": "prisma/seed.ts",
@@ -141,8 +151,8 @@
   },
   {
     "path": "src/main.ts",
-    "lines": 70,
-    "size": 2694
+    "lines": 77,
+    "size": 3162
   },
   {
     "path": "src/middleware/audit.ts",
@@ -160,19 +170,34 @@
     "size": 561
   },
   {
+    "path": "src/queue.ts",
+    "lines": 100,
+    "size": 3810
+  },
+  {
+    "path": "src/repositories/post.repository.ts",
+    "lines": 32,
+    "size": 995
+  },
+  {
+    "path": "src/repositories/user.repository.ts",
+    "lines": 32,
+    "size": 995
+  },
+  {
     "path": "src/resolvers.ts",
     "lines": 26,
     "size": 796
   },
   {
     "path": "src/resolvers/post.ts",
-    "lines": 46,
-    "size": 1429
+    "lines": 47,
+    "size": 1842
   },
   {
     "path": "src/resolvers/user.ts",
     "lines": 47,
-    "size": 1454
+    "size": 1842
   },
   {
     "path": "src/scalars.ts",
@@ -188,6 +213,21 @@
     "path": "src/tracing.ts",
     "lines": 14,
     "size": 650
+  },
+  {
+    "path": "src/validators/post.validator.ts",
+    "lines": 22,
+    "size": 538
+  },
+  {
+    "path": "src/validators/user.validator.ts",
+    "lines": 23,
+    "size": 578
+  },
+  {
+    "path": "src/worker.ts",
+    "lines": 36,
+    "size": 1502
   },
   {
     "path": "tests/api.contract.test.ts",

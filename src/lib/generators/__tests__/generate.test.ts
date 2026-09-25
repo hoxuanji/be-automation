@@ -5,6 +5,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generate } from "../index.ts";
 import { databases, caches, queues, monitoring as monitoringOptions } from "../../../data/stack-options.ts";
+import { DEPLOY_SECRETS } from "../deploy.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SNAPSHOT_DIR = resolve(__dirname, "__snapshots__");
@@ -486,14 +487,13 @@ describe("Stack-option wiring", () => {
   });
 
   it("README only claims tracing/rate limiting where the language implements it", () => {
-    for (const [language, framework] of [["rust", "axum"], ["java", "quarkus"], ["kotlin", "ktor"]]) {
-      const readme = gen({ language, framework }).get("README.md")!;
-      assert.ok(!readme.includes("traces are exported via OTLP"), `${language} README over-claims tracing`);
-      assert.ok(!readme.includes("rate limiting is enabled"), `${language} README over-claims rate limiting`);
+    // Every language implements both, so the README says so and .env.example documents the endpoint.
+    for (const [language, framework] of [["go", "gin"], ["typescript", "express"], ["python", "fastapi"], ["rust", "axum"], ["kotlin", "ktor"], ["java", "spring"], ["java", "quarkus"]]) {
+      const g = gen({ language, framework });
+      assert.ok(g.get("README.md")!.includes("traces are exported via OTLP"), `${language} README should claim tracing`);
+      assert.ok(g.get("README.md")!.includes("rate limiting is enabled"), `${language} README should claim rate limiting`);
+      assert.ok(g.get(".env.example")!.includes("OTEL_EXPORTER_OTLP_ENDPOINT="), `${language}: OTEL endpoint documented`);
     }
-    assert.ok(gen({}).get("README.md")!.includes("traces are exported via OTLP"));
-    assert.ok(gen({}).get(".env.example")!.includes("OTEL_EXPORTER_OTLP_ENDPOINT="));
-    assert.ok(!gen({ language: "rust", framework: "axum" }).get(".env.example")!.includes("OTEL_EXPORTER_OTLP_ENDPOINT"));
   });
 
   it("otel monitoring ships a collector the api exports to", () => {
@@ -577,7 +577,7 @@ describe("Stack-option wiring", () => {
   it("Ktor tests load the application module (otherwise every route 404s)", () => {
     const ktor = gen({ language: "kotlin", framework: "ktor" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
     const app = ktor.get("src/main/kotlin/Application.kt")!;
-    assert.match(app, /fun Application\.module\((jwtVerifier: JWTVerifier\? = null)?\)[\s\S]*routing \{/);
+    assert.match(app, /fun Application\.module\((jwtVerifier: JWTVerifier\? = null)?.*\) \{[\s\S]*routing \{/);
     assert.match(app, /embeddedServer\(Netty, .*module = Application::module\)/);
     const test = ktor.get("src/test/kotlin/UserRouteTest.kt")!;
     assert.equal(test.match(/application \{ testModule\(\) \}/g)?.length, test.match(/testApplication \{/g)?.length);
@@ -686,7 +686,8 @@ describe("Stack-option wiring", () => {
 // REST honored them, so the same builder toggles silently meant nothing.
 
 describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
-  const OFF = { rateLimit: false, audit: false, tracing: false, monitoring: "none" };
+  // auth "none" too: with a provider, protected entity RPCs add an auth interceptor.
+  const OFF = { rateLimit: false, audit: false, tracing: false, monitoring: "none", auth: "none" };
 
   it("Go go.mod requires every external module the grpc/graphql code imports (else `go build` fails)", () => {
     for (const api of ["grpc", "graphql"]) {
@@ -763,7 +764,7 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     assert.ok(main.startsWith(`import "./tracing.js";`), "ESM needs the .js suffix and tracing must load first");
     assert.match(main, /new grpc\.Server\(\{ interceptors \}\)/);
     assert.match(main, /METRICS_PORT/);
-    assert.match(g.get("src/interceptors.ts")!, /\[metrics, rateLimit, audit\]/);
+    assert.match(g.get("src/interceptors.ts")!, /\[metrics, rateLimit, audit, auth\]/);
     const deps = JSON.parse(g.get("package.json")!).dependencies;
     assert.ok(deps["prom-client"] && deps["@opentelemetry/sdk-node"]);
 
@@ -782,7 +783,7 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
 
     const g = gen({ language: "python", framework: "fastapi", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
     const grpcMain = g.get("app/main.py")!;
-    assert.match(grpcMain, /interceptors=\[server_interceptor\(\), MetricsInterceptor\(\), RateLimitInterceptor\(\), AuditInterceptor\(\)\]/);
+    assert.match(grpcMain, /interceptors=\[server_interceptor\(\), MetricsInterceptor\(\), RateLimitInterceptor\(\), AuditInterceptor\(\), AuthInterceptor\(\)\]/);
     assert.match(grpcMain, /start_http_server\(/);
     assert.match(grpcMain, /from test_app\.v1 import service_pb2_grpc/, "stubs are importable from gen/python on PYTHONPATH");
     assert.match(grpcMain, /service_pb2_grpc\.add_UserServiceServicer_to_server/);
@@ -933,7 +934,7 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     assert.match(auth, /if \(jwtVerifier != null\) \{\n\s+verifier\(jwtVerifier\)\n\s+\} else \{[\s\S]*AUTH_JWKS_URL[\s\S]*verifier\(jwkProvider, issuer\)/);
     const support = ktor.get("src/test/kotlin/TestSupport.kt")!;
     assert.match(support, /Algorithm\.RSA256\(/);
-    assert.match(support, /module\(jwtVerifier = TestAuth\.verifier\)/);
+    assert.match(support, /module\(jwtVerifier = TestAuth\.verifier[,)]/);
     // Protected route: 401 without a token, 200 with the signed one.
     const appTest = ktor.get("src/test/kotlin/ApplicationTest.kt")!;
     assert.match(appTest, /client\.request\("\/users"\) \{ method = HttpMethod\.Get \}\n\s+assertEquals\(HttpStatusCode\.Unauthorized/);
@@ -990,5 +991,981 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     assert.match(stubs, /fun `GET users returns 200`/);
     assert.match(stubs, /fun `GET users by id returns 401 without token`/);
     assert.match(contract("ktor", eps, [])!, /fun `GET users search returns 200`/);
+  });
+
+  it("Go queue option is really wired: client, publisher, readiness, worker, go.mod", () => {
+    // Why: a queue picked in the builder used to produce "TODO: publish" stubs, so
+    // send_notification claimed success while nothing was ever sent.
+    const clients: Record<string, string> = {
+      kafka: "github.com/segmentio/kafka-go",
+      rabbitmq: "github.com/rabbitmq/amqp091-go",
+      nats: "github.com/nats-io/nats.go",
+      sqs: "github.com/aws/aws-sdk-go-v2/service/sqs",
+      bullmq: "github.com/redis/go-redis/v9",
+    };
+    assert.deepEqual(Object.keys(clients).sort(), queues.map((q) => q.id).sort(), "every catalog queue has a Go client");
+    const eps = [
+      { id: "n", method: "POST" as const, path: "/notifications", summary: "", auth: false, pattern: "send_notification" },
+      { id: "w", method: "POST" as const, path: "/webhooks/stripe", summary: "", auth: false, pattern: "webhook_receive" },
+    ];
+    for (const framework of FRAMEWORKS.go) {
+      for (const [queue, mod] of Object.entries(clients)) {
+        const { get } = gen({ framework, queue }, eps);
+        const q = get("internal/queue/queue.go")!;
+        assert.ok(q.includes(`"${mod}"`), `${framework}/${queue}: imports ${mod}`);
+        assert.match(q, /Publish\(ctx context\.Context, topic string, msg \[\]byte\) error/);
+        assert.ok(get("go.mod")!.includes(`\t${mod} v`), `${framework}/${queue}: go.mod requires ${mod}`);
+        const api = get("internal/handlers/api.go")!;
+        assert.ok(api.includes("h.mq.Publish(") && api.includes("queue.TopicNotifications") && api.includes("queue.TopicWebhooks"), `${framework}/${queue}: handlers publish`);
+        assert.ok(!/TODO: (enqueue|publish)/.test(api), `${framework}/${queue}: no queue TODOs left`);
+        const server = get("internal/server/server.go")!;
+        assert.match(server, /queue\.Open\(/);
+        assert.match(server, /s\.checks\["queue"\] = q\.Ping/, "queue is part of /health?ready=1");
+        assert.match(server, /return q\.Close\(\)/, "queue closes on shutdown");
+        assert.match(server, /handlers\.NewAPIHandlers\([^)]*\bq\)/);
+        const worker = get("cmd/worker/main.go")!;
+        assert.match(worker, /q\.Subscribe\(ctx, topic,/);
+        assert.match(worker, /signal\.NotifyContext/, "worker shuts down gracefully");
+        assert.ok(get("Dockerfile")!.includes("./cmd/worker"), "the image ships the worker binary");
+      }
+    }
+    // Env names are the ones .env.example already documents.
+    assert.ok(gen({ queue: "kafka" }).get("internal/config/config.go")!.includes('env:"KAFKA_BROKERS"'));
+    assert.ok(gen({ queue: "rabbitmq" }).get("internal/config/config.go")!.includes('env:"RABBITMQ_URL"'));
+    assert.ok(gen({ queue: "nats" }).get("internal/config/config.go")!.includes('env:"NATS_URL"'));
+    // BullMQ is Node-only: the Go side must say so rather than pretend interop.
+    assert.match(gen({ queue: "bullmq" }).get("internal/queue/queue.go")!, /does NOT produce or consume BullMQ jobs/);
+
+    // No queue: nothing emitted, and send_notification refuses instead of lying.
+    const none = gen({ queue: "none" }, eps);
+    assert.equal(none.get("internal/queue/queue.go"), undefined);
+    assert.equal(none.get("cmd/worker/main.go"), undefined);
+    const api = none.get("internal/handlers/api.go")!;
+    assert.ok(api.includes('"queue_not_configured"') && !api.includes(`"queued": true`));
+    assert.ok(!none.get("go.mod")!.includes("kafka-go") && !none.get("Dockerfile")!.includes("worker"));
+  });
+
+  // ─── Rust parity: tracing / rateLimit / audit / monitoring / cache / queues ───
+
+  const RUST_QUEUES = ["rabbitmq", "kafka", "nats", "sqs", "bullmq"];
+
+  it("Rust Cargo.toml declares every external crate the generated src/ references (else `cargo check` fails)", () => {
+    const local = new Set(["std", "core", "alloc", "crate", "self", "super"]);
+    for (const framework of ["axum", "actix"]) {
+      for (const queue of RUST_QUEUES) {
+        for (const monitoring of ["grafana", "sentry", "datadog", "otel"]) {
+          for (const database of ["postgres", "mysql"]) {
+            const { files, get } = gen({ language: "rust", framework, queue, monitoring, database }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+            const deps = new Set([...get("Cargo.toml")!.split("[dev-dependencies]")[0].matchAll(/^([\w-]+) = /gm)].map((m) => m[1].replace(/-/g, "_")));
+            const rs = files.filter((f) => f.path.startsWith("src/") && f.path.endsWith(".rs"));
+            const code = rs.map((f) => f.content.replace(/\/\/.*$/gm, "")).join("\n");
+            const mods = new Set([...code.matchAll(/^mod (\w+);/gm)].map((m) => m[1]));
+            const imported = new Set([...code.matchAll(/^\s*use [^;]+;/gm)].flatMap((m) => m[0].match(/\w+/g)!));
+            for (const [, root] of code.matchAll(/(?<![\w:.])([a-z_][a-z0-9_]*)::(?!<)/g)) {
+              if (local.has(root) || mods.has(root) || imported.has(root)) continue;
+              assert.ok(deps.has(root), `${framework}/${queue}/${monitoring}/${database}: src uses ${root}:: but Cargo.toml lacks it`);
+            }
+            for (const [, root] of code.matchAll(/^use (\w+)::/gm)) {
+              assert.ok(local.has(root) || mods.has(root) || deps.has(root), `${framework}/${queue}: use ${root}:: without a Cargo dependency`);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it("Rust wires tracing, rate limiting, audit and Sentry only when chosen", () => {
+    for (const framework of ["axum", "actix"]) {
+      const on = gen({ language: "rust", framework, monitoring: "sentry" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const main = on.get("src/main.rs")!;
+      const cargo = on.get("Cargo.toml")!;
+      // OTLP exporter only when the endpoint env var is set, so a bare `cargo run` doesn't spam export errors.
+      assert.match(on.get("src/telemetry.rs")!, /env::var\("OTEL_EXPORTER_OTLP_ENDPOINT"\)[\s\S]*SpanExporter::builder\(\)\s*\.with_http\(\)/);
+      assert.match(main, /telemetry::init\(\)[\s\S]*provider\.shutdown\(\)/, `${framework}: spans must be flushed on exit`);
+      assert.match(main, framework === "axum" ? /TraceLayer::new_for_http\(\)/ : /tracing_actix_web::TracingLogger/);
+      assert.match(main, framework === "axum" ? /GovernorLayer/ : /actix_governor::Governor::new/);
+      assert.match(main, framework === "axum" ? /sentry_tower::NewSentryLayer/ : /sentry_actix::Sentry::new\(\)/);
+      assert.match(main, /env::var\("SENTRY_DSN"\)/);
+      assert.match(main, /target: "audit", method = %method, path = %path, status = [^,]+, ip = %ip/);
+      for (const crate of ["opentelemetry-otlp", "tracing-opentelemetry", "sentry"]) assert.ok(cargo.includes(`\n${crate} = `), `${framework}: ${crate}`);
+
+      const off = gen({ language: "rust", framework, ...OFF, cache: "none", queue: "none" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const offMain = off.get("src/main.rs")!;
+      assert.ok(!off.get("src/telemetry.rs") && !off.get("src/cache.rs") && !off.get("src/queue.rs") && !off.get("src/bin/worker.rs"));
+      assert.doesNotMatch(offMain, /governor|audit|sentry|telemetry|cache::|queue::/i);
+      assert.doesNotMatch(off.get("Cargo.toml")!, /opentelemetry|governor|sentry|redis|lapin|default-run/);
+    }
+  });
+
+  it("Rust axum serves with ConnectInfo whenever the rate limiter or audit log needs the client IP", () => {
+    // Without it the ConnectInfo extractor / peer-IP key extractor fail every request at runtime.
+    for (const [rateLimit, audit] of [[true, false], [false, true], [true, true]]) {
+      const main = gen({ language: "rust", framework: "axum", rateLimit, audit }).get("src/main.rs")!;
+      assert.match(main, /axum::serve\(listener, app\.into_make_service_with_connect_info::<std::net::SocketAddr>\(\)\)/);
+    }
+    assert.match(gen({ language: "rust", framework: "axum", rateLimit: false, audit: false }).get("src/main.rs")!, /axum::serve\(listener, app\)/);
+  });
+
+  it("Rust datadog / otel monitoring export traces over OTLP even with the tracing flag off", () => {
+    const dd = gen({ language: "rust", framework: "axum", tracing: false, monitoring: "datadog" });
+    assert.match(dd.get("src/telemetry.rs")!, /Datadog Agent[\s\S]*OTEL_EXPORTER_OTLP_ENDPOINT/, "the Datadog route must be documented");
+    assert.ok(gen({ language: "rust", framework: "actix", tracing: false, monitoring: "otel" }).get("src/telemetry.rs"));
+    assert.ok(!gen({ language: "rust", framework: "axum", tracing: false, monitoring: "grafana" }).get("src/telemetry.rs"));
+  });
+
+  it("Rust Redis cache: cache-aside entity reads, invalidation on writes, readiness pings Redis", () => {
+    for (const framework of ["axum", "actix"]) {
+      for (const database of ["postgres", "mysql"]) {
+        const g = gen({ language: "rust", framework, database, cache: "redis" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+        assert.match(g.get("src/cache.rs")!, /env::var\("REDIS_URL"\)[\s\S]*get_connection_manager/);
+        const handler = g.get("src/handlers/user.rs")!;
+        const getById = handler.slice(handler.indexOf("async fn get_by_id"), handler.indexOf("async fn create"));
+        // The cache is consulted before the database and populated after a miss.
+        assert.ok(getById.indexOf("cache::get::<User>") < getById.indexOf("SELECT") && getById.indexOf("SELECT") < getById.indexOf("cache::set"), `${framework}/${database}: cache-aside order`);
+        // Stale reads after a write are a correctness bug: update and delete must drop the key.
+        for (const fn of ["async fn update", "async fn delete"]) {
+          const body = handler.slice(handler.indexOf(fn));
+          assert.match(body.slice(0, body.indexOf("\n}\n")), /cache::del\(&cache_key\)/, `${framework}/${database}: ${fn} invalidates`);
+        }
+        assert.match(g.get("src/main.rs")!, /ready=1[\s\S]*cache::ping\(\)/);
+      }
+      // No database → in-memory store; caching it would only add a network hop.
+      const mem = gen({ language: "rust", framework, database: "mongodb", cache: "redis" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      assert.doesNotMatch(mem.get("src/handlers/user.rs")!, /cache::/);
+      assert.ok(!gen({ language: "rust", framework, cache: "memcached" }).get("src/cache.rs"));
+    }
+  });
+
+  it("Rust queues: a worker binary consumes the env var the repo configures, and send_notification publishes", () => {
+    const envVar: Record<string, string> = { rabbitmq: "RABBITMQ_URL", kafka: "KAFKA_BROKERS", nats: "NATS_URL", sqs: "AWS_ENDPOINT_URL_SQS", bullmq: "REDIS_URL" };
+    const eps = [...SAMPLE_ENDPOINTS, { id: "n", method: "POST" as const, path: "/notifications", summary: "", auth: true, pattern: "send_notification" }];
+    for (const framework of ["axum", "actix"]) {
+      for (const queue of RUST_QUEUES) {
+        const g = gen({ language: "rust", framework, queue, cache: "none" }, eps, SAMPLE_ENTITIES);
+        const q = g.get("src/queue.rs")!;
+        assert.ok(q.includes(`env::var("${envVar[queue]}")`), `${framework}/${queue}: queue.rs must read ${envVar[queue]}`);
+        assert.ok(g.get(".env.example")!.includes(`${envVar[queue]}=`), `${queue}: .env.example must define ${envVar[queue]}`);
+        assert.match(q, /pub async fn publish\(/);
+        assert.match(q, /pub async fn consume<F: Fn\(&\[u8\]\)>\(handle: F, shutdown: impl Future<Output = \(\)>\)/);
+        const worker = g.get("src/bin/worker.rs")!;
+        assert.match(worker, /#\[path = "\.\.\/queue\.rs"\]\s*mod queue;/);
+        assert.match(worker, /queue::consume\(handle, shutdown_signal\(\)\)/, "worker must stop on SIGTERM");
+        // Two binaries: `cargo run` must still start the API, and the image must ship the worker.
+        assert.match(g.get("Cargo.toml")!, /default-run = "test_app"/);
+        assert.match(g.get("Dockerfile")!, /target\/release\/worker \/worker/);
+        // Entities exist, yet the publishing endpoint is still served (stubs are skipped with entities).
+        const main = g.get("src/main.rs")!;
+        assert.match(main, /"\/notifications", (axum::routing::post|web::post\(\)\.to)\(send_notification\)/);
+        assert.match(main, /queue::publish\(/);
+      }
+    }
+    assert.match(gen({ language: "rust", framework: "axum", queue: "bullmq" }).get("src/queue.rs")!, /does NOT speak\s*\/\/! BullMQ's format/, "the BullMQ limitation must be stated");
+    const none = gen({ language: "rust", framework: "axum", queue: "none" }, eps, SAMPLE_ENTITIES).get("src/main.rs")!;
+    assert.doesNotMatch(none, /send_notification|\/notifications/);
+  });
+});
+
+// One-click deploy sets DEPLOY_SECRETS as repo secrets and dispatches
+// .github/workflows/deploy.yml, so each target must ship a live (not
+// commented-out) deploy job that reads exactly those secrets.
+describe("Every deployment target gets a real CI deploy job", () => {
+  const ACTION: Record<string, RegExp> = {
+    fly: /flyctl deploy --remote-only --app test-app --image-label "\$GITHUB_SHA"/,
+    railway: /railway up --ci --service "\$RAILWAY_SERVICE_ID"/,
+    render: /api\.render\.com\/v1\/services\/\$RENDER_SERVICE_ID\/deploys/,
+    vercel: /vercel deploy --prebuilt --prod/,
+    aws: /uses: aws-actions\/amazon-ecs-deploy-task-definition@v2/,
+    gcp: /uses: google-github-actions\/deploy-cloudrun@v2/,
+    azure: /uses: azure\/container-apps-deploy-action@v2/,
+    k8s: /kubectl rollout status deployment\/test-app/,
+  };
+  const uncommented = (s: string) => s.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+
+  for (const [deployment, action] of Object.entries(ACTION)) {
+    it(`${deployment}: deploy.yml runs after tests on push + dispatch, with the documented secrets`, () => {
+      const lang = deployment === "vercel" ? { language: "typescript", framework: "express" } : {};
+      const { get } = gen({ deployment, ...lang });
+      const wf = get(".github/workflows/deploy.yml");
+      assert.ok(wf, "deploy.yml is the fixed path one-click deploy dispatches");
+      const live = uncommented(wf);
+      assert.match(live, /workflow_dispatch:/);
+      assert.match(live, /push:\n    branches: \[main\]/);
+      assert.match(live, /\n  deploy:\n    name: .*\n    needs: test\n/);
+      assert.match(live, action, "deploy step must be live, not a comment");
+      const guide = get("DEPLOY.md")!;
+      for (const s of DEPLOY_SECRETS[deployment as keyof typeof DEPLOY_SECRETS]) {
+        assert.ok(live.includes(`secrets.${s.name} }}`), `${s.name} referenced by the workflow`);
+        assert.ok(guide.includes(`\`${s.name}\``), `${s.name} documented in DEPLOY.md`);
+      }
+      assert.ok(!/(docker (build|push)|IMAGE=|imageToDeploy|image\.tag)[^\n]*:latest/.test(live), "deployed images are tagged with the git SHA, never :latest");
+      // Railway and Vercel build from uploaded source, so there is no image tag to pin.
+      if (deployment !== "railway" && deployment !== "vercel") assert.match(live, /GITHUB_SHA|github\.sha/);
+    });
+  }
+
+  it("ci.yml no longer carries a placeholder deploy job", () => {
+    for (const deployment of Object.keys(ACTION)) {
+      const ci = gen({ deployment }).get(".github/workflows/ci.yml")!;
+      assert.ok(!/\n  deploy:/.test(ci) && !/Add your deployment step/.test(ci), deployment);
+    }
+  });
+
+  it("GitLab and CircleCI get a live deploy job for every target", () => {
+    for (const deployment of Object.keys(ACTION)) {
+      const ts = { deployment, language: "typescript", framework: "express" };
+      const gl = gen({ ...ts, cicd: "gitlab-ci" }).get(".gitlab-ci.yml")!;
+      assert.match(gl, /\ndeploy:\n  stage: deploy\n/, `${deployment} gitlab`);
+      assert.match(gl, /stages: \[.*deploy\]/);
+      const cc = gen({ ...ts, cicd: "circleci" }).get(".circleci/config.yml")!;
+      assert.match(cc, /\n  deploy:\n    docker:/, `${deployment} circleci`);
+      assert.match(cc, /- deploy:\n          requires: \[test\]/);
+    }
+  });
+
+  it("Vercel fails fast (and DEPLOY.md warns) for stacks Vercel can't run", () => {
+    const { get } = gen({ deployment: "vercel", language: "go", framework: "gin" });
+    assert.match(get(".github/workflows/deploy.yml")!, /Vercel cannot run a go\/gin server[^\n]*exit 1/);
+    assert.ok(!get(".github/workflows/deploy.yml")!.includes("vercel deploy"));
+    assert.match(get("DEPLOY.md")!, /cannot run on Vercel/);
+  });
+
+  it("provider regions are translated from the AWS-style picker ids", () => {
+    assert.match(gen({ deployment: "gcp", region: "eu-west-2" }).get("deploy/gcp/service.yaml")!, /location: europe-west2/);
+    assert.match(gen({ deployment: "azure", region: "eu-west-2" }).get("deploy/azure/containerapp.yaml")!, /^location: uksouth$/m);
+    assert.match(gen({ deployment: "fly", region: "eu-west-2" }).get("fly.toml")!, /primary_region = "lhr"/);
+  });
+
+  it("k8s target ships something to apply even with the Kubernetes toggle off", () => {
+    assert.ok(gen({ deployment: "k8s", kubernetes: false, helm: false }).get("deploy/k8s/deployment.yaml"));
+    const helmOnly = gen({ deployment: "k8s", kubernetes: false, helm: true }).get(".github/workflows/deploy.yml")!;
+    assert.match(helmOnly, /helm upgrade --install test-app \.\/deploy\/helm[^\n]*--set image\.tag="\$SHA"/);
+  });
+
+  // The Queue tab must produce a working broker client in TS repos — not a TODO.
+  const TS_QUEUE_CLIENT: Record<string, { dep: string; env: string | null }> = {
+    kafka: { dep: "kafkajs", env: "KAFKA_BROKERS" },
+    rabbitmq: { dep: "amqplib", env: "RABBITMQ_URL" },
+    nats: { dep: "nats", env: "NATS_URL" },
+    sqs: { dep: "@aws-sdk/client-sqs", env: null }, // endpoint override via AWS_ENDPOINT_URL_SQS, read by the SDK itself
+    bullmq: { dep: "bullmq", env: "REDIS_URL" },
+  };
+  const QUEUE_ENDPOINTS = [
+    { id: "n", method: "POST" as const, path: "/notifications", summary: "", auth: false, pattern: "send_notification" },
+    { id: "w", method: "POST" as const, path: "/webhooks/stripe", summary: "", auth: false, pattern: "webhook_receive" },
+    { id: "h", method: "GET" as const, path: "/healthz", summary: "", auth: false, pattern: "health_check" },
+  ];
+  const TS_FRAMEWORKS = ["express", "fastify", "hono", "nestjs"];
+  const tsRouteFile = (fw: string) => (fw === "nestjs" ? "src/app.controller.ts" : "src/main.ts");
+
+  it("TS queue: each queue id ships its real client, a worker entrypoint, and reads the env var the repo documents", () => {
+    assert.deepEqual(Object.keys(TS_QUEUE_CLIENT).sort(), queues.map((q) => q.id).sort(), "every catalog queue is covered");
+    const allClients = Object.values(TS_QUEUE_CLIENT).map((c) => c.dep);
+    for (const [queue, { dep, env }] of Object.entries(TS_QUEUE_CLIENT)) {
+      for (const framework of TS_FRAMEWORKS) {
+        const r = gen({ language: "typescript", framework, queue, auth: "none" }, QUEUE_ENDPOINTS);
+        const label = `${framework}/${queue}`;
+        const pkg = JSON.parse(r.get("package.json")!);
+        assert.ok(pkg.dependencies[dep], `${label}: ${dep} in dependencies`);
+        for (const other of allClients.filter((d) => d !== dep)) assert.ok(!pkg.dependencies[other], `${label}: no unused ${other}`);
+        const queueTs = r.get("src/queue.ts");
+        assert.ok(queueTs?.includes(`from "${dep}"`), `${label}: src/queue.ts uses ${dep}`);
+        // docker compose runs the worker via this script / dist/worker.js.
+        assert.ok(r.get("src/worker.ts")?.includes("subscribe(TOPICS.notifications"), `${label}: worker consumes notifications`);
+        assert.equal(pkg.scripts.worker, "node dist/worker.js");
+        if (env) {
+          assert.ok(queueTs!.includes(`process.env.${env}`), `${label}: reads ${env}`);
+          assert.match(r.get(".env.example")!, new RegExp(`^${env}=`, "m"), `${label}: ${env} is the name .env.example documents`);
+        }
+      }
+    }
+  });
+
+  it("TS queue: send_notification and webhook_receive publish for real, readiness pings the broker, shutdown closes it", () => {
+    for (const framework of TS_FRAMEWORKS) {
+      const r = gen({ language: "typescript", framework, queue: "rabbitmq", auth: "none" }, QUEUE_ENDPOINTS);
+      const routes = r.get(tsRouteFile(framework))!;
+      assert.match(routes, /await publish\(TOPICS\.notifications, \{ recipient, channel, template, payload \}\)/, framework);
+      assert.match(routes, /await publish\(TOPICS\.webhooks,/, framework);
+      assert.ok(!/TODO: (enqueue|publish)/.test(routes), `${framework}: no queue TODOs left`);
+      // A broker outage is a 503 (retryable), not a fake success.
+      assert.match(routes, /queue_unavailable/, framework);
+      assert.match(routes, /checks\.queue = "ok"/, `${framework}: health_check pattern includes the queue`);
+      assert.match(routes, /await queuePing\(\)/, `${framework}: /health?ready=1 pings the queue`);
+      const shutdownFile = framework === "nestjs" ? routes : r.get("src/main.ts")!;
+      assert.match(shutdownFile, /closeQueue\(\)/, `${framework}: queue closed on shutdown`);
+    }
+  });
+
+  it("TS queue: without a queue, publishing patterns answer 503 instead of pretending to enqueue", () => {
+    for (const framework of TS_FRAMEWORKS) {
+      const r = gen({ language: "typescript", framework, queue: "none", auth: "none" }, QUEUE_ENDPOINTS);
+      const routes = r.get(tsRouteFile(framework))!;
+      assert.ok(!r.get("src/queue.ts") && !r.get("src/worker.ts"), `${framework}: no queue files`);
+      assert.ok(!routes.includes("./queue"), `${framework}: no queue import`);
+      assert.equal(routes.match(/503[^\n]*queue_not_configured|queue_not_configured[^\n]*503/g)?.length, 2, `${framework}: both publishing patterns 503`);
+      assert.ok(!JSON.parse(r.get("package.json")!).scripts.worker);
+    }
+  });
+
+  // ─── Kotlin parity: tracing / rate limit / audit / monitoring / cache / queues ──
+
+  const kt = (framework: string, overrides: Record<string, unknown> = {}, entities: typeof SAMPLE_ENTITIES = SAMPLE_ENTITIES) => {
+    const g = gen({ language: "kotlin", framework, ...overrides }, SAMPLE_ENDPOINTS, entities);
+    const find = (suffix: string) => g.files.find((f) => f.path.endsWith(suffix))?.content;
+    return { ...g, find };
+  };
+
+  it("Kotlin wires tracing, rate limiting and audit into the running app, and emits nothing when the flags are off", () => {
+    const ktor = kt("ktor");
+    const app = ktor.get("src/main/kotlin/Application.kt")!;
+    for (const call of ["configureTracing()", "configureRateLimit()", "configureAudit()"]) assert.ok(app.includes(call), `ktor module() must call ${call}`);
+    const obs = ktor.get("src/main/kotlin/Observability.kt")!;
+    // No collector configured must mean no exporter (and no startup failure), not a crash.
+    assert.match(obs, /OTEL_EXPORTER_OTLP_ENDPOINT"\)\?\.takeIf \{ it\.isNotBlank\(\) \} \?: return/);
+    assert.match(obs, /install\(KtorServerTracing\)/);
+    assert.match(obs, /install\(RateLimit\)[\s\S]*requestKey \{ call -> call\.request\.origin\.remoteHost \}/);
+    assert.match(obs, /call\.principal<JWTPrincipal>\(\)\?\.subject/, "audit lines name the caller when auth is on");
+    const gradle = ktor.get("build.gradle.kts")!;
+    assert.ok(gradle.includes("opentelemetry-ktor-2.0") && gradle.includes("ktor-server-rate-limit"));
+
+    const spring = kt("spring-kt");
+    assert.ok(spring.find("/Observability.kt")!.includes("class RateLimitFilter") && spring.find("/Observability.kt")!.includes("class AuditFilter"));
+    assert.match(spring.find("/Observability.kt")!, /@ConditionalOnExpression\("'\\\$\{OTEL_EXPORTER_OTLP_ENDPOINT:\}' != ''"\)/);
+    assert.ok(spring.get("build.gradle.kts")!.includes("micrometer-tracing-bridge-otel") && spring.get("build.gradle.kts")!.includes("bucket4j-core"));
+    // A shared MockMvc context would otherwise trip the limiter across test classes.
+    assert.match(spring.get("src/test/resources/application-test.properties")!, /rate-limit\.requests-per-minute=100000/);
+
+    const off = { tracing: false, rateLimit: false, audit: false };
+    assert.ok(!kt("ktor", off).get("src/main/kotlin/Observability.kt"), "no plugin code without the flags");
+    assert.ok(!kt("ktor", off).get("build.gradle.kts")!.includes("opentelemetry"));
+    assert.ok(!kt("spring-kt", off).find("/Observability.kt"));
+  });
+
+  it("Kotlin Sentry / Datadog get their SDK wired, disabled when the key is unset", () => {
+    const ktSentry = kt("ktor", { monitoring: "sentry" });
+    assert.ok(ktSentry.get("build.gradle.kts")!.includes('"io.sentry:sentry:'));
+    assert.match(ktSentry.get("src/main/kotlin/Observability.kt")!, /SENTRY_DSN[\s\S]*Sentry\.captureException\(e\)/);
+    assert.ok(ktSentry.get("src/main/kotlin/Application.kt")!.includes("configureSentry()"));
+    const ktDd = kt("ktor", { monitoring: "datadog" });
+    assert.ok(ktDd.get("build.gradle.kts")!.includes("micrometer-registry-datadog"));
+    assert.match(ktDd.get("src/main/kotlin/Observability.kt")!, /DD_API_KEY[\s\S]*DatadogMeterRegistry/);
+
+    const spSentry = kt("spring-kt", { monitoring: "sentry" });
+    assert.ok(spSentry.get("build.gradle.kts")!.includes("sentry-spring-boot-starter-jakarta"));
+    assert.match(spSentry.get("src/main/resources/application.properties")!, /sentry\.dsn=\$\{SENTRY_DSN:\}/);
+    const spDd = kt("spring-kt", { monitoring: "datadog" });
+    assert.match(spDd.get("src/main/resources/application.properties")!, /management\.datadog\.metrics\.export\.api-key=\$\{DD_API_KEY:\}/);
+    assert.match(spDd.get("src/test/resources/application-test.properties")!, /management\.datadog\.metrics\.export\.enabled=false/);
+  });
+
+  it("Kotlin queues use the broker's real client, read the env var .env.example documents, and tests never connect", () => {
+    const cases: [string, string, string, string][] = [
+      ["kafka", "org.apache.kafka:kafka-clients", "org.springframework.kafka:spring-kafka", "KAFKA_BROKERS"],
+      ["rabbitmq", "com.rabbitmq:amqp-client", "spring-boot-starter-amqp", "RABBITMQ_URL"],
+      ["nats", "io.nats:jnats", "io.nats:jnats", "NATS_URL"],
+      ["sqs", "software.amazon.awssdk:sqs", "spring-cloud-aws-starter-sqs", "AWS_ENDPOINT_URL_SQS"],
+      ["bullmq", "io.lettuce:lettuce-core", "spring-boot-starter-data-redis", "REDIS_URL"],
+    ];
+    for (const [queue, ktorDep, springDep, env] of cases) {
+      const ktor = kt("ktor", { queue, cache: "memcached" });
+      assert.ok(ktor.get("build.gradle.kts")!.includes(ktorDep), `${queue}: ktor dep`);
+      const q = ktor.get("src/main/kotlin/Queue.kt")!;
+      assert.ok(q.includes(`System.getenv("${env}")`), `${queue}: ktor reads ${env}`);
+      assert.ok(ktor.get(".env.example")!.includes(`${env}=`), `${queue}: ${env} is documented in .env.example`);
+      // Consumer runs in the API process and as a standalone worker.
+      assert.match(ktor.get("src/main/kotlin/Application.kt")!, /launchConsumer\(queue\)/);
+      assert.match(ktor.get("src/main/kotlin/Worker.kt")!, /object Worker \{[\s\S]*@JvmStatic\s+fun main/);
+      assert.ok(ktor.get("build.gradle.kts")!.includes('tasks.register<JavaExec>("worker")'));
+      assert.match(ktor.get("src/test/kotlin/TestSupport.kt")!, /module\([^)]*queue = TestQueue\)/, `${queue}: ktor tests inject the fake`);
+      // Entity writes are events.
+      assert.match(ktor.get("src/main/kotlin/routes/userRoutes.kt")!, /queue\.publish\("""\{"event":"user\.created"/);
+
+      const spring = kt("spring-kt", { queue, cache: "memcached" });
+      assert.ok(spring.get("build.gradle.kts")!.includes(springDep), `${queue}: spring dep`);
+      const sq = spring.find("/Queue.kt")!;
+      assert.match(sq, /@Component\n@Profile\("!test"\)\nclass \w+Jobs/, `${queue}: real broker bean is off in the test profile`);
+      assert.ok(spring.find("/InMemoryJobPublisher.kt")!.includes('@Profile("test")'));
+      assert.ok(spring.get("src/main/resources/application.properties")!.includes(`\${${env}:`), `${queue}: spring reads ${env}`);
+      assert.ok(spring.find("/UserController.kt")!.includes("jobs.publish("));
+    }
+    // BullMQ has no JVM client: say so instead of pretending.
+    assert.match(kt("ktor", { queue: "bullmq" }).get("src/main/kotlin/Queue.kt")!, /NOT wire-compatible with BullMQ/);
+    assert.match(kt("spring-kt", { queue: "sqs" }).get("src/test/resources/application-test.properties")!, /spring\.cloud\.aws\.sqs\.enabled=false/);
+    assert.ok(!kt("ktor", { queue: "none" }).get("src/main/kotlin/Queue.kt"));
+  });
+
+  it("Kotlin Redis cache is cache-aside on get-by-id and evicted on writes; memcached emits no Redis code", () => {
+    const routes = kt("ktor").get("src/main/kotlin/routes/userRoutes.kt")!;
+    assert.match(routes, /cache\.get\("users:\$id"\)\?\.let \{ return@get call\.respondText/, "a hit returns before the DB read");
+    assert.match(routes, /cache\.set\("users:\$id", Json\.encodeToString\(item\)\)/);
+    assert.equal(routes.match(/cache\.delete\("users:\$id"\)/g)?.length, 2, "update and delete evict");
+    assert.ok(kt("ktor").get("src/main/kotlin/Cache.kt")!.includes('System.getenv("REDIS_URL")'));
+    assert.match(kt("ktor").get("src/test/kotlin/TestSupport.kt")!, /cache = TestCache/);
+
+    const spring = kt("spring-kt");
+    const repo = spring.find("/UserRepository.kt")!;
+    assert.match(repo, /@Cacheable\("users", key = "#p0", unless = "#result == null"\)\n\s+override fun findById/);
+    assert.match(repo, /@CacheEvict\("users", key = "#p0\.id", condition = "#p0\.id != null"\)\n\s+override fun <S : User> save/);
+    assert.match(spring.find("/User.kt")!, /\) : java\.io\.Serializable/, "the Redis cache serializes entities");
+    const testProps = spring.get("src/test/resources/application-test.properties")!;
+    assert.match(testProps, /spring\.cache\.type=simple/);
+    assert.match(testProps, /spring\.autoconfigure\.exclude=.*RedisAutoConfiguration/);
+
+    for (const framework of ["ktor", "spring-kt"]) {
+      const g = kt(framework, { cache: "memcached", queue: "none" });
+      assert.ok(!g.get("build.gradle.kts")!.includes("lettuce") && !g.get("build.gradle.kts")!.includes("data-redis"), framework);
+    }
+  });
+
+  it("Kotlin /health?ready=1 checks every dependency; Ktor tests prove limits, events and caching", () => {
+    const app = kt("ktor").get("src/main/kotlin/Application.kt")!;
+    assert.match(app, /mapOf\("db" to dbReady\(\), "cache" to cache\.ping\(\), "queue" to queue\.ping\(\)\)/);
+    assert.match(app, /HttpStatusCode\.ServiceUnavailable/);
+    // spring-kt permitted /health in SecurityConfig but nothing served it.
+    const health = kt("spring-kt").find("/HealthController.kt")!;
+    assert.match(health, /@GetMapping\("\/health"\)/);
+    assert.match(health, /"queue" to jobs\.ping\(\)/);
+    assert.ok(kt("spring-kt").find("/HealthTest.kt")!.includes('param("ready", "1")'));
+
+    const test = kt("ktor").get("src/test/kotlin/ApplicationTest.kt")!;
+    assert.match(test, /repeat\(60\)[\s\S]*HttpStatusCode\.TooManyRequests/);
+    assert.match(test, /TestQueue\.published\.any/);
+    assert.match(test, /assertNotNull\(TestCache\.get\("users:\$id"\)/);
+  });
+
+  // gRPC entity RPCs used to answer UNIMPLEMENTED: a "working" server that
+  // stored nothing. They must run on the same data layer as the REST routes.
+  it("gRPC entity RPCs are backed by the REST data layer, never UNIMPLEMENTED", () => {
+    const cases: [string, string, string, string, RegExp][] = [
+      ["go", "gin", "postgres", "internal/grpcserver/user_service.go", /s\.db\.WithContext\(ctx\)\.First\(&m, "id = \?"/],
+      ["go", "chi", "mongodb", "internal/grpcserver/user_service.go", /s\.store\.Create\(ctx, userCollection/],
+      ["typescript", "fastify", "postgres", "src/services/user.service.ts", /prisma\.user\.create\(\{ data: createData/],
+      ["typescript", "express", "mongodb", "src/services/user.service.ts", /prisma\.user\.findMany/],
+      ["python", "fastapi", "postgres", "app/services/user.py", /with SessionLocal\(\) as db:/],
+      ["python", "fastapi", "mongodb", "app/services/user.py", /_rows\[str\(item\.id\)\] = item/],
+    ];
+    for (const [language, framework, database, path, dbCall] of cases) {
+      const g = gen({ language, framework, database, api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const svc = g.get(path)!;
+      const label = `${language}/${database}`;
+      assert.ok(svc, `${label}: missing ${path}`);
+      assert.doesNotMatch(svc, /not implemented|codes\.Unimplemented|status\.UNIMPLEMENTED|StatusCode\.UNIMPLEMENTED/i, `${label}: entity RPCs must not be stubs`);
+      assert.match(svc, dbCall, `${label}: RPCs must hit the data layer`);
+      for (const code of [/NotFound|NOT_FOUND|"P2025"/, /InvalidArgument|INVALID_ARGUMENT|invalid\(/]) {
+        assert.match(svc + (g.get("internal/grpcserver/server.go") ?? "") + (g.get("src/services/grpc-util.ts") ?? ""), code, `${label}: ${code}`);
+      }
+    }
+    // Unique violations are ALREADY_EXISTS wherever the database enforces them.
+    assert.match(gen({ api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("internal/grpcserver/server.go")!, /codes\.AlreadyExists/);
+    assert.match(gen({ language: "typescript", framework: "fastify", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("src/services/grpc-util.ts")!, /"P2002"[\s\S]*ALREADY_EXISTS/);
+    assert.match(gen({ language: "python", framework: "fastapi", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("app/services/user.py")!, /except IntegrityError:[\s\S]*ALREADY_EXISTS/);
+  });
+
+  it("gRPC reuses the REST models / db / auth files verbatim, so both protocols share one schema", () => {
+    const rest = gen({ api: "rest" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const grpc = gen({ api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    for (const p of ["internal/models/models.go", "internal/db/gorm.go", "internal/auth/jwt.go", "internal/config/config.go"]) {
+      assert.equal(grpc.get(p), rest.get(p), p);
+    }
+    assert.match(grpc.get("cmd/api/main.go")!, /db\.OpenGorm\(cfg\.DatabaseURL\)[\s\S]*grpcserver\.NewUserService\(gormDB\)/);
+    const py = gen({ language: "python", framework: "fastapi", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const pyRest = gen({ language: "python", framework: "fastapi", api: "rest" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.equal(py.get("app/models.py"), pyRest.get("app/models.py"));
+    assert.equal(py.get("app/db.py"), pyRest.get("app/db.py"));
+    assert.match(py.get("pyproject.toml")!, /psycopg2-binary/, "app/db.py's sync engine needs the sync driver");
+    assert.ok(!py.get("app/auth.py")!.includes("def auth_required"), "gRPC keeps only the token verifier");
+  });
+
+  it("gRPC auth interceptor guards exactly the RPCs whose REST routes require auth", () => {
+    // SAMPLE_ENDPOINTS protect GET/POST /users and GET/DELETE /users/:id; no PUT/PATCH, nothing on /posts.
+    const want = ["ListUser", "GetUser", "CreateUser", "DeleteUser"];
+    const go = gen({ api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("internal/grpcserver/interceptors.go")!;
+    const ts = gen({ language: "typescript", framework: "fastify", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("src/interceptors.ts")!;
+    const py = gen({ language: "python", framework: "fastapi", api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("app/interceptors.py")!;
+    for (const [lang, src] of [["go", go], ["ts", ts], ["py", py]]) {
+      const guarded = [...src.matchAll(/"\/test_app\.v1\.(\w+)Service\/(\w+)"/g)].map((m) => m[2]);
+      assert.deepEqual(guarded, want, `${lang}: guarded RPCs`);
+      assert.match(src, /authorization/i, `${lang}: reads the authorization metadata`);
+      assert.match(src, /UNAUTHENTICATED|Unauthenticated/, `${lang}: rejects with UNAUTHENTICATED`);
+    }
+    assert.match(go, /auth\.ExtractBearer\(h\)[\s\S]*auth\.Default\(\)[\s\S]*v\.Verify\(ctx, raw\)/, "same verifier as REST");
+    assert.match(ts, /import \{ unconfigured, verify \} from "\.\/auth\.js"/);
+    assert.match(py, /from app\.auth import _verify/);
+
+    // No provider and no auth_* patterns: REST verifies nothing, so neither does gRPC.
+    const open = gen({ api: "grpc", auth: "none" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.ok(!open.get("internal/grpcserver/interceptors.go")?.includes("func Auth()"));
+    assert.ok(!open.get("internal/auth/jwt.go"));
+  });
+
+  it("gRPC proto declares each field once, so buf / protoc accept it", () => {
+    // An entity that models createdAt itself used to get a second created_at = 90.
+    const proto = gen({ api: "grpc" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).files.find((f) => f.path.endsWith("service.proto"))!.content;
+    for (const [, name, body] of proto.matchAll(/message (\w+) \{\n([\s\S]*?)\n\}/g)) {
+      const fields = [...body.matchAll(/^\s+[\w.]+ (\w+) = \d+;/gm)].map((m) => m[1]);
+      assert.equal(new Set(fields).size, fields.length, `${name}: duplicate field in ${fields}`);
+    }
+    assert.match(proto, /message Post \{[\s\S]*created_at = 90;[\s\S]*updated_at = 91;/, "entities without timestamps still get the server-managed ones");
+    assert.match(proto, /uint32 page = 1;[^\n]*\n\s+uint32 page_size = 2;/);
+  });
+
+  // GraphQL resolvers used to keep entities in sync.Map / Map / dict, so data
+  // vanished on restart even with Postgres configured. They must go through
+  // the same DB layer as the REST handlers.
+  it("GraphQL resolvers persist through the REST DB layer, not an in-memory store", () => {
+    for (const framework of ["gin", "fiber", "echo", "chi"]) {
+      const { files, get } = gen({ api: "graphql", framework }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const graph = files.filter((f) => f.path.startsWith("graph/"));
+      for (const f of graph) assert.doesNotMatch(f.content, /sync\.Map|NewMemoryStore/, `${framework}: ${f.path}`);
+      const resolvers = get("graph/schema.resolvers.go")!;
+      assert.match(resolvers, /r\.db\.WithContext\(ctx\)\.Create\(&row\)/);
+      assert.match(resolvers, /\.Limit\(ps\)\.Offset\(\(p - 1\) \* ps\)/, "listUsers pages in SQL, as the SDL declares");
+      assert.match(get("graph/user.go")!, /func userToGQL\(m \*models\.User\) \*User/, "gqlgen and GORM models are mapped explicitly");
+      assert.ok(get("internal/models/models.go") && get("internal/db/gorm.go"), `${framework}: REST GORM layer is shipped`);
+      const server = get("internal/server/server.go")!;
+      assert.match(server, /gormDB, err := db\.OpenGorm[\s\S]*mountGraphQL\(r, gormDB\)/, `${framework}: GraphQL gets the server's DB handle`);
+      assert.doesNotMatch(server, /handlers\.|userH/, `${framework}: REST entity routes are not mounted in GraphQL mode`);
+      assert.ok(!files.some((f) => f.path.startsWith("internal/handlers/")));
+    }
+    const mongo = gen({ api: "graphql", database: "mongodb" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.match(mongo.get("graph/schema.resolvers.go")!, /r\.store\.Create\(ctx, userCollection, doc\)/);
+    assert.match(mongo.get("internal/server/server.go")!, /db\.OpenMongo[\s\S]*mountGraphQL\(r, store\)/);
+
+    for (const framework of ["express", "fastify", "hono", "nestjs"]) {
+      const { get } = gen({ language: "typescript", framework, api: "graphql" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const r = get("src/resolvers/user.ts")!;
+      assert.doesNotMatch(r, /new Map/, framework);
+      assert.match(r, /import \* as repo from "\.\.\/repositories\/user\.repository"/);
+      assert.match(r, /validateUserBody/, "same zod validator as REST");
+      assert.match(get("src/repositories/user.repository.ts")!, /prisma\.user\.findMany\(\{ skip, take: pageSize \}\)/);
+      assert.ok(get("prisma/schema.prisma"));
+      assert.ok(JSON.parse(get("package.json")!).dependencies["@prisma/client"], "Prisma client is a dependency");
+    }
+
+    const py = gen({ language: "python", framework: "fastapi", api: "graphql" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const schema = py.get("app/schema.py")!;
+    assert.ok(!py.get("app/graphql_store.py") && !schema.includes("store["), "no dict store on SQL databases");
+    assert.match(schema, /with SessionLocal\(\) as db:/);
+    assert.match(schema, /\.offset\(\(page - 1\) \* page_size\)/);
+    assert.match(schema, /row = models\.User\(\*\*data\)/);
+    assert.ok(py.get("app/db.py") && py.get("app/models.py"));
+    assert.match(py.get("pyproject.toml")!, /^sqlalchemy = /m);
+  });
+
+  it("GraphQL resolvers return coded GraphQL errors for missing rows and invalid input", () => {
+    const go = gen({ api: "graphql" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.match(go.get("graph/resolver.go")!, /gqlerror\.Error\{Message: msg, Extensions: map\[string\]any\{"code": code\}\}/);
+    const goRes = go.get("graph/schema.resolvers.go")!;
+    assert.match(goRes, /return nil, lookupErr\(err, "User", input\.ID\)/, "update of a missing row is NOT_FOUND");
+    assert.match(goRes, /RowsAffected == 0 \{\n\t\treturn false, notFound\("User", id\)/);
+    assert.match(go.get("graph/user.go")!, /badInput\("email must not be empty"\)/);
+
+    const ts = gen({ language: "typescript", framework: "express", api: "graphql" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("src/resolvers/user.ts")!;
+    assert.match(ts, /code: "NOT_FOUND"/);
+    assert.match(ts, /err instanceof ZodError[\s\S]*code: "BAD_USER_INPUT"/);
+
+    const py = gen({ language: "python", framework: "fastapi", api: "graphql" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("app/schema.py")!;
+    assert.match(py, /extensions=\{"code": "NOT_FOUND"\}/);
+    assert.match(py, /except \(IntegrityError, DataError\)[\s\S]*"BAD_USER_INPUT"/, "unique violations are input errors, not 500s");
+  });
+
+  it("Go GraphQL resolvers match gqlgen's generated names and live only in graph/schema.resolvers.go", async () => {
+    const { gqlgenName } = await import("../graphql/go.ts");
+    // gqlgen's templates.ToGo — resolver methods and model fields must use these exact names.
+    const cases: [string, string][] = [["id", "ID"], ["userId", "UserID"], ["createdAt", "CreatedAt"], ["listApiKeys", "ListAPIKeys"], ["avatarUrl", "AvatarURL"], ["UsersPage", "UsersPage"], ["getUser", "GetUser"]];
+    for (const [input, want] of cases) assert.equal(gqlgenName(input), want, input);
+
+    // follow-schema layout: `make gql` copies every resolver body into
+    // graph/schema.resolvers.go, so a resolver defined in any other file is a
+    // duplicate method and the build breaks.
+    const { files } = gen({ api: "graphql", framework: "chi" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const graph = files.filter((f) => f.path.startsWith("graph/") && f.path.endsWith(".go"));
+    const want = ["Health", "ListUsers", "GetUser", "ListPosts", "GetPost", "CreateUser", "UpdateUser", "DeleteUser", "CreatePost", "UpdatePost", "DeletePost"];
+    for (const m of want) {
+      const defs = graph.filter((f) => new RegExp(`^func \\(r \\*(query|mutation)Resolver\\) ${m}\\(`, "m").test(f.content)).map((f) => f.path);
+      assert.deepEqual(defs, ["graph/schema.resolvers.go"], m);
+    }
+    for (const f of graph.filter((x) => x.path !== "graph/schema.resolvers.go")) {
+      assert.doesNotMatch(f.content, /^func \(r \*(query|mutation)Resolver\)/m, `${f.path} would be merged by gqlgen`);
+    }
+  });
+
+  // The builder's queue choice must produce a working broker client in Python
+  // repos — not a TODO — reading the env var the repo's .env / compose set.
+  const PY_QUEUES: Record<string, { client: RegExp; dep: RegExp; env: string }> = {
+    kafka:    { client: /from aiokafka import/, dep: /^aiokafka = /m, env: "KAFKA_BROKERS" },
+    rabbitmq: { client: /import aio_pika/, dep: /^aio-pika = /m, env: "RABBITMQ_URL" },
+    nats:     { client: /import nats\n/, dep: /^nats-py = /m, env: "NATS_URL" },
+    sqs:      { client: /from aiobotocore\.session import get_session/, dep: /^aiobotocore = /m, env: "AWS_REGION" },
+    bullmq:   { client: /from bullmq import Queue, Worker/, dep: /^bullmq = /m, env: "REDIS_URL" },
+  };
+  const QUEUE_EPS = [
+    { id: "1", method: "POST" as const, path: "/notifications", summary: "Notify", auth: false, pattern: "send_notification" },
+    { id: "2", method: "POST" as const, path: "/webhooks/stripe", summary: "Hook", auth: false, pattern: "webhook_receive" },
+    { id: "3", method: "GET" as const, path: "/healthz", summary: "Health", auth: false, pattern: "health_check" },
+  ];
+
+  it("Python queue option emits a real client + worker, connected at startup and probed for readiness", () => {
+    assert.deepEqual(queues.map((o) => o.id).sort(), Object.keys(PY_QUEUES).sort(), "every catalog queue has a Python client");
+    for (const framework of FRAMEWORKS.python) {
+      for (const [queue, want] of Object.entries(PY_QUEUES)) {
+        const g = gen({ language: "python", framework, queue, auth: "none" }, QUEUE_EPS, []);
+        const label = `${framework}/${queue}`;
+        const q = g.get("app/queue.py");
+        assert.ok(q, `${label}: app/queue.py`);
+        assert.match(q!, want.client, label);
+        assert.ok(q!.includes(want.env), `${label}: reads ${want.env}`);
+        // The env var the client reads is the one the generated .env sets.
+        assert.ok(g.get(".env.example")!.includes(want.env + "="), `${label}: .env.example sets ${want.env}`);
+        for (const fn of ["connect", "close", "ping", "publish", "consume"]) assert.match(q!, new RegExp(`^async def ${fn}\\(`, "m"), `${label}: ${fn}()`);
+        assert.match(g.get("pyproject.toml")!, want.dep, `${label}: client is a declared dependency`);
+        // `python -m app.worker` consumes with graceful SIGTERM handling.
+        const w = g.get("app/worker.py")!;
+        assert.match(w, /broker\.consume\(handle\)/);
+        assert.match(w, /signal\.SIGTERM/);
+        assert.match(w, /finally:\n\s+await broker\.close\(\)/);
+
+        const main = g.get("app/main.py")!;
+        assert.match(main, /from \. import queue as broker/);
+        // Startup connects, shutdown closes — FastAPI/Litestar lifespan, Django via an ASGI lifespan wrapper.
+        assert.match(main, /await broker\.connect\(\)[\s\S]*await broker\.close\(\)/, `${label}: lifespan`);
+        if (framework === "django") assert.match(main, /lifespan\.startup\.complete/);
+        // Readiness (/health?ready=1) and the health_check pattern fail when the broker is down.
+        assert.match(main, /ready[\s\S]{0,40}not await broker\.ping\(\)/, `${label}: readiness probe`);
+        assert.match(main, /checks\["queue"\] = "degraded"/);
+        // Patterns publish for real; no placeholder survives.
+        assert.match(main, /await broker\.publish\("notifications", payload\.model_dump\(\)\)/, `${label}: send_notification`);
+        assert.match(main, /await broker\.publish\("webhooks", /, `${label}: webhook_receive`);
+        assert.match(main, /status_code=503, detail="queue_unavailable"/);
+        assert.doesNotMatch(main, /TODO: (publish|enqueue)/, label);
+      }
+    }
+  });
+
+  it("Python without a queue answers 503 instead of pretending to publish", () => {
+    for (const framework of FRAMEWORKS.python) {
+      const g = gen({ language: "python", framework, queue: "none", auth: "none" }, QUEUE_EPS, []);
+      assert.ok(!g.get("app/queue.py") && !g.get("app/worker.py"), `${framework}: no broker module`);
+      const main = g.get("app/main.py")!;
+      assert.doesNotMatch(main, /\bbroker\b/, `${framework}: nothing references the missing broker`);
+      // Both queue-backed patterns refuse rather than silently dropping the event.
+      assert.equal(main.match(/status_code=503, detail="no_queue_configured"/g)?.length, 2, framework);
+    }
+  });
+
+  it("Python bullmq keeps the redis pin resolvable next to a Redis cache", () => {
+    // bullmq pins redis==7.4.x; a direct redis ^5 dependency would make `poetry install` fail.
+    const deps = gen({ language: "python", framework: "fastapi", queue: "bullmq", cache: "redis" }).get("pyproject.toml")!;
+    assert.match(deps, /^redis = "\^7\.4\.1"$/m);
+    assert.match(gen({ language: "python", framework: "fastapi", queue: "kafka", cache: "redis" }).get("pyproject.toml")!, /^redis = "\^5\.2\.0"$/m);
+  });
+  // A queue is only useful if something consumes it: docker compose must run the worker
+  // each language generates, from the api image with the api's env — and no worker without one.
+  it("docker compose runs the generated queue worker next to the api", () => {
+    const cases: [string, string, RegExp][] = [
+      ["go", "gin", /entrypoint: \["\/worker"\]/],
+      ["typescript", "express", /command: \["node", "dist\/worker\.js"\]/],
+      ["python", "fastapi", /command: \["python", "-m", "app\.worker"\]/],
+      ["rust", "axum", /entrypoint: \["\/worker"\]/],
+      ["kotlin", "ktor", /entrypoint: \["java", "-cp", "app\.jar", "Worker"\]/],
+    ];
+    for (const [language, framework, start] of cases) {
+      const compose = gen({ language, framework, queue: "kafka" }).get("docker-compose.yml")!;
+      const worker = compose.match(/^  worker:\n[\s\S]*?^    restart: unless-stopped$/m)?.[0];
+      assert.ok(worker, `${language}: compose has a worker service`);
+      assert.match(worker!, start, `${language}: worker starts the generated consumer`);
+      assert.match(worker!, /KAFKA_BROKERS: "kafka:29092"/, `${language}: worker gets the broker address`);
+      assert.doesNotMatch(worker!, /ports:/, `${language}: worker publishes no ports`);
+    }
+    assert.doesNotMatch(gen({ language: "go", framework: "gin", api: "grpc", queue: "kafka" }).get("docker-compose.yml")!, /^  worker:/m);
+  });
+
+  // ─── Java parity: tracing / rate limit / audit / monitoring / cache / queues ──
+
+  const JAVA = ["spring", "quarkus"] as const;
+  const javaGen = (framework: string, overrides: Record<string, unknown> = {}, endpoints = SAMPLE_ENDPOINTS, entities = SAMPLE_ENTITIES) =>
+    gen({ language: "java", framework, ...overrides }, endpoints, entities);
+  const javaSources = (g: ReturnType<typeof gen>) => g.files.filter((f) => f.path.startsWith("src/main/java/")).map((f) => f.content).join("\n");
+  const appProps = (g: ReturnType<typeof gen>) => g.get("src/main/resources/application.properties")!;
+
+  it("Java: each observability toggle adds its library AND the code/config that uses it; off removes both", () => {
+    // A dependency without wiring (or wiring without the dependency) is the
+    // "claimed but not generated" gap the README used to warn about.
+    const wiring: Record<string, Record<string, [RegExp, RegExp]>> = {
+      spring: {
+        tracing: [/micrometer-tracing-bridge-otel/, /management\.otlp\.tracing\.endpoint=\$\{OTEL_EXPORTER_OTLP_ENDPOINT:/],
+        rateLimit: [/bucket4j_jdk17-core/, /class RateLimitFilter extends OncePerRequestFilter[\s\S]*response\.setStatus\(429\)/],
+        audit: [/<artifactId>logstash-logback-encoder</, /class AuditFilter extends OncePerRequestFilter[\s\S]*MUTATING\.contains/],
+      },
+      quarkus: {
+        tracing: [/quarkus-opentelemetry/, /quarkus\.otel\.exporter\.otlp\.traces\.endpoint=\$\{OTEL_EXPORTER_OTLP_ENDPOINT:/],
+        rateLimit: [/bucket4j_jdk17-core/, /@ServerRequestFilter\(preMatching = true\)[\s\S]*status\(429\)/],
+        audit: [/<artifactId>quarkus-resteasy-reactive-jackson</, /@ServerResponseFilter[\s\S]*MUTATING\.contains/],
+      },
+    };
+    for (const framework of JAVA) {
+      for (const [flag, [depRe, codeRe]] of Object.entries(wiring[framework])) {
+        const on = javaGen(framework, { [flag]: true });
+        const off = javaGen(framework, { [flag]: false });
+        assert.match(on.get("pom.xml")!, depRe, `${framework} ${flag}: dependency`);
+        assert.match(javaSources(on) + appProps(on), codeRe, `${framework} ${flag}: wiring`);
+        assert.doesNotMatch(javaSources(off) + appProps(off), codeRe, `${framework} ${flag}=false must not emit the wiring`);
+      }
+      // Sentry / Datadog: SDK in the pom, DSN / API key read from the env names .env.example documents.
+      const sentry = javaGen(framework, { monitoring: "sentry" });
+      assert.match(sentry.get("pom.xml")!, framework === "spring" ? /sentry-spring-boot-starter-jakarta/ : /quarkus-logging-sentry/);
+      assert.match(appProps(sentry), /dsn=\$\{SENTRY_DSN:\}/);
+      assert.ok(sentry.get(".env.example")!.includes("SENTRY_DSN="));
+      const dd = javaGen(framework, { monitoring: "datadog" });
+      assert.match(dd.get("pom.xml")!, /micrometer-registry-datadog/);
+      assert.match(appProps(dd), /datadog[\w.]*\.api-key=\$\{DD_API_KEY:\}/);
+      assert.ok(!javaGen(framework, { monitoring: "grafana" }).get("pom.xml")!.includes("datadog"));
+    }
+  });
+
+  it("Java: every queue option gets a publisher + consumer that read the env var docker-compose/.env set", () => {
+    // The app must read the same variable the generated compose file / .env.example provide,
+    // otherwise it silently falls back to localhost inside a container.
+    const envOf: Record<string, string> = { rabbitmq: "RABBITMQ_URL", kafka: "KAFKA_BROKERS", nats: "NATS_URL", sqs: "AWS_ENDPOINT_URL_SQS", bullmq: "REDIS_URL" };
+    for (const framework of JAVA) {
+      for (const queue of queues.map((o) => o.id)) {
+        const g = javaGen(framework, { queue, cache: "memcached" });
+        const env = envOf[queue];
+        assert.ok(env, `no expectation for queue ${queue}`);
+        assert.ok(appProps(g).includes(`\${${env}:`), `${framework}/${queue}: application.properties must read ${env}`);
+        assert.ok(g.get(".env.example")!.includes(`${env}=`) || g.get("docker-compose.yml")!.includes(`${env}:`), `${framework}/${queue}: ${env} is not provided anywhere`);
+        const pub = g.get("src/main/java/dev/helios/app/messaging/NotificationPublisher.java");
+        const con = g.get("src/main/java/dev/helios/app/messaging/NotificationConsumer.java");
+        assert.ok(pub && /public void publish\(String payload\)/.test(pub), `${framework}/${queue}: publisher`);
+        assert.ok(con && /void onMessage\(String payload\)/.test(con), `${framework}/${queue}: consumer`);
+      }
+      assert.ok(!javaGen(framework, { queue: "none" }).files.some((f) => f.path.includes("/messaging/")), "no queue, no messaging code");
+      // bullmq has no JVM client: the code must say so instead of pretending to be a BullMQ worker.
+      assert.match(javaGen(framework, { queue: "bullmq" }).get("src/main/java/dev/helios/app/messaging/NotificationPublisher.java")!, /BullMQ workers will\s+\*\s+NOT see these messages/);
+    }
+  });
+
+  it("Java: `mvn test` needs no broker, Redis, exporter or database", () => {
+    // CI and new users run the generated tests on a laptop with nothing installed.
+    for (const queue of ["rabbitmq", "kafka", "nats", "sqs", "bullmq"]) {
+      const spring = javaGen("spring", { queue, monitoring: "datadog" });
+      const test = spring.get("src/test/resources/application-test.properties")!;
+      assert.match(test, /jdbc:h2:mem:/);
+      assert.match(test, /queue\.consumer\.enabled=false/);
+      assert.match(test, /spring\.cache\.type=simple/);
+      assert.match(test, /management\.datadog\.metrics\.export\.enabled=false/);
+      assert.match(spring.get("src/main/java/dev/helios/app/messaging/NotificationConsumer.java")!,
+        /@ConditionalOnProperty\(name = "queue\.consumer\.enabled", havingValue = "true", matchIfMissing = true\)/);
+      assert.match(spring.get("src/test/java/dev/helios/app/UserControllerTest.java")!, /@ActiveProfiles\("test"\)/);
+
+      const quarkus = appProps(javaGen("quarkus", { queue, monitoring: "sentry" }));
+      assert.match(quarkus, /%test\.quarkus\.datasource\.db-kind=h2/);
+      assert.match(quarkus, /%test\.quarkus\.otel\.sdk\.disabled=true/);
+      assert.match(quarkus, /%test\.quarkus\.log\.sentry\.enabled=false/);
+      // SmallRye channels become in-memory; hand-rolled consumers are switched off.
+      assert.match(quarkus, /%test\.mp\.messaging\.incoming\.notifications-in\.connector=smallrye-in-memory|%test\.queue\.consumer\.enabled=false/);
+    }
+    assert.match(javaGen("spring", { queue: "kafka" }).get("src/test/resources/application-test.properties")!, /spring\.kafka\.admin\.auto-create=false/);
+  });
+
+  it("Java: Redis cache serves get-by-id and is evicted on every write", () => {
+    // Without eviction a PUT/DELETE keeps serving the stale row for the TTL.
+    for (const cache of ["redis", "upstash", "dragonfly"]) {
+      const spring = javaGen("spring", { cache });
+      assert.match(spring.get("pom.xml")!, /spring-boot-starter-data-redis/);
+      assert.match(appProps(spring), /spring\.data\.redis\.url=\$\{REDIS_URL:/);
+      const svc = spring.get("src/main/java/dev/helios/app/service/UserService.java")!;
+      assert.match(svc, /@Cacheable\(cacheNames = "users", key = "#id"[^\n]*\)\n\s+public Optional<User> findById/);
+      assert.match(svc, /@CacheEvict\(cacheNames = "users", key = "#id"\)\n\s+public Optional<User> update/);
+      assert.match(svc, /@CacheEvict\(cacheNames = "users", key = "#id"\)\n\s+public boolean delete/);
+      assert.match(spring.get("src/main/java/dev/helios/app/model/User.java")!, /class User implements java\.io\.Serializable/);
+      assert.match(spring.get("src/main/java/dev/helios/app/infra/CacheConfig.java")!, /@EnableCaching/);
+
+      const quarkus = javaGen("quarkus", { cache });
+      assert.match(appProps(quarkus), /quarkus\.redis\.hosts=\$\{REDIS_URL:/);
+      const res = quarkus.get("src/main/java/dev/helios/app/UserResource.java")!;
+      assert.match(res, /cache\.get\("users:" \+ id, User\.class\)[\s\S]*User\.findById\(id\)[\s\S]*cache\.put\("users:" \+ id, entity\)/);
+      assert.equal(res.match(/cache\.evict\("users:" \+ id\)/g)?.length, 2, "update and delete evict");
+    }
+    for (const framework of JAVA) {
+      const g = javaGen(framework, { cache: "memcached", queue: "none" });
+      assert.ok(!g.get("pom.xml")!.includes("redis"), `${framework}: memcached must not pull in a Redis client`);
+      assert.ok(!javaSources(g).includes("Cacheable") && !javaSources(g).includes("JsonCache"));
+    }
+  });
+
+  it("Java: /health?ready=1 aggregates dependency health; brokers without a built-in check get one", () => {
+    const spring = javaGen("spring");
+    assert.match(spring.get("pom.xml")!, /spring-boot-starter-actuator/);
+    assert.match(spring.get("src/main/java/dev/helios/app/HealthController.java")!, /healthEndpoint\.health\(\)\.getStatus\(\)[\s\S]*up \? 200 : 503/);
+    const quarkus = javaGen("quarkus");
+    assert.match(quarkus.get("pom.xml")!, /quarkus-smallrye-health/);
+    assert.match(quarkus.get("src/main/java/dev/helios/app/HealthResource.java")!, /reporter\.getReadiness\(\)[\s\S]*up \? 200 : 503/);
+    // Spring auto-configures Redis + RabbitMQ indicators and SmallRye covers Kafka/RabbitMQ/Redis; the rest are generated.
+    const springChecks: Record<string, RegExp> = { kafka: /class KafkaHealthIndicator implements HealthIndicator/, nats: /class NatsConnection implements HealthIndicator/, sqs: /class SqsHealthIndicator implements HealthIndicator/ };
+    for (const [queue, re] of Object.entries(springChecks)) assert.match(javaSources(javaGen("spring", { queue })), re, queue);
+    for (const queue of ["nats", "sqs"]) assert.match(javaSources(javaGen("quarkus", { queue })), /@Readiness\n@ApplicationScoped\npublic class \w+ implements HealthCheck/, queue);
+  });
+
+  it("Java: send_notification stubs publish to the queue; generated imports all resolve", () => {
+    const eps = [{ id: "n", method: "POST" as const, path: "/notifications", summary: "", auth: false, pattern: "send_notification" }];
+    const spring = javaGen("spring", { queue: "kafka" }, eps, []).get("src/main/java/dev/helios/app/ApiController.java")!;
+    assert.match(spring, /postNotifications\(@RequestBody String payload\) \{\n\s+publisher\.publish\(payload\);/);
+    const quarkus = javaGen("quarkus", { queue: "nats" }, eps, []).get("src/main/java/dev/helios/app/ApiResource.java")!;
+    assert.match(quarkus, /postNotifications\(String payload\) \{\n\s+publisher\.publish\(payload\);/);
+    // Without a queue the stub stays a stub (no dangling NotificationPublisher reference).
+    assert.ok(!javaGen("spring", { queue: "none" }, eps, []).get("src/main/java/dev/helios/app/ApiController.java")!.includes("NotificationPublisher"));
+
+    // Every `import dev.helios.app.…` points at a generated class — a missing file only shows up at `mvn compile`.
+    for (const framework of JAVA) {
+      for (const queue of queues.map((o) => o.id)) {
+        const g = javaGen(framework, { queue }, [...SAMPLE_ENDPOINTS, ...eps]);
+        for (const f of g.files.filter((x) => x.path.endsWith(".java"))) {
+          for (const [, cls] of f.content.matchAll(/^import (dev\.helios\.app\.[\w.]+);$/gm)) {
+            assert.ok(g.get(`src/main/java/${cls.replace(/\./g, "/")}.java`), `${framework}/${queue}: ${f.path} imports missing ${cls}`);
+          }
+        }
+      }
+    }
+  });
+
+  it("Kotlin: JUnit Platform builds ship the launcher (Gradle 9 fails `gradle test` without it)", () => {
+    for (const framework of ["ktor", "spring-kt"]) {
+      const build = gen({ language: "kotlin", framework }).get("build.gradle.kts")!;
+      if (build.includes("useJUnitPlatform()")) assert.match(build, /testRuntimeOnly\("org\.junit\.platform:junit-platform-launcher"\)/, framework);
+    }
+  });
+
+  it("Rust Kafka/Redpanda: pure-Rust rskafka, so the build needs no C toolchain and the binary runs on distroless", () => {
+    // rdkafka's bundled librdkafka needs cmake + libcurl headers at build time and libcurl.so at
+    // runtime, which gcr.io/distroless/cc-debian12 doesn't ship.
+    for (const queue of ["kafka", "redpanda"]) {
+      for (const framework of ["axum", "actix"]) {
+        const g = gen({ language: "rust", framework, queue });
+        const cargo = g.get("Cargo.toml")!;
+        assert.match(cargo, /^rskafka = \{ version = "[\d.]+", default-features = false \}$/m, `${framework}/${queue}: no C-backed codecs`);
+        assert.doesNotMatch(cargo, /rdkafka/, `${framework}/${queue}`);
+        assert.doesNotMatch(g.get("Dockerfile")!, /apt-get|cmake/, `${framework}/${queue}: no build toolchain needed`);
+        assert.match(g.get("Dockerfile")!, /FROM gcr\.io\/distroless\/cc-debian12/);
+        assert.ok(!g.get(".cargo/config.toml"), `${framework}/${queue}: the CMake policy override is obsolete`);
+        const q = g.get("src/queue.rs")!;
+        // Comma-separated broker list, topic created if missing, and the missing consumer group is documented.
+        assert.match(q, /env::var\("KAFKA_BROKERS"\)[\s\S]*\.split\(','\)/);
+        assert.match(q, /controller_client\(\)[\s\S]*create_topic\(QUEUE, 1, 1,/);
+        assert.match(q, /ponytail: rskafka has no consumer groups[\s\S]*Upgrade path: rdkafka/);
+        // A dead broker must fail a publish, not hang the request handler.
+        assert.match(q, /tokio::time::timeout\(Duration::from_secs\(\d+\), open\(\)\)/);
+        // After a fetch error the worker resumes after the last handled offset instead of replaying.
+        assert.match(q, /StartOffset::At[\s\S]*next = Some\(r\.offset \+ 1\)/);
+      }
+    }
+  });
+
+  // ─── Java contract tests: `mvn test` compiles and passes with no services ──
+
+  const javaContract = (framework: string, overrides: Record<string, unknown> = {}, endpoints = SAMPLE_ENDPOINTS, entities = SAMPLE_ENTITIES) =>
+    javaGen(framework, overrides, endpoints, entities).get("src/test/java/dev/helios/app/ApiContractTest.java")!;
+
+  it("Java: ApiContractTest is native to its framework and only references classes the repo has", () => {
+    // The old test imported a non-existent <Name>Application from com.example and used Spring in Quarkus repos,
+    // so every Java `mvn test` died at test-compile.
+    for (const framework of JAVA) {
+      const g = javaGen(framework, { auth: "clerk" });
+      assert.ok(!g.files.some((f) => f.path.includes("/com/example/")), `${framework}: no stray com.example package`);
+      const src = g.get("src/test/java/dev/helios/app/ApiContractTest.java")!;
+      assert.match(src, /^package dev\.helios\.app;/);
+      assert.doesNotMatch(src, /\w+Application\.class/, "Spring finds dev.helios.app.Application by package; no hardcoded class");
+    }
+    const spring = javaContract("spring", { auth: "clerk" });
+    assert.match(spring, /@SpringBootTest\n@AutoConfigureMockMvc\n@ActiveProfiles\("test"\)/, "runs on the H2 test profile");
+    assert.match(spring, /\.with\(jwt\(\)\)/);
+    assert.match(spring, /@MockBean\n\s+JwtDecoder jwtDecoder;/, "no JWKS fetch during tests");
+    const quarkus = javaContract("quarkus", { auth: "clerk" });
+    assert.doesNotMatch(quarkus, /org\.springframework/, "Quarkus repos have no Spring on the classpath");
+    assert.match(quarkus, /@QuarkusTest\nclass ApiContractTest/);
+    assert.match(quarkus, /@TestSecurity\(user = "test"\)/);
+    assert.match(javaGen("quarkus", { auth: "clerk" }).get("pom.xml")!, /<artifactId>quarkus-test-security<\/artifactId>\n\s+<scope>test<\/scope>/, "@TestSecurity needs its test dependency");
+    assert.ok(!javaGen("quarkus", { auth: "none" }, SAMPLE_ENDPOINTS.map((e) => ({ ...e, auth: false }))).get("pom.xml")!.includes("quarkus-test-security"));
+  });
+
+  it("Java: contract tests cover every CRUD route with 401 / authorized pairs, JSON shape, and unique valid names", () => {
+    for (const framework of JAVA) {
+      const src = javaContract(framework, { auth: "clerk" });
+      const names = [...src.matchAll(/void (\w+)\(\)/g)].map((m) => m[1]);
+      assert.equal(new Set(names).size, names.length, `${framework}: test method names are unique`);
+      for (const n of names) assert.match(n, /^[A-Za-z_][A-Za-z0-9_]*$/);
+      for (const entity of ["Users", "Posts"]) {
+        for (const stem of [`get${entity}`, `post${entity}`, `get${entity}ById`, `put${entity}ById`, `delete${entity}ById`]) {
+          assert.ok(names.includes(`${stem}_returns401WithoutToken`), `${framework}: ${stem} rejects a missing token`);
+          assert.ok(names.some((n) => n.startsWith(`${stem}_returns`) && n.endsWith("WithToken") && !n.includes("401")), `${framework}: ${stem} succeeds when authorized`);
+        }
+      }
+      // By-id routes round-trip a created row: a missing route or a broken id binding can't pass.
+      assert.match(src, /String id = createUser\(\);[\s\S]*"\/users\/" \+ id/);
+      assert.ok(names.includes("getHealth_returns200"), "health is public even with auth on");
+      // Unique columns get a fresh value per request; a fixed one would collide across tests.
+      assert.match(src, /"\{\\"name\\":\\"" \+ unique\(\) \+ "\\",\\"email\\":\\"" \+ unique\(\)/);
+    }
+    // Auth off: no 401 expectations, no principal plumbing.
+    const open = SAMPLE_ENDPOINTS.map((e) => ({ ...e, auth: false }));
+    for (const framework of JAVA) {
+      const src = javaContract(framework, { auth: "none" }, open);
+      assert.doesNotMatch(src, /_returns401|\.with\(jwt\(\)\)|@TestSecurity\(/);
+      assert.match(src, /postUsers_returns201\(\)/);
+    }
+  });
+
+  it("Java: endpoint stubs are contract-tested; publish stubs are checked without touching the broker", () => {
+    const eps = [
+      { id: "a", method: "GET" as const, path: "/reports/:id", summary: "", auth: true },
+      { id: "b", method: "GET" as const, path: "/ping", summary: "", auth: false },
+      { id: "n", method: "POST" as const, path: "/notifications", summary: "", auth: true, pattern: "send_notification" },
+    ];
+    const spring = javaContract("spring", { auth: "clerk", queue: "kafka" }, eps, []);
+    assert.match(spring, /getReportsById_returns200WithToken[\s\S]*"\/reports\/1"[\s\S]*jsonPath\("\$\.op"\)\.exists\(\)/);
+    // SecurityConfig protects every route but /health, so even the auth:false stub expects 401 without a token.
+    assert.match(spring, /getPing_returns401WithoutToken/);
+    assert.match(spring, /postNotifications_returns400WithToken\(\) throws Exception \{\n\s+mvc\.perform\(request\(HttpMethod\.POST, "\/notifications"\)\.with\(jwt\(\)\)\)/, "no body: rejected before publish");
+    const quarkus = javaContract("quarkus", { auth: "clerk", queue: "nats" }, eps, []);
+    assert.match(quarkus, /getPing_returns200\(\)/, "Quarkus only guards stubs marked auth");
+    assert.match(quarkus, /postNotifications_returns415WithToken\(\) \{\n\s+given\(\)\.contentType\(ContentType\.TEXT\)/, "wrong media type: rejected before publish");
+  });
+
+  it("Java: the rate limiter is off in the test profile so contract tests don't trip 429", () => {
+    const spring = javaGen("spring", { rateLimit: true });
+    assert.match(spring.get("src/test/resources/application-test.properties")!, /^rate-limit\.enabled=false$/m);
+    assert.match(spring.get("src/main/java/dev/helios/app/infra/RateLimitFilter.java")!, /@ConditionalOnProperty\(name = "rate-limit\.enabled", havingValue = "true", matchIfMissing = true\)/);
+    const quarkus = javaGen("quarkus", { rateLimit: true });
+    assert.match(appProps(quarkus), /^%test\.rate-limit\.enabled=false$/m);
+    assert.match(quarkus.get("src/main/java/dev/helios/app/infra/RateLimitFilter.java")!, /if \(!enabled \|\| allow\(ip\)\) return Optional\.empty\(\);/);
+  });
+  // An entity that declares createdAt used to get two created_at columns, so the
+  // initial migration failed on Postgres/MySQL and the app never started.
+  it("SQL migrations never declare a column twice", () => {
+    // TypeScript (Prisma) and Python (Alembic) have no generated .sql; these three do.
+    for (const [language, framework, database] of [["java", "spring", "postgres"], ["go", "gin", "mysql"], ["rust", "axum", "postgres"]]) {
+      const files = gen({ language, framework, database }, [], SAMPLE_ENTITIES).files.filter((f) => /\.sql$/.test(f.path) && /CREATE TABLE/.test(f.content));
+      assert.ok(files.length > 0, `${language}: emits a SQL migration`);
+      for (const f of files) {
+        for (const [, body] of f.content.matchAll(/CREATE TABLE IF NOT EXISTS \w+ \(\n([\s\S]*?)\n\);/g)) {
+          const cols = body.split(",\n").map((l) => l.trim().split(/\s+/)[0]);
+          assert.equal(new Set(cols).size, cols.length, `${language} ${f.path}: duplicate column in ${cols}`);
+        }
+      }
+    }
+  });
+  // Spring runs Hibernate with ddl-auto=validate against the Flyway schema: a `number`
+  // field typed Long (bigint) against DOUBLE PRECISION stopped the app from starting.
+  it("Java number fields match the migration's DOUBLE PRECISION column", () => {
+    const entities = [{ id: "e", name: "Item", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "score", type: "number" as const, required: false, unique: false },
+    ] }];
+    for (const framework of ["spring", "quarkus"]) {
+      const g = gen({ language: "java", framework }, [], entities);
+      const model = g.files.find((f) => /model\/Item\.java$|Item\.java$/.test(f.path) && f.content.includes("score"))!;
+      assert.match(model.content, /(private|public) Double score;/, `${framework}: score is Double`); // Panache uses public fields
+      assert.match(g.files.find((f) => f.path.endsWith(".sql"))!.content, /score DOUBLE PRECISION/);
+    }
   });
 });

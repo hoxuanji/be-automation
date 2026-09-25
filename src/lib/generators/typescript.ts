@@ -5,6 +5,7 @@ import { tsGraphqlFiles } from "./graphql/typescript";
 import { mountTrpcOnTsRest } from "./trpc/typescript";
 import { isGraphqlSupported } from "./types";
 import { tsPatternRoute, tsPatternImports, usesPrisma, hasRedisCache, tsAuthMode, tsGuarded, type TsAuthMode } from "./patterns/typescript";
+import { tsQueueDeps, tsQueueFiles, tsQueueImport, tsQueueKind, tsQueueScripts } from "./queue/typescript";
 
 function tsMockField(name: string, type: FieldType): string {
   switch (type) {
@@ -38,7 +39,8 @@ export function typescriptFiles(
   // NestJS uses the Express base — see tsGraphqlMount.
   if (config.api === "graphql" && isGraphqlSupported(config.language)) {
     const framework = config.framework === "nestjs" ? "express" : config.framework;
-    return tsGraphqlFiles(config, entities, typescriptFiles({ ...config, api: "rest", framework }, [], []));
+    const rest = (ents: Entity[]) => typescriptFiles({ ...config, api: "rest", framework }, [], ents);
+    return tsGraphqlFiles(config, entities, rest([]), rest(entities));
   }
 
   // gRPC mode replaces the framework-specific HTTP bootstrap with a @grpc/grpc-js
@@ -54,7 +56,7 @@ export function typescriptFiles(
       Object.entries(JSON.parse(pkgJson(safeName(config.name), config, false, false, endpoints)).dependencies as Record<string, string>)
         .filter(([k]) => /^(@opentelemetry\/|prom-client$|@sentry\/node$|dd-trace$)/.test(k))
     );
-    files.push(...tsGrpcFiles(config, entities, { preamble: tsInstrumentPreamble(config), deps: obsDeps }));
+    files.push(...tsGrpcFiles(config, entities, { preamble: tsInstrumentPreamble(config), deps: obsDeps }, endpoints));
     if (config.tracing) files.push({ path: "src/tracing.ts", content: tracingFile(safeName(config.name)) });
     return files;
   }
@@ -77,6 +79,7 @@ export function typescriptFiles(
   }
   if (config.tracing) files.push({ path: "src/tracing.ts", content: tracingFile(name) });
   if (hasRedis(config)) files.push({ path: "src/cache.ts", content: cacheFile() });
+  files.push(...tsQueueFiles(config));
 
   if (config.framework === "nestjs") {
     files.push(...nestjsFiles(config, endpoints, entities));
@@ -142,7 +145,7 @@ function tsPatternClientImports(config: StackConfig, endpoints: Endpoint[], enti
   const needsDb = usesPrisma(config, entities) && patterns.some((p) => /^(crud_|paginated_search|cache_read|health_check)/.test(p));
   const needsCache = hasRedis(config) && patterns.some((p) => p === "cache_read" || p === "health_check");
   const { needsBcrypt, needsJwt, needsCrypto } = tsPatternImports(config, endpoints);
-  return `${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${needsCrypto ? 'import crypto from "node:crypto";\n' : ""}${needsDb ? `import { prisma } from "./db";\n` : ""}${needsCache ? `import { redis } from "./cache";\n` : ""}`;
+  return `${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${needsCrypto ? 'import crypto from "node:crypto";\n' : ""}${needsDb ? `import { prisma } from "./db";\n` : ""}${needsCache ? `import { redis } from "./cache";\n` : ""}${tsQueueImport(config)}`;
 }
 
 function entityCrudFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
@@ -678,6 +681,7 @@ function pkgJson(name: string, config: StackConfig, withPrisma: boolean, withAut
     ...(hasSentry(config) ? { "@sentry/node": "^8.42.0" } : {}),
     ...(hasDatadog(config) ? { "dd-trace": "^5.23.0" } : {}),
     ...(hasRedis(config) ? { ioredis: "^5.4.1" } : {}),
+    ...tsQueueDeps(config),
     ...(needsBcrypt ? { bcrypt: "^5.1.1" } : {}),
     ...(needsJwt ? { jsonwebtoken: "^9.0.2" } : {}),
     ...(config.tracing
@@ -702,6 +706,7 @@ function pkgJson(name: string, config: StackConfig, withPrisma: boolean, withAut
           build: "tsc -p tsconfig.json",
           test: "vitest run",
           "test:coverage": "vitest run --coverage",
+          ...tsQueueScripts(config),
           ...(withPrisma
             ? {
                 "db:generate": "prisma generate",
@@ -767,17 +772,23 @@ function tsconfig() {
 function tsDockerfile() {
   return `# syntax=docker/dockerfile:1
 FROM node:22-alpine AS build
+# Prisma's query engine needs OpenSSL; Alpine ships without it.
+RUN apk add --no-cache openssl
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci
+# The generated repo ships no lockfile; npm ci needs one.
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY . .
-RUN npm run build
+# tsc and the runtime both need the generated Prisma client (node_modules/.prisma).
+RUN if [ -f prisma/schema.prisma ]; then npx prisma generate; fi
+RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine
+RUN apk add --no-cache openssl
 WORKDIR /app
 ENV NODE_ENV=production
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+COPY package.json ./
+COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 USER node
 EXPOSE 8080
@@ -1092,7 +1103,7 @@ describe("${pascal} routes", () => {
 // Module-level token verifier shared by every framework's authRequired. Must
 // accept exactly the tokens this service's auth story produces: provider JWTs
 // (JWKS) or the HS256 tokens the auth_* routes sign with JWT_SECRET.
-function tsTokenVerifier(mode: TsAuthMode): string {
+export function tsTokenVerifier(mode: TsAuthMode): string {
   if (mode === "hs256") return `import { jwtVerify, type JWTPayload } from "jose";
 
 // Tokens are self-issued by the auth_* routes (HS256, JWT_SECRET). Verify exactly
@@ -1142,7 +1153,7 @@ ${guardLine(e)}  ${handlerName(e)}() {
   }`
     )
     .join("\n\n");
-  const nestCommon = ["Controller", "Get", "Post", "Put", "Patch", "Delete", ...(hasProm(config) ? ["Header"] : []), ...(hasPatterns ? ["Req", "Res"] : []), ...(endpoints.some(guarded) ? ["UseGuards"] : [])];
+  const nestCommon = ["Controller", "Get", "Post", "Put", "Patch", "Delete", ...(hasProm(config) ? ["Header"] : []), ...(hasPatterns ? ["Req", "Res"] : []), ...(endpoints.some(guarded) ? ["UseGuards"] : []), ...(tsQueueKind(config) ? ["Query", "ServiceUnavailableException", "OnApplicationShutdown"] : [])];
 
   const entityModuleImports = entities
     .map((e) => `import { ${e.name}Module } from "./modules/${toKebab(e.name)}/${toKebab(e.name)}.module";`)
@@ -1203,10 +1214,20 @@ export class AppModule {}
       content: `import { ${nestCommon.join(", ")} } from "@nestjs/common";
 ${hasPatterns ? `import type { Request, Response } from "express";\n` : ""}${endpoints.some(guarded) ? `import { JwtAuthGuard } from "./auth/jwt.guard";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}${hasProm(config) ? `import { register } from "prom-client";\n` : ""}
 @Controller()
-export class AppController {
+export class AppController${tsQueueKind(config) ? " implements OnApplicationShutdown" : ""} {
+${tsQueueKind(config) ? `  // Liveness: /health. Readiness (?ready=1) also pings the message queue.
   @Get("/health")
+  async health(@Query("ready") ready?: string) {
+    if (ready === undefined) return { ok: true };
+    try { await queuePing(); return { ok: true, queue: "ok" }; }
+    catch { throw new ServiceUnavailableException({ ok: false, queue: "down" }); }
+  }
+
+  // Runs on SIGTERM via app.enableShutdownHooks() in main.ts.
+  async onApplicationShutdown() { await closeQueue(); }
+` : `  @Get("/health")
   health() { return { ok: true }; }
-${hasProm(config) ? `
+`}${hasProm(config) ? `
   @Get("/metrics")
   @Header("Content-Type", register.contentType)
   metrics() { return register.metrics(); }
@@ -1336,8 +1357,14 @@ app.use(pinoHttp({
   redact: ["req.headers.authorization", "req.headers.cookie"],
 }));
 ${config.rateLimit ? "app.use(rateLimit);\n" : ""}${config.audit ? "app.use(auditLogger);\n" : ""}
-app.get("/health", (_, res) => res.json({ ok: true }));
-${hasProm(config) ? `app.get("/metrics", async (_, res) => { res.set("Content-Type", register.contentType); res.end(await register.metrics()); });\n` : ""}${routes}
+${tsQueueKind(config) ? `// Liveness: /health. Readiness (?ready=1) also pings the message queue.
+app.get("/health", async (req, res) => {
+  if (req.query.ready === undefined) { res.json({ ok: true }); return; }
+  try { await queuePing(); res.json({ ok: true, queue: "ok" }); }
+  catch { res.status(503).json({ ok: false, queue: "down" }); }
+});
+` : `app.get("/health", (_, res) => res.json({ ok: true }));
+`}${hasProm(config) ? `app.get("/metrics", async (_, res) => { res.set("Content-Type", register.contentType); res.end(await register.metrics()); });\n` : ""}${routes}
 ${entityMounts}
 ${hasSentry(config) ? "Sentry.setupExpressErrorHandler(app);\n" : ""}const port = Number(process.env.PORT ?? 8080);
 const server = app.listen(port, () => console.log(JSON.stringify({ level: "info", msg: "listening", port })));
@@ -1348,12 +1375,12 @@ const server = app.listen(port, () => console.log(JSON.stringify({ level: "info"
 // then exit.
 function shutdown(signal: string) {
   console.log(JSON.stringify({ level: "info", msg: "shutdown", signal }));
-  server.close((err) => {
+  server.close(${tsQueueKind(config) ? "async " : ""}(err) => {
     if (err) {
       console.error(JSON.stringify({ level: "error", msg: "shutdown failed", err: String(err) }));
       process.exit(1);
     }
-    process.exit(0);
+${tsQueueKind(config) ? "    await closeQueue().catch((e) => console.error(JSON.stringify({ level: \"error\", msg: \"queue close failed\", err: String(e) })));\n" : ""}    process.exit(0);
   });
   // Belt-and-suspenders: force exit if close() hangs past the grace window.
   setTimeout(() => {
@@ -1496,8 +1523,15 @@ ${config.rateLimit ? `  // 60 requests / minute / IP, in-memory. Pass \`redis\` 
     }, "audit");
   });
 ` : ""}${hasSentry(config) ? "  Sentry.setupFastifyErrorHandler(app);\n" : ""}
-  app.get("/health", async () => ({ ok: true }));
-${hasProm(config) ? `  app.get("/metrics", async (_request, reply) => {
+${tsQueueKind(config) ? `  // Liveness: /health. Readiness (?ready=1) also pings the message queue.
+  app.get("/health", async (request, reply) => {
+    if ((request.query as { ready?: string }).ready === undefined) return { ok: true };
+    try { await queuePing(); return { ok: true, queue: "ok" }; }
+    catch { return reply.status(503).send({ ok: false, queue: "down" }); }
+  });
+  app.addHook("onClose", async () => { await closeQueue(); });
+` : `  app.get("/health", async () => ({ ok: true }));
+`}${hasProm(config) ? `  app.get("/metrics", async (_request, reply) => {
     reply.header("Content-Type", register.contentType);
     return register.metrics();
   });
@@ -1621,8 +1655,14 @@ app.onError((err, c) => {
   return c.json({ error: "internal server error" }, 500);
 });
 ` : ""}
-app.get("/health", (c) => c.json({ ok: true }));
-${hasProm(config) ? `app.get("/metrics", async (c) => c.body(await register.metrics(), 200, { "Content-Type": register.contentType }));\n` : ""}${routes}
+${tsQueueKind(config) ? `// Liveness: /health. Readiness (?ready=1) also pings the message queue.
+app.get("/health", async (c) => {
+  if (c.req.query("ready") === undefined) return c.json({ ok: true });
+  try { await queuePing(); return c.json({ ok: true, queue: "ok" }); }
+  catch { return c.json({ ok: false, queue: "down" }, 503); }
+});
+` : `app.get("/health", (c) => c.json({ ok: true }));
+`}${hasProm(config) ? `app.get("/metrics", async (c) => c.body(await register.metrics(), 200, { "Content-Type": register.contentType }));\n` : ""}${routes}
 ${entityMounts}
 const port = Number(process.env.PORT ?? 8080);
 const server = serve({ fetch: app.fetch, port });
@@ -1633,12 +1673,12 @@ console.log(JSON.stringify({ level: "info", msg: "listening", port }));
 // then force-exit if in-flight requests overrun the grace window.
 function shutdown(signal: string) {
   console.log(JSON.stringify({ level: "info", msg: "shutdown", signal }));
-  server.close((err) => {
+  server.close(${tsQueueKind(config) ? "async " : ""}(err) => {
     if (err) {
       console.error(JSON.stringify({ level: "error", msg: "shutdown failed", err: String(err) }));
       process.exit(1);
     }
-    process.exit(0);
+${tsQueueKind(config) ? "    await closeQueue().catch((e) => console.error(JSON.stringify({ level: \"error\", msg: \"queue close failed\", err: String(e) })));\n" : ""}    process.exit(0);
   });
   setTimeout(() => {
     console.error(JSON.stringify({ level: "error", msg: "shutdown timed out — forcing exit" }));

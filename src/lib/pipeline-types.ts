@@ -1,7 +1,7 @@
 // Shared error + event types for the push → deploy pipeline.
 // These are returned to the client verbatim, so keep the shape stable.
 
-export type DeployProvider = "railway" | "render" | "fly" | "vercel";
+export type DeployProvider = "railway" | "render" | "fly" | "vercel" | "aws" | "gcp" | "azure" | "k8s";
 
 export type PipelineErrorCode =
   // GitHub
@@ -49,14 +49,21 @@ export type PipelineErrorCode =
   | "vercel_conflict"
   | "vercel_no_github"
   | "vercel_error"
-  | "vercel_token_missing";
+  | "vercel_token_missing"
+  // Cloud (AWS / GCP / Azure / K8s) via GitHub Actions
+  | "cloud_creds_missing"
+  | "actions_secrets_failed"
+  | "workflow_not_found"
+  | "workflow_dispatch_failed"
+  | "workflow_run_failed"
+  | "actions_error";
 
 export class PipelineError extends Error {
   code: PipelineErrorCode;
   status: number;
   hint: string;
   stage?: string;
-  partial?: { projectId?: string; serviceId?: string; appName?: string };
+  partial?: { projectId?: string; serviceId?: string; appName?: string; runUrl?: string };
 
   constructor(opts: {
     code: PipelineErrorCode;
@@ -64,7 +71,7 @@ export class PipelineError extends Error {
     message: string;
     hint: string;
     stage?: string;
-    partial?: { projectId?: string; serviceId?: string; appName?: string };
+    partial?: { projectId?: string; serviceId?: string; appName?: string; runUrl?: string };
   }) {
     super(opts.message);
     this.name = "PipelineError";
@@ -109,6 +116,10 @@ export type PipelineStage =
   | "vercel_project"
   | "vercel_env"
   | "vercel_domain"
+  // Cloud (GitHub Actions) stages
+  | "actions_secrets"
+  | "workflow_dispatch"
+  | "workflow_run"
   | "done";
 
 export type PipelineEvent =
@@ -133,6 +144,8 @@ export type DeployResult = {
   projectId?: string;
   serviceId?: string;
   appName?: string;
+  // GitHub Actions run driving the cloud deploy (aws / gcp / azure / k8s).
+  runUrl?: string;
   // Optional next-step instruction (used by Fly when build is user-driven).
   nextStep?: { message: string; command?: string };
 };
