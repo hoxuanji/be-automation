@@ -4,6 +4,7 @@ import { pyGrpcFiles } from "./grpc/python";
 import { pythonGraphqlFiles } from "./graphql/python";
 import { isGraphqlSupported } from "./types";
 import { pyPatternRoute, pyPatternImports, pyNativeRoutes, pyNativeImports, pyHasRedis, pyAuthMode, type PyAuthMode, type NativeRoute } from "./patterns/python";
+import { pyQueue, pyQueueDeps, pyQueueModule, pyWorkerModule } from "./queue/python";
 
 export function pythonFiles(
   config: StackConfig,
@@ -103,6 +104,11 @@ import redis.asyncio as redis
 redis_client = redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=True)
 `,
     });
+  }
+  const queue = pyQueue(config);
+  if (queue) {
+    files.push({ path: "app/queue.py", content: pyQueueModule(queue, config) });
+    files.push({ path: "app/worker.py", content: pyWorkerModule() });
   }
   if (config.tracing && config.framework !== "django") {
     files.push({ path: "app/tracing.py", content: pyTracingModule(config.name) });
@@ -430,7 +436,10 @@ function pyproject(config: StackConfig, withModels: boolean, authMode: PyAuthMod
       fw === "fastapi" ? `opentelemetry-instrumentation-fastapi = "~0.50b0"` : `opentelemetry-instrumentation-asgi = "~0.50b0"`,
     );
   }
-  if (pyHasRedis(config)) extra.push(`redis = "^5.2.0"`);
+  const queue = pyQueue(config);
+  // bullmq pins redis==7.4.x, so a direct redis dependency has to match it.
+  if (pyHasRedis(config)) extra.push(queue === "bullmq" ? `redis = "^7.4.1"` : `redis = "^5.2.0"`);
+  extra.push(...pyQueueDeps(queue));
   // FastAPI refuses to register UploadFile routes without python-multipart.
   if (fw === "fastapi" && endpoints.some((e) => e.pattern === "file_upload")) extra.push(`python-multipart = "^0.0.20"`);
   const monDeps = extra.map((l) => `\n${l}`).join("");
@@ -767,6 +776,16 @@ function ddtracePreamble(config: StackConfig): string {
 
 function appMain(config: StackConfig, endpoints: Endpoint[], entities: Entity[], authMode: PyAuthMode) {
   const withAuth = authMode !== "off";
+  // A configured broker is connected at startup, closed on shutdown and
+  // checked by the readiness probe (GET /health?ready=1); plain /health stays liveness.
+  const hasQueue = !!pyQueue(config);
+  const fastapiHealth = hasQueue ? `@app.get("/health")
+async def health(ready: int = 0):
+    if ready and not await broker.ping():
+        raise HTTPException(status_code=503, detail="queue_unavailable")
+    return {"ok": True}` : `@app.get("/health")
+async def health():
+    return {"ok": True}`;
   if (config.framework === "fastapi") {
     const patternExtraImports = pyPatternImports(endpoints, config, entities, authMode).join("\n");
     const wiring = fastapiWiring(config);
@@ -791,10 +810,10 @@ async def ${handlerName(e)}(${paramsDecl}):
         .map((e) => `app.include_router(${toSnake(e.name)}.router)`)
         .join("\n");
 
-      return `${ddtracePreamble(config)}from fastapi import FastAPI, Depends, HTTPException, Header
+      return `${ddtracePreamble(config)}${hasQueue ? "from contextlib import asynccontextmanager\n\n" : ""}from fastapi import FastAPI, Depends, HTTPException, Header
 from .config import settings
 from .db import engine
-from .logging_config import configure_logging
+${hasQueue ? "from . import queue as broker\n" : ""}from .logging_config import configure_logging
 from .models import Base
 ${withAuth ? "from .auth import auth_required\n" : ""}${routerImports}
 ${patternExtraImports}
@@ -802,15 +821,21 @@ ${patternExtraImports}
 configure_logging()
 ${wiring.top}
 Base.metadata.create_all(bind=engine)
+${hasQueue ? `
 
-app = FastAPI(title=settings.app_name)
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await broker.connect()
+    yield
+    await broker.close()
+
+` : ""}
+app = FastAPI(title=settings.app_name${hasQueue ? ", lifespan=lifespan" : ""})
 ${wiring.after}
 ${routerIncludes}
 
 
-@app.get("/health")
-async def health():
-    return {"ok": True}
+${fastapiHealth}
 
 ${routes}
 `;
@@ -824,7 +849,7 @@ from fastapi import FastAPI, Depends, HTTPException, Header, Query, Response
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .logging_config import configure_logging
+${hasQueue ? "from . import queue as broker\n" : ""}from .logging_config import configure_logging
 ${withAuth ? "from .auth import auth_required\n" : ""}${patternExtraImports}
 
 
@@ -843,16 +868,14 @@ async def lifespan(_: FastAPI):
     out — essential for K8s rolling deploys.
     """
     # Startup — add resource init here (DB warmup, cache pre-fill, …).
-    yield
+${hasQueue ? "    await broker.connect()\n" : ""}    yield
     # Shutdown — add resource teardown here (close DB pools, flush buffers, …).
-
+${hasQueue ? "    await broker.close()\n" : ""}
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 ${wiring.after}
 
-@app.get("/health")
-async def health():
-    return {"ok": True}
+${fastapiHealth}
 
 ${routes}
 `;
@@ -883,7 +906,7 @@ ${routes}
 
 from litestar import Litestar, ${decorators.join(", ")}
 ${config.rateLimit ? "from litestar.middleware.rate_limit import RateLimitConfig\n" : ""}${prom ? "from litestar.contrib.prometheus import PrometheusConfig, PrometheusController\n" : ""}${config.tracing ? "from litestar.contrib.opentelemetry import OpenTelemetryConfig\n" : ""}
-from .logging_config import configure_logging
+${hasQueue ? "from litestar.exceptions import ServiceUnavailableException\n\nfrom . import queue as broker\n" : ""}from .logging_config import configure_logging
 ${config.audit ? "from .audit import AuditMiddleware\n" : ""}${config.tracing ? "from .tracing import configure_tracing\n" : ""}${localImports}
 configure_logging()
 ${config.tracing ? "configure_tracing()\n" : ""}${entities.length ? "Base.metadata.create_all(bind=engine)\n" : ""}${/sentry/.test(config.monitoring) ? `
@@ -897,13 +920,17 @@ sentry_sdk.init(dsn=os.environ.get("SENTRY_DSN"), traces_sample_rate=1.0)
 @asynccontextmanager
 async def lifespan(_app: Litestar):
     # Startup — init resources here.
-    yield
+${hasQueue ? "    await broker.connect()\n" : ""}    yield
     # Shutdown — release resources here. Runs on SIGTERM from uvicorn.
+${hasQueue ? "    await broker.close()\n" : ""}
 
-
-@get("/health")
+${hasQueue ? `@get("/health")
+async def health(ready: int = 0) -> dict:
+    if ready and not await broker.ping():
+        raise ServiceUnavailableException(detail="queue_unavailable")
+    return {"ok": True}` : `@get("/health")
 async def health() -> dict:
-    return {"ok": True}
+    return {"ok": True}`}
 ${routes.map((r) => `\n\n${r.code}\n`).join("")}
 
 app = Litestar(
@@ -934,7 +961,7 @@ ${middleware.length ? `    middleware=[${middleware.join(", ")}],\n` : ""})
 
 from django.conf import settings
 
-from .logging_config import configure_logging
+${hasQueue ? "from . import queue as broker\n" : ""}from .logging_config import configure_logging
 
 configure_logging()
 ${/sentry/.test(config.monitoring) ? `
@@ -957,15 +984,43 @@ from django.http import ${routes.length ? "HttpResponse, " : ""}JsonResponse  # 
 from django.urls import ${prom ? "include, " : ""}path  # noqa: E402
 ${djangoRoutes(routes, entities, withAuth)}
 
-def health(_):
-    return JsonResponse({"ok": True})
+${hasQueue ? `async def health(request):
+    if request.GET.get("ready") and not await broker.ping():
+        return JsonResponse({"ok": False, "detail": "queue_unavailable"}, status=503)
+    return JsonResponse({"ok": True})` : `def health(_):
+    return JsonResponse({"ok": True})`}
 ${routes.map((r) => `\n\n${r.code}\n`).join("")}
 
 urlpatterns = [
     path("health", health),
 ${urls}${prom ? `    path("", include("django_prometheus.urls")),  # GET /metrics\n` : ""}]
 
-app = get_asgi_application()
+${hasQueue ? djangoQueueLifespan() : "app = get_asgi_application()\n"}`;
+}
+
+// Django's ASGI handler ignores the lifespan protocol, so wrap it: uvicorn's
+// startup / shutdown events connect and close the broker.
+function djangoQueueLifespan(): string {
+  return `_django_app = get_asgi_application()
+
+
+async def app(scope, receive, send):
+    if scope["type"] != "lifespan":
+        await _django_app(scope, receive, send)
+        return
+    while True:
+        message = await receive()
+        if message["type"] == "lifespan.startup":
+            try:
+                await broker.connect()
+            except Exception as exc:
+                await send({"type": "lifespan.startup.failed", "message": str(exc)})
+                return
+            await send({"type": "lifespan.startup.complete"})
+        elif message["type"] == "lifespan.shutdown":
+            await broker.close()
+            await send({"type": "lifespan.shutdown.complete"})
+            return
 `;
 }
 

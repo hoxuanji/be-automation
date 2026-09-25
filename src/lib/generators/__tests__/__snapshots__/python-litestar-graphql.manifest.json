@@ -71,13 +71,18 @@
   },
   {
     "path": "app/main.py",
-    "lines": 69,
-    "size": 2127
+    "lines": 74,
+    "size": 2338
   },
   {
     "path": "app/models.py",
     "lines": 30,
     "size": 991
+  },
+  {
+    "path": "app/queue.py",
+    "lines": 98,
+    "size": 3412
   },
   {
     "path": "app/schema.py",
@@ -88,6 +93,11 @@
     "path": "app/tracing.py",
     "lines": 20,
     "size": 719
+  },
+  {
+    "path": "app/worker.py",
+    "lines": 42,
+    "size": 1235
   },
   {
     "path": "DEPLOY.md",
@@ -181,8 +191,8 @@
   },
   {
     "path": "pyproject.toml",
-    "lines": 33,
-    "size": 795
+    "lines": 34,
+    "size": 816
   },
   {
     "path": "QUICKSTART.md",
