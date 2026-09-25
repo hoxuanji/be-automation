@@ -1510,7 +1510,6 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.match(proto, /message Post \{[\s\S]*created_at = 90;[\s\S]*updated_at = 91;/, "entities without timestamps still get the server-managed ones");
     assert.match(proto, /uint32 page = 1;[^\n]*\n\s+uint32 page_size = 2;/);
   });
-  });
 
   // GraphQL resolvers used to keep entities in sync.Map / Map / dict, so data
   // vanished on restart even with Postgres configured. They must go through
