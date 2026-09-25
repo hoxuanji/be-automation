@@ -101,8 +101,8 @@
   },
   {
     "path": "pom.xml",
-    "lines": 88,
-    "size": 3052
+    "lines": 118,
+    "size": 4136
   },
   {
     "path": "QUICKSTART.md",
@@ -141,18 +141,48 @@
   },
   {
     "path": "src/main/java/dev/helios/app/HealthController.java",
-    "lines": 15,
-    "size": 331
+    "lines": 33,
+    "size": 1266
+  },
+  {
+    "path": "src/main/java/dev/helios/app/infra/AuditFilter.java",
+    "lines": 50,
+    "size": 1820
+  },
+  {
+    "path": "src/main/java/dev/helios/app/infra/CacheConfig.java",
+    "lines": 14,
+    "size": 464
+  },
+  {
+    "path": "src/main/java/dev/helios/app/infra/RateLimitFilter.java",
+    "lines": 56,
+    "size": 2413
+  },
+  {
+    "path": "src/main/java/dev/helios/app/messaging/MessagingConfig.java",
+    "lines": 16,
+    "size": 464
+  },
+  {
+    "path": "src/main/java/dev/helios/app/messaging/NotificationConsumer.java",
+    "lines": 21,
+    "size": 797
+  },
+  {
+    "path": "src/main/java/dev/helios/app/messaging/NotificationPublisher.java",
+    "lines": 25,
+    "size": 677
   },
   {
     "path": "src/main/java/dev/helios/app/model/Post.java",
     "lines": 64,
-    "size": 1739
+    "size": 1771
   },
   {
     "path": "src/main/java/dev/helios/app/model/User.java",
-    "lines": 79,
-    "size": 2162
+    "lines": 78,
+    "size": 2182
   },
   {
     "path": "src/main/java/dev/helios/app/repository/PostRepository.java",
@@ -171,18 +201,18 @@
   },
   {
     "path": "src/main/java/dev/helios/app/service/PostService.java",
-    "lines": 46,
-    "size": 1196
+    "lines": 51,
+    "size": 1487
   },
   {
     "path": "src/main/java/dev/helios/app/service/UserService.java",
-    "lines": 47,
-    "size": 1282
+    "lines": 52,
+    "size": 1573
   },
   {
     "path": "src/main/resources/application.properties",
-    "lines": 32,
-    "size": 1461
+    "lines": 51,
+    "size": 2404
   },
   {
     "path": "src/main/resources/db/migration/V1__init.sql",
@@ -201,12 +231,17 @@
   },
   {
     "path": "src/test/java/dev/helios/app/PostControllerTest.java",
-    "lines": 43,
-    "size": 1586
+    "lines": 45,
+    "size": 1670
   },
   {
     "path": "src/test/java/dev/helios/app/UserControllerTest.java",
-    "lines": 43,
-    "size": 1622
+    "lines": 45,
+    "size": 1708
+  },
+  {
+    "path": "src/test/resources/application-test.properties",
+    "lines": 12,
+    "size": 403
   }
 ]
