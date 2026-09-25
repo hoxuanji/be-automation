@@ -311,6 +311,7 @@ jobs:
           - { label: "python-fastapi-nats", language: "python", framework: "fastapi", queue: "nats" }
           - { label: "rust-axum-sqs", language: "rust", framework: "axum", queue: "sqs" }
           - { label: "java-spring-rabbitmq", language: "java", framework: "spring", queue: "rabbitmq" }
+          - { label: "java-quarkus-kafka", language: "java", framework: "quarkus", queue: "kafka" }
           - { label: "kotlin-ktor-bullmq", language: "kotlin", framework: "ktor", queue: "bullmq" }
     steps:
       - uses: actions/checkout@v4
@@ -369,6 +370,13 @@ jobs:
           docker compose logs --no-color worker 2>&1 | grep -v ' DEBUG ' \
             | grep -iE 'error|panic|exception|fatal|refused|failed|traceback|caused by|cannot|unable|no such' | tail -10 \
             | while IFS= read -r l; do echo "::error::$l"; done
+      - name: "Report e2e: last raw log lines"
+        if: failure()
+        working-directory: /tmp/smoke-repo
+        run: |
+          for svc in api worker; do
+            docker compose logs --no-color --tail 5 "$svc" 2>/dev/null | cut -c1-300 | while IFS= read -r l; do echo "::error::$l"; done
+          done
       - name: "Report e2e: image build"
         if: failure()
         run: |

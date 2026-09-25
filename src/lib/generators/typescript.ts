@@ -774,15 +774,18 @@ function tsDockerfile() {
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci
+# The generated repo ships no lockfile; npm ci needs one.
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY . .
-RUN npm run build
+# tsc and the runtime both need the generated Prisma client (node_modules/.prisma).
+RUN if [ -f prisma/schema.prisma ]; then npx prisma generate; fi
+RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+COPY package.json ./
+COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 USER node
 EXPOSE 8080

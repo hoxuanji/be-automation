@@ -277,8 +277,28 @@ ${authDeps}${metricsDeps}${extraDeps}    <dependency>
 `;
 }
 
+// Quarkus packages a fast-jar directory (target/quarkus-app), not a single runnable jar.
+function quarkusDockerfile(): string {
+  return `FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /src
+COPY pom.xml .
+RUN mvn dependency:go-offline -q 2>/dev/null || true
+COPY src ./src
+RUN mvn package -DskipTests -q
+
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+RUN groupadd --system --gid 1001 app \\
+ && useradd --system --uid 1001 --gid app --home /home/app --shell /bin/false app
+COPY --from=build --chown=app:app /src/target/quarkus-app/ ./
+EXPOSE 8080
+USER app
+ENTRYPOINT ["java", "-jar", "quarkus-run.jar"]
+`;
+}
+
 function springDockerfile(): string {
-  return `FROM eclipse-temurin:21-jdk AS build
+  return `FROM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /src
 COPY pom.xml .
 RUN mvn dependency:go-offline -q 2>/dev/null || true
@@ -907,7 +927,7 @@ function quarkusFiles(
   const infra = quarkusInfra(config);
 
   files.push({ path: "pom.xml",    content: quarkusPom(artifact, withAuth, mysql, metrics, infra) });
-  files.push({ path: "Dockerfile", content: springDockerfile() }); // same JRE pattern
+  files.push({ path: "Dockerfile", content: quarkusDockerfile() });
   files.push({
     path: "src/main/resources/application.properties",
     content: quarkusAppProperties(config.name, withAuth, mysql) + infra.props,
