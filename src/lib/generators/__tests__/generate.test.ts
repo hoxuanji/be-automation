@@ -1829,4 +1829,83 @@ describe("Every deployment target gets a real CI deploy job", () => {
       }
     }
   });
+
+  // ─── Java contract tests: `mvn test` compiles and passes with no services ──
+
+  const javaContract = (framework: string, overrides: Record<string, unknown> = {}, endpoints = SAMPLE_ENDPOINTS, entities = SAMPLE_ENTITIES) =>
+    javaGen(framework, overrides, endpoints, entities).get("src/test/java/dev/helios/app/ApiContractTest.java")!;
+
+  it("Java: ApiContractTest is native to its framework and only references classes the repo has", () => {
+    // The old test imported a non-existent <Name>Application from com.example and used Spring in Quarkus repos,
+    // so every Java `mvn test` died at test-compile.
+    for (const framework of JAVA) {
+      const g = javaGen(framework, { auth: "clerk" });
+      assert.ok(!g.files.some((f) => f.path.includes("/com/example/")), `${framework}: no stray com.example package`);
+      const src = g.get("src/test/java/dev/helios/app/ApiContractTest.java")!;
+      assert.match(src, /^package dev\.helios\.app;/);
+      assert.doesNotMatch(src, /\w+Application\.class/, "Spring finds dev.helios.app.Application by package; no hardcoded class");
+    }
+    const spring = javaContract("spring", { auth: "clerk" });
+    assert.match(spring, /@SpringBootTest\n@AutoConfigureMockMvc\n@ActiveProfiles\("test"\)/, "runs on the H2 test profile");
+    assert.match(spring, /\.with\(jwt\(\)\)/);
+    assert.match(spring, /@MockBean\n\s+JwtDecoder jwtDecoder;/, "no JWKS fetch during tests");
+    const quarkus = javaContract("quarkus", { auth: "clerk" });
+    assert.doesNotMatch(quarkus, /org\.springframework/, "Quarkus repos have no Spring on the classpath");
+    assert.match(quarkus, /@QuarkusTest\nclass ApiContractTest/);
+    assert.match(quarkus, /@TestSecurity\(user = "test"\)/);
+    assert.match(javaGen("quarkus", { auth: "clerk" }).get("pom.xml")!, /<artifactId>quarkus-test-security<\/artifactId>\n\s+<scope>test<\/scope>/, "@TestSecurity needs its test dependency");
+    assert.ok(!javaGen("quarkus", { auth: "none" }, SAMPLE_ENDPOINTS.map((e) => ({ ...e, auth: false }))).get("pom.xml")!.includes("quarkus-test-security"));
+  });
+
+  it("Java: contract tests cover every CRUD route with 401 / authorized pairs, JSON shape, and unique valid names", () => {
+    for (const framework of JAVA) {
+      const src = javaContract(framework, { auth: "clerk" });
+      const names = [...src.matchAll(/void (\w+)\(\)/g)].map((m) => m[1]);
+      assert.equal(new Set(names).size, names.length, `${framework}: test method names are unique`);
+      for (const n of names) assert.match(n, /^[A-Za-z_][A-Za-z0-9_]*$/);
+      for (const entity of ["Users", "Posts"]) {
+        for (const stem of [`get${entity}`, `post${entity}`, `get${entity}ById`, `put${entity}ById`, `delete${entity}ById`]) {
+          assert.ok(names.includes(`${stem}_returns401WithoutToken`), `${framework}: ${stem} rejects a missing token`);
+          assert.ok(names.some((n) => n.startsWith(`${stem}_returns`) && n.endsWith("WithToken") && !n.includes("401")), `${framework}: ${stem} succeeds when authorized`);
+        }
+      }
+      // By-id routes round-trip a created row: a missing route or a broken id binding can't pass.
+      assert.match(src, /String id = createUser\(\);[\s\S]*"\/users\/" \+ id/);
+      assert.ok(names.includes("getHealth_returns200"), "health is public even with auth on");
+      // Unique columns get a fresh value per request; a fixed one would collide across tests.
+      assert.match(src, /"\{\\"name\\":\\"" \+ unique\(\) \+ "\\",\\"email\\":\\"" \+ unique\(\)/);
+    }
+    // Auth off: no 401 expectations, no principal plumbing.
+    const open = SAMPLE_ENDPOINTS.map((e) => ({ ...e, auth: false }));
+    for (const framework of JAVA) {
+      const src = javaContract(framework, { auth: "none" }, open);
+      assert.doesNotMatch(src, /_returns401|\.with\(jwt\(\)\)|@TestSecurity\(/);
+      assert.match(src, /postUsers_returns201\(\)/);
+    }
+  });
+
+  it("Java: endpoint stubs are contract-tested; publish stubs are checked without touching the broker", () => {
+    const eps = [
+      { id: "a", method: "GET" as const, path: "/reports/:id", summary: "", auth: true },
+      { id: "b", method: "GET" as const, path: "/ping", summary: "", auth: false },
+      { id: "n", method: "POST" as const, path: "/notifications", summary: "", auth: true, pattern: "send_notification" },
+    ];
+    const spring = javaContract("spring", { auth: "clerk", queue: "kafka" }, eps, []);
+    assert.match(spring, /getReportsById_returns200WithToken[\s\S]*"\/reports\/1"[\s\S]*jsonPath\("\$\.op"\)\.exists\(\)/);
+    // SecurityConfig protects every route but /health, so even the auth:false stub expects 401 without a token.
+    assert.match(spring, /getPing_returns401WithoutToken/);
+    assert.match(spring, /postNotifications_returns400WithToken\(\) throws Exception \{\n\s+mvc\.perform\(request\(HttpMethod\.POST, "\/notifications"\)\.with\(jwt\(\)\)\)/, "no body: rejected before publish");
+    const quarkus = javaContract("quarkus", { auth: "clerk", queue: "nats" }, eps, []);
+    assert.match(quarkus, /getPing_returns200\(\)/, "Quarkus only guards stubs marked auth");
+    assert.match(quarkus, /postNotifications_returns415WithToken\(\) \{\n\s+given\(\)\.contentType\(ContentType\.TEXT\)/, "wrong media type: rejected before publish");
+  });
+
+  it("Java: the rate limiter is off in the test profile so contract tests don't trip 429", () => {
+    const spring = javaGen("spring", { rateLimit: true });
+    assert.match(spring.get("src/test/resources/application-test.properties")!, /^rate-limit\.enabled=false$/m);
+    assert.match(spring.get("src/main/java/dev/helios/app/infra/RateLimitFilter.java")!, /@ConditionalOnProperty\(name = "rate-limit\.enabled", havingValue = "true", matchIfMissing = true\)/);
+    const quarkus = javaGen("quarkus", { rateLimit: true });
+    assert.match(appProps(quarkus), /^%test\.rate-limit\.enabled=false$/m);
+    assert.match(quarkus.get("src/main/java/dev/helios/app/infra/RateLimitFilter.java")!, /if \(!enabled \|\| allow\(ip\)\) return Optional\.empty\(\);/);
+  });
 });
