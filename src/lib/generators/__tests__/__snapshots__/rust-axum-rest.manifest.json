@@ -42,7 +42,7 @@
   {
     "path": "Cargo.toml",
     "lines": 33,
-    "size": 1152
+    "size": 1163
   },
   {
     "path": "DEPLOY.md",
@@ -186,8 +186,8 @@
   },
   {
     "path": "src/main.rs",
-    "lines": 141,
-    "size": 5531
+    "lines": 144,
+    "size": 5797
   },
   {
     "path": "src/models/mod.rs",

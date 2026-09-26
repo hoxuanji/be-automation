@@ -118,7 +118,7 @@ function modFile(entities: Entity[], _kind: string): string {
 
 function cargoToml(safeName: string, framework: string, sql: RustSql | null, authMode: "jwks" | "hs256" | "off", metrics: boolean, feat: RustFeatures): string {
   const sqlxDriver = sql?.mysql ? "mysql" : "postgres";
-  const sqlx = `sqlx = { version = "0.8", features = ["runtime-tokio", "${sqlxDriver}", "uuid", "chrono", "json", "macros"] }`;
+  const sqlx = `sqlx = { version = "0.8", features = ["runtime-tokio", "${sqlxDriver}", "uuid", "chrono", "json", "macros", "migrate"] }`;
   // JWT verification (src/auth.rs); reqwest fetches the JWKS. rustls keeps the
   // distroless runtime image free of an OpenSSL dependency.
   const authDeps = authMode === "off" ? ""
@@ -431,10 +431,13 @@ function rustModel(entity: Entity, sql: RustSql | null): string {
   const pascal = toPascal(entity.name);
   const fromRowDerive = sql ? ", sqlx::FromRow" : "";
 
+  // Optional columns are nullable in the migration, so the row type must accept NULL.
   const structFields = entity.fields.map((f) => {
     const rustType = rustFieldType(f.type, sql);
     const fieldName = toSnake(f.name);
-    return `    pub ${fieldName}: ${rustType},`;
+    return f.required || f.primaryKey
+      ? `    pub ${fieldName}: ${rustType},`
+      : `    pub ${fieldName}: Option<${rustType}>,`;
   }).join("\n");
 
   const createFields = nonPkFields(entity).map((f) => {
@@ -1154,8 +1157,14 @@ ${protectedRoutes.join("\n")}
 `
     : "";
 
+  // db/migrations.ts emits migrations/ only when there are entities; migrate!() needs the dir.
+  const migrate = sql && entities.length > 0
+    ? `    // Apply migrations/ (embedded at build time). Only the api migrates — the worker never
+    // does — and sqlx takes a lock on the migrations table, so api replicas don't race.
+    sqlx::migrate!("./migrations").run(&pool).await.expect("db: migrations failed");\n`
+    : "";
   const poolSetup = sql
-    ? `    let pool = db::connect(&cfg.database_url).await;\n`
+    ? `    let pool = db::connect(&cfg.database_url).await;\n${migrate}`
     : `    let store = db::new_store();\n`;
 
   const rateLimit = feat.rateLimit
@@ -1327,8 +1336,14 @@ ${protectedRoutes.map((r) => `                    ${r}`).join("\n")},
             )`]
     : [];
 
+  // db/migrations.ts emits migrations/ only when there are entities; migrate!() needs the dir.
+  const migrate = sql && entities.length > 0
+    ? `    // Apply migrations/ (embedded at build time). Only the api migrates — the worker never
+    // does — and sqlx takes a lock on the migrations table, so api replicas don't race.
+    sqlx::migrate!("./migrations").run(&pool).await.expect("db: migrations failed");\n`
+    : "";
   const poolSetup = sql
-    ? `    let pool = db::connect(&cfg.database_url).await;\n    let pool_data = actix_web::web::Data::new(pool);\n`
+    ? `    let pool = db::connect(&cfg.database_url).await;\n${migrate}    let pool_data = actix_web::web::Data::new(pool);\n`
     : `    let store = db::new_store();\n    let store_data = actix_web::web::Data::new(store);\n`;
 
   const appData = sql ? `            .app_data(pool_data.clone())` : `            .app_data(store_data.clone())`;

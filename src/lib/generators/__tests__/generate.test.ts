@@ -2215,4 +2215,38 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.match(py.get("app/db.py")!, /PRAGMA foreign_keys=ON/, "SQLite ignores ON DELETE CASCADE unless each connection enables it");
     assert.match(gen({ language: "go", framework: "gin", auth: "none", database: "sqlite" }, eps, user).get("internal/db/gorm.go")!, /_pragma=foreign_keys\(1\)/);
   });
+
+  // e2e CRUD (scripts/e2e-crud.sh) runs against a fresh database: the Rust api must create
+  // its tables itself, and a NULL in an optional column must still decode into the row type.
+  it("rust: api runs the sqlx migrations at startup; optional fields are Option<T> in the row", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+      { id: "f3", name: "score", type: "number" as const, required: false, unique: false },
+      { id: "f6", name: "meta", type: "json" as const, required: false, unique: false },
+      { id: "f4", name: "active", type: "boolean" as const, required: true, unique: false },
+    ] }];
+    for (const framework of ["axum", "actix"]) {
+      for (const database of ["postgres", "mysql"]) {
+        const g = gen({ language: "rust", framework, auth: "none", database }, SAMPLE_ENDPOINTS, user);
+        const label = `${framework}/${database}`;
+        assert.match(g.get("Cargo.toml")!, /sqlx = \{[^}]*"migrate"/, `${label}: migrate!() needs the sqlx migrate feature`);
+        assert.match(g.get("src/main.rs")!, /db::connect[^\n]*\n[\s\S]*sqlx::migrate!\("\.\/migrations"\)\.run\(&pool\)/, `${label}: api migrates right after connecting`);
+        assert.ok(g.files.some((f) => /^migrations\/\d+_[a-z_]+\.up\.sql$/.test(f.path)), `${label}: sqlx's <version>_<name>.up.sql naming`);
+        if (g.get("src/bin/worker.rs")) assert.doesNotMatch(g.get("src/bin/worker.rs")!, /migrate!/, `${label}: only the api migrates`);
+        const model = g.get("src/models/user.rs")!.split("pub struct CreateUser")[0];
+        assert.match(model, /pub id: [^\n]*Uuid|pub id: String/, `${label}: pk stays non-optional`);
+        assert.match(model, /pub email: String,/);
+        assert.match(model, /pub score: Option<f64>,/, `${label}: nullable column decodes as Option`);
+        assert.match(model, /pub meta: Option<serde_json::Value>,/);
+        assert.match(model, /pub active: bool,/);
+      }
+    }
+    // MySQL 8 rejects CREATE INDEX IF NOT EXISTS, which would fail the startup migration.
+    const up = (database: string) => gen({ language: "rust", framework: "axum", database }, SAMPLE_ENDPOINTS, user).files.find((f) => f.path.endsWith(".up.sql"))!.content;
+    assert.doesNotMatch(up("mysql"), /IF NOT EXISTS idx_/);
+    assert.match(up("mysql"), /CREATE INDEX idx_users_id ON users \(id\);/);
+    // No entities → no migrations dir, so no migrate!() (it would fail to compile).
+    assert.doesNotMatch(gen({ language: "rust", framework: "axum", database: "postgres" }).get("src/main.rs")!, /migrate!/);
+  });
 });

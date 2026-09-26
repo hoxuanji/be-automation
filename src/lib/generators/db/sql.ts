@@ -120,16 +120,18 @@ function tableSql(entity: Entity, dialect: SqlDialect, entities: Entity[]): stri
   return `CREATE TABLE IF NOT EXISTS ${tbl} (\n${cols.join(",\n")}\n);`;
 }
 
-function indexSql(entity: Entity, _dialect: SqlDialect): string[] {
+function indexSql(entity: Entity, dialect: SqlDialect): string[] {
   const tbl = tableName(entity);
   const out: string[] = [];
+  // MySQL 8 has no CREATE INDEX IF NOT EXISTS; the migration tool runs this once anyway.
+  const ifNotExists = dialect === "mysql" ? "" : "IF NOT EXISTS ";
   for (const f of entity.fields) {
     if (f.unique && !f.primaryKey) {
       // UNIQUE already creates an index; skip explicit one.
       continue;
     }
     if (/Id$|_id$|^id$/.test(f.name)) {
-      out.push(`CREATE INDEX IF NOT EXISTS idx_${tbl}_${toSnake(f.name)} ON ${tbl} (${toSnake(f.name)});`);
+      out.push(`CREATE INDEX ${ifNotExists}idx_${tbl}_${toSnake(f.name)} ON ${tbl} (${toSnake(f.name)});`);
     }
   }
   return out;
