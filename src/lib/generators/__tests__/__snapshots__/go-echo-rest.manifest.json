@@ -126,8 +126,8 @@
   },
   {
     "path": "internal/api/contract/contract_test.go",
-    "lines": 139,
-    "size": 3264
+    "lines": 142,
+    "size": 3687
   },
   {
     "path": "internal/auth/jwt.go",
@@ -166,8 +166,8 @@
   },
   {
     "path": "internal/handlers/post.go",
-    "lines": 64,
-    "size": 2014
+    "lines": 65,
+    "size": 1994
   },
   {
     "path": "internal/handlers/user_test.go",
@@ -176,8 +176,8 @@
   },
   {
     "path": "internal/handlers/user.go",
-    "lines": 64,
-    "size": 2014
+    "lines": 65,
+    "size": 1994
   },
   {
     "path": "internal/models/models.go",

@@ -893,6 +893,12 @@ function goEntityHandler(module: string, framework: string, entity: Entity): str
   const pascal = entity.name;
   const snake = toSnake(entity.name);
   const kebab = toKebab(entity.name);
+  // Update overlays the sent JSON on the stored row and saves every column, so
+  // camelCase keys map through the json tags, zero values (false, 0) are
+  // written too, and the primary key can't be changed by the body.
+  const pk = entity.fields.find((f) => f.primaryKey);
+  const keepPk = pk ? `\tpk := item.${toPascal(pk.name)}\n` : "";
+  const restorePk = pk ? `\titem.${toPascal(pk.name)} = pk\n` : "";
 
   if (framework === "gin") {
     return `package handlers
@@ -947,12 +953,11 @@ func (h *${pascal}Handler) Update(c *gin.Context) {
 \t\tc.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 \t\treturn
 \t}
-\tvar payload map[string]any
-\tif err := c.ShouldBindJSON(&payload); err != nil {
+${keepPk}\tif err := c.ShouldBindJSON(&item); err != nil {
 \t\tc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 \t\treturn
 \t}
-\tif err := h.db.Model(&item).Updates(payload).Error; err != nil {
+${restorePk}\tif err := h.db.Save(&item).Error; err != nil {
 \t\tc.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 \t\treturn
 \t}
@@ -1015,11 +1020,10 @@ func (h *${pascal}Handler) Update(c *fiber.Ctx) error {
 \tif err := h.db.First(&item, "id = ?", c.Params("id")).Error; err != nil {
 \t\treturn c.Status(404).JSON(fiber.Map{"error": "not found"})
 \t}
-\tvar payload map[string]any
-\tif err := c.BodyParser(&payload); err != nil {
+${keepPk}\tif err := c.BodyParser(&item); err != nil {
 \t\treturn c.Status(400).JSON(fiber.Map{"error": err.Error()})
 \t}
-\tif err := h.db.Model(&item).Updates(payload).Error; err != nil {
+${restorePk}\tif err := h.db.Save(&item).Error; err != nil {
 \t\treturn c.Status(500).JSON(fiber.Map{"error": err.Error()})
 \t}
 \treturn c.JSON(item)
@@ -1082,11 +1086,10 @@ func (h *${pascal}Handler) Update(c echo.Context) error {
 \tif err := h.db.First(&item, "id = ?", c.Param("id")).Error; err != nil {
 \t\treturn c.JSON(http.StatusNotFound, map[string]any{"error": "not found"})
 \t}
-\tvar payload map[string]any
-\tif err := c.Bind(&payload); err != nil {
+${keepPk}\tif err := c.Bind(&item); err != nil {
 \t\treturn c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
 \t}
-\tif err := h.db.Model(&item).Updates(payload).Error; err != nil {
+${restorePk}\tif err := h.db.Save(&item).Error; err != nil {
 \t\treturn c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
 \t}
 \treturn c.JSON(http.StatusOK, item)
@@ -1161,12 +1164,11 @@ func (h *${pascal}Handler) Update(w http.ResponseWriter, r *http.Request) {
 \t\th.writeJSON(w, 404, map[string]any{"error": "not found"})
 \t\treturn
 \t}
-\tvar payload map[string]any
-\tif err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+${keepPk}\tif err := json.NewDecoder(r.Body).Decode(&item); err != nil {
 \t\th.writeJSON(w, 400, map[string]any{"error": err.Error()})
 \t\treturn
 \t}
-\tif err := h.db.Model(&item).Updates(payload).Error; err != nil {
+${restorePk}\tif err := h.db.Save(&item).Error; err != nil {
 \t\th.writeJSON(w, 500, map[string]any{"error": err.Error()})
 \t\treturn
 \t}
@@ -1193,6 +1195,7 @@ function goTestBody(entity: Entity, valueString = "test", valueNum = 1): string 
     if (f.type === "number") return `"${f.name}": ${valueNum}`;
     if (f.type === "boolean") return `"${f.name}": true`;
     if (f.type === "uuid") return `"${f.name}": "00000000-0000-0000-0000-000000000001"`;
+    if (f.type === "date") return `"${f.name}": "2024-01-0${valueNum}T00:00:00Z"`; // time.Time needs RFC 3339
     return `"${f.name}": "${valueString}"`;
   });
   return `map[string]any{${pairs.join(", ")}}`;
