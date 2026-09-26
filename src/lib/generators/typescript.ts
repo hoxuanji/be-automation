@@ -4,7 +4,8 @@ import { tsGrpcFiles } from "./grpc/typescript";
 import { tsGraphqlFiles } from "./graphql/typescript";
 import { mountTrpcOnTsRest } from "./trpc/typescript";
 import { isGraphqlSupported } from "./types";
-import { tsPatternRoute, tsPatternImports, usesPrisma, hasRedisCache, tsAuthMode, tsGuarded, type TsAuthMode } from "./patterns/typescript";
+import { tsPatternRoute, tsPatternImports, tsSelfAuthUser, SELF_AUTH_PATTERNS, usesPrisma, hasRedisCache, tsAuthMode, tsGuarded, tsCrudPatternEntityIds, type TsAuthMode } from "./patterns/typescript";
+import { authCredentialEntities, selfAuthUser } from "./patterns/index";
 import { tsQueueDeps, tsQueueFiles, tsQueueImport, tsQueueKind, tsQueueScripts } from "./queue/typescript";
 
 function tsMockField(name: string, type: FieldType): string {
@@ -61,22 +62,24 @@ export function typescriptFiles(
     return files;
   }
 
+  // /health belongs to the server (liveness + readiness), as in Go and Python:
+  // a user GET /health (stub or health_check pattern) is skipped — Fastify
+  // refuses duplicate routes at boot, the others would silently shadow it.
+  endpoints = endpoints.filter((e) => !(e.method === "GET" && e.path === "/health"));
   const name = safeName(config.name);
   const files: GeneratedFile[] = [];
   const withAuth = tsAuthMode(config, endpoints) !== "off";
 
   files.push({ path: "package.json", content: pkgJson(name, config, usesPrisma(config, entities), withAuth, endpoints) });
   files.push({ path: "tsconfig.json", content: tsconfig() });
-  files.push({ path: "Dockerfile", content: tsDockerfile() });
+  files.push({ path: "Dockerfile", content: tsDockerfile(usesPrisma(config, entities)) });
   files.push({ path: "vitest.config.ts", content: vitestConfig() });
 
   if (usesPrisma(config, entities)) {
-    files.push(...prismaFiles(config, entities));
+    files.push(...prismaFiles(config, entities, authCredentialEntities(config, endpoints, entities).length > 0));
     files.push({ path: "src/db.ts", content: `import { PrismaClient } from "@prisma/client";\n\nexport const prisma = new PrismaClient();\n` });
   }
-  if (entities.length > 0) {
-    files.push(...entityCrudFiles(config, entities));
-  }
+  files.push(...entityCrudFiles(config, routerEntities(endpoints, entities)));
   if (config.tracing) files.push({ path: "src/tracing.ts", content: tracingFile(name) });
   if (hasRedis(config)) files.push({ path: "src/cache.ts", content: cacheFile() });
   files.push(...tsQueueFiles(config));
@@ -142,10 +145,18 @@ function tsInstrumentPreamble(c: StackConfig): string {
 // Pattern handlers (inline in main.ts, or in the Nest AppController) need these clients + libs.
 function tsPatternClientImports(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): string {
   const patterns = endpoints.map((e) => e.pattern ?? "");
-  const needsDb = usesPrisma(config, entities) && patterns.some((p) => /^(crud_|paginated_search|cache_read|health_check)/.test(p));
+  const needsDb = usesPrisma(config, entities) && patterns.some((p) => /^(crud_|paginated_search|cache_read|health_check)/.test(p) ||
+    (SELF_AUTH_PATTERNS.includes(p) && tsAuthMode(config, endpoints) === "hs256" && !!tsSelfAuthUser(config, entities)));
   const needsCache = hasRedis(config) && patterns.some((p) => p === "cache_read" || p === "health_check");
   const { needsBcrypt, needsJwt, needsCrypto } = tsPatternImports(config, endpoints);
   return `${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${needsCrypto ? 'import crypto from "node:crypto";\n' : ""}${needsDb ? `import { prisma } from "./db";\n` : ""}${needsCache ? `import { redis } from "./cache";\n` : ""}${tsQueueImport(config)}`;
+}
+
+// Generic entity routers (no auth) only for entities no crud_* pattern serves — the
+// pattern handlers own those routes and their per-endpoint auth.
+function routerEntities(endpoints: Endpoint[], entities: Entity[]): Entity[] {
+  const served = tsCrudPatternEntityIds(endpoints, entities);
+  return entities.filter((e) => !served.has(e.id));
 }
 
 function entityCrudFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
@@ -581,7 +592,9 @@ export class ${pascal}Module {}
 `;
 }
 
-function prismaFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
+// withCreds: self-issued auth keeps bcrypt hashes in AuthCredential (auth_credentials),
+// one row per User, deleted with it (onDelete: Cascade).
+function prismaFiles(config: StackConfig, entities: Entity[], withCreds = false): GeneratedFile[] {
   const provider = /mongo/.test(config.database)
     ? "mongodb"
     : config.database === "mysql"
@@ -591,6 +604,7 @@ function prismaFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
     : "postgresql";
 
   const isMongo = provider === "mongodb";
+  const user = withCreds ? selfAuthUser(entities) : undefined;
   const models = entities
     .map((e) => {
       const lines: string[] = [];
@@ -601,7 +615,7 @@ function prismaFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
         const def = f.primaryKey
           ? f.type === "uuid"
             ? " @default(uuid())"
-            : isMongo ? "" : " @default(autoincrement())"
+            : isMongo || f.type !== "number" ? "" : " @default(autoincrement())"
           : "";
         lines.push(`  ${f.name}  ${prismaType(f.type)}${opt}${pk}${def}${uniq}`);
       }
@@ -609,8 +623,16 @@ function prismaFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
         lines.push("  createdAt DateTime @default(now())");
       if (!e.fields.some((f) => f.name === "updatedAt"))
         lines.push("  updatedAt DateTime @updatedAt");
+      if (e === user?.entity) lines.push("  authCredential AuthCredential?");
       return `model ${e.name} {\n${lines.join("\n")}\n}`;
     })
+    .concat(user ? [`model AuthCredential {
+  user_id       String @id
+  password_hash String
+  user          ${user.entity.name} @relation(fields: [user_id], references: [${user.pk.name}], onDelete: Cascade)
+
+  @@map("auth_credentials")
+}`] : [])
     .join("\n\n");
 
   const schema = `// Auto-generated by Helios — edit freely
@@ -674,7 +696,8 @@ function pkgJson(name: string, config: StackConfig, withPrisma: boolean, withAut
   };
   const dep = {
     ...(deps[framework] ?? deps.hono),
-    ...(withPrisma ? { "@prisma/client": "^5.22.0" } : {}),
+    // The prisma CLI runs at container start (see tsDockerfile), so it survives `npm prune --omit=dev`.
+    ...(withPrisma ? { "@prisma/client": "^5.22.0", prisma: "^5.22.0" } : {}),
     // Express always emits src/middleware/auth.ts, which imports jose.
     ...(withAuth || framework === "express" ? { jose: "^5.9.6" } : {}),
     ...(hasProm(config) ? { "prom-client": "^15.1.3" } : {}),
@@ -735,7 +758,6 @@ function pkgJson(name: string, config: StackConfig, withPrisma: boolean, withAut
           ...(needsBcrypt ? { "@types/bcrypt": "^5.0.2" } : {}),
           ...(needsJwt ? { "@types/jsonwebtoken": "^9.0.7" } : {}),
           ...(framework === "nestjs" ? { "@nestjs/testing": "^10.0.0" } : {}),
-          ...(withPrisma ? { prisma: "^5.22.0" } : {}),
         },
       },
       null,
@@ -769,7 +791,22 @@ function tsconfig() {
   ) + "\n";
 }
 
-function tsDockerfile() {
+// With Prisma the api syncs the schema before it listens. Only the image CMD does this:
+// the compose worker overrides the command, so it never races the api on DDL.
+function tsDockerfile(withPrisma: boolean) {
+  const runtime = withPrisma
+    ? `COPY --from=build /app/prisma ./prisma
+USER node
+EXPOSE 8080
+# Creates / updates tables to match prisma/schema.prisma, then starts the api. Idempotent:
+# a no-op when the schema is in sync, and it refuses changes that would drop data (the
+# container exits instead). A replica losing a first-boot race exits and is restarted.
+# Trade-off: no migration history. For reviewed migrations run npm run db:migrate
+# locally, commit prisma/migrations and replace db push --skip-generate with migrate deploy.
+CMD ["sh", "-c", "node_modules/.bin/prisma db push --skip-generate && exec node dist/main.js"]`
+    : `USER node
+EXPOSE 8080
+CMD ["node", "dist/main.js"]`;
   return `# syntax=docker/dockerfile:1
 FROM node:22-alpine AS build
 # Prisma's query engine needs OpenSSL; Alpine ships without it.
@@ -790,9 +827,7 @@ ENV NODE_ENV=production
 COPY package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-USER node
-EXPOSE 8080
-CMD ["node", "dist/main.js"]
+${runtime}
 `;
 }
 
@@ -1155,10 +1190,10 @@ ${guardLine(e)}  ${handlerName(e)}() {
     .join("\n\n");
   const nestCommon = ["Controller", "Get", "Post", "Put", "Patch", "Delete", ...(hasProm(config) ? ["Header"] : []), ...(hasPatterns ? ["Req", "Res"] : []), ...(endpoints.some(guarded) ? ["UseGuards"] : []), ...(tsQueueKind(config) ? ["Query", "ServiceUnavailableException", "OnApplicationShutdown"] : [])];
 
-  const entityModuleImports = entities
+  const entityModuleImports = routerEntities(endpoints, entities)
     .map((e) => `import { ${e.name}Module } from "./modules/${toKebab(e.name)}/${toKebab(e.name)}.module";`)
     .join("\n");
-  const entityModuleList = entities.map((e) => `${e.name}Module`).join(", ");
+  const entityModuleList = routerEntities(endpoints, entities).map((e) => `${e.name}Module`).join(", ");
 
   return [
     {
@@ -1319,10 +1354,10 @@ function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
     )
     .join("\n");
 
-  const entityImports = entities
+  const entityImports = routerEntities(endpoints, entities)
     .map((e) => `import { create${e.name}Router } from "./routes/${toKebab(e.name)}.router";`)
     .join("\n");
-  const entityMounts = entities
+  const entityMounts = routerEntities(endpoints, entities)
     .map((e) => `app.use("/${toKebab(e.name)}s", create${e.name}Router());`)
     .join("\n");
 
@@ -1493,10 +1528,10 @@ function fastifyFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
     )
     .join("\n");
 
-  const entityImports = entities
+  const entityImports = routerEntities(endpoints, entities)
     .map((e) => `import { ${toCamel(e.name)}Routes } from "./routes/${toKebab(e.name)}.route";`)
     .join("\n");
-  const entityRegistrations = entities
+  const entityRegistrations = routerEntities(endpoints, entities)
     .map((e) => `await app.register(${toCamel(e.name)}Routes, { prefix: "/${toKebab(e.name)}s" });`)
     .join("\n");
 
@@ -1607,10 +1642,10 @@ function honoFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[
     )
     .join("\n");
 
-  const entityImports = entities
+  const entityImports = routerEntities(endpoints, entities)
     .map((e) => `import { ${toCamel(e.name)}Routes } from "./routes/${toKebab(e.name)}.route";`)
     .join("\n");
-  const entityMounts = entities
+  const entityMounts = routerEntities(endpoints, entities)
     .map((e) => `app.route("/${toKebab(e.name)}s", ${toCamel(e.name)}Routes);`)
     .join("\n");
 

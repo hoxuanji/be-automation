@@ -152,11 +152,11 @@ function springFiles(
     });
     files.push({
       path: `src/main/java/dev/helios/app/controller/${pascal}Controller.java`,
-      content: controllerClass(entity),
+      content: controllerClass(entity, infra.publisher),
     });
     files.push({
       path: `src/test/java/dev/helios/app/${pascal}ControllerTest.java`,
-      content: controllerTest(entity, withAuth),
+      content: controllerTest(entity, withAuth, infra.publisher),
     });
   }
 
@@ -792,7 +792,12 @@ ${evict}    public boolean delete(${idType} id) {
 
 // ─── Controller class ─────────────────────────────────────────────────────────
 
-function controllerClass(entity: Entity): string {
+/** Java expression for the "<entity>.created" event body, matching Kotlin's. */
+function createdEvent(entity: Entity, idExpr: string): string {
+  return `"{\\"event\\":\\"${toKebab(entity.name)}.created\\",\\"id\\":\\"" + ${idExpr} + "\\"}"`;
+}
+
+function controllerClass(entity: Entity, publisher = false): string {
   const pascal = toPascal(entity.name);
   const kebab = toKebab(entity.name);
   const camel = toCamel(entity.name);
@@ -804,7 +809,7 @@ function controllerClass(entity: Entity): string {
 
   return `package dev.helios.app.controller;
 
-import dev.helios.app.model.${pascal};
+${publisher ? "import dev.helios.app.messaging.NotificationPublisher;\n" : ""}import dev.helios.app.model.${pascal};
 import dev.helios.app.service.${pascal}Service;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -816,10 +821,10 @@ import java.util.List;
 @RequestMapping("/${kebab}s")
 public class ${pascal}Controller {
 
-    private final ${pascal}Service service;
+    private final ${pascal}Service service;${publisher ? "\n    private final NotificationPublisher publisher;" : ""}
 
-    public ${pascal}Controller(${pascal}Service service) {
-        this.service = service;
+    public ${pascal}Controller(${pascal}Service service${publisher ? ", NotificationPublisher publisher" : ""}) {
+        this.service = service;${publisher ? "\n        this.publisher = publisher;" : ""}
     }
 
     @GetMapping
@@ -835,8 +840,11 @@ public class ${pascal}Controller {
     }
 
     @PostMapping
-    public ResponseEntity<${pascal}> create(@RequestBody ${pascal} ${camel}) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(service.create(${camel}));
+    public ResponseEntity<${pascal}> create(@RequestBody ${pascal} ${camel}) {${publisher ? `
+        ${pascal} saved = service.create(${camel});
+        publisher.publish(${createdEvent(entity, `saved.get${toPascal(pk?.name ?? "id")}()`)});
+        return ResponseEntity.status(HttpStatus.CREATED).body(saved);` : `
+        return ResponseEntity.status(HttpStatus.CREATED).body(service.create(${camel}));`}
     }
 
     @PutMapping("/{id}")
@@ -858,7 +866,17 @@ public class ${pascal}Controller {
 
 // ─── Controller test ──────────────────────────────────────────────────────────
 
-function controllerTest(entity: Entity, withAuth = false): string {
+/** Brokers are down in unit tests, so tests that create entities mock the publisher. */
+const SPRING_PUBLISHER_MOCK = `
+    @MockBean
+    dev.helios.app.messaging.NotificationPublisher publisher;
+`;
+const QUARKUS_PUBLISHER_MOCK = `
+    @io.quarkus.test.InjectMock
+    dev.helios.app.messaging.NotificationPublisher publisher;
+`;
+
+function controllerTest(entity: Entity, withAuth = false, publisher = false): string {
   const pascal = toPascal(entity.name);
   const kebab = toKebab(entity.name);
 
@@ -875,7 +893,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-${withAuth ? "import org.springframework.boot.test.mock.mockito.MockBean;\n" : ""}import org.springframework.http.MediaType;
+${withAuth || publisher ? "import org.springframework.boot.test.mock.mockito.MockBean;\n" : ""}import org.springframework.http.MediaType;
 ${withAuth ? "import org.springframework.security.oauth2.jwt.JwtDecoder;\n" : ""}import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 ${withAuth ? "import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;\n" : ""}import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -893,7 +911,7 @@ ${withAuth ? `
     // the mocked decoder keeps the context from needing a live JWKS endpoint.
     @MockBean
     JwtDecoder jwtDecoder;
-` : ""}
+` : ""}${publisher ? SPRING_PUBLISHER_MOCK : ""}
     @Test
     void list${pascal}s_returnsOk() throws Exception {
         mvc.perform(get("/${kebab}s")${withAuth ? ".with(jwt())" : ""})
@@ -948,7 +966,7 @@ function quarkusFiles(
     });
     files.push({
       path: `src/main/java/dev/helios/app/${pascal}Resource.java`,
-      content: quarkusResource(entity, pascal, kebab, withAuth, infra.cache),
+      content: quarkusResource(entity, pascal, kebab, withAuth, infra.cache, infra.publisher),
     });
     // Smoke test mirrors what the Spring path emits — list returns 200,
     // create returns 201. Real assertion logic is left to the user, who
@@ -957,7 +975,7 @@ function quarkusFiles(
     // reflectively-broken Panache bindings.
     files.push({
       path: `src/test/java/dev/helios/app/${pascal}ResourceTest.java`,
-      content: quarkusResourceTest(entity, pascal, kebab, withAuth),
+      content: quarkusResourceTest(entity, pascal, kebab, withAuth, infra.publisher),
     });
   }
 
@@ -1074,7 +1092,13 @@ ${extra}${infra?.deps ?? ""}    <dependency>
       <artifactId>quarkus-junit5</artifactId>
       <scope>test</scope>
     </dependency>
+${infra?.publisher ? `    <!-- @InjectMock: tests run without a broker, so the publisher is mocked. -->
     <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-junit5-mockito</artifactId>
+      <scope>test</scope>
+    </dependency>
+` : ""}    <dependency>
       <groupId>io.rest-assured</groupId>
       <artifactId>rest-assured</artifactId>
       <scope>test</scope>
@@ -1128,6 +1152,8 @@ mp.jwt.verify.audiences=\${AUTH_AUDIENCE:}
 quarkus.datasource.db-kind=${mysql ? "mysql" : "postgresql"}
 quarkus.datasource.jdbc.url=\${DATABASE_URL:${mysql ? `jdbc:mysql://localhost:3306/${appName}` : `jdbc:postgresql://localhost:5432/${appName}`}}
 quarkus.hibernate-orm.database.generation=update
+# snake_case columns (createdAt → created_at), matching db/migration/V1__init.sql and Spring.
+quarkus.hibernate-orm.physical-naming-strategy=org.hibernate.boot.model.naming.CamelCaseToUnderscoresNamingStrategy
 quarkus.http.port=\${PORT:8080}
 # Tests use in-memory H2 so \`mvn test\` needs no database.
 %test.quarkus.datasource.db-kind=h2
@@ -1177,17 +1203,23 @@ ${fieldDeclarations}
 `;
 }
 
-function quarkusResource(entity: Entity, pascal: string, kebab: string, withAuth = false, cached = false): string {
+function quarkusResource(entity: Entity, pascal: string, kebab: string, withAuth = false, cached = false, publisher = false): string {
   const pk = pkField(entity);
   // Redis cache-aside (JsonCache): get-by-id reads Redis first; update/delete evict.
   const key = `"${kebab}s:" + id`;
   const evict = cached ? `\n        cache.evict(${key});` : "";
   const idType = pk ? javaShortType(pk.type) : "UUID";
   const idImport = "import java.util.UUID;";
+  // Same merge as the Spring service: every writable field the body carries replaces the
+  // stored value; the managed entity is flushed when the @Transactional method commits.
+  const merge = entity.fields.filter(f => !f.primaryKey && f !== pk).map(f => {
+    const n = toCamel(f.name);
+    return `        if (updates.${n} != null) existing.${n} = updates.${n};`;
+  }).join("\n");
 
   return `package dev.helios.app;
 
-${cached ? "import dev.helios.app.infra.JsonCache;\n" : ""}${withAuth ? "import io.quarkus.security.Authenticated;\n" : ""}${cached ? "import jakarta.inject.Inject;\n" : ""}import jakarta.transaction.Transactional;
+${cached ? "import dev.helios.app.infra.JsonCache;\n" : ""}${publisher ? "import dev.helios.app.messaging.NotificationPublisher;\n" : ""}${withAuth ? "import io.quarkus.security.Authenticated;\n" : ""}${cached || publisher ? "import jakarta.inject.Inject;\n" : ""}import jakarta.transaction.Transactional;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -1201,6 +1233,9 @@ public class ${pascal}Resource {
 ${cached ? `
     @Inject
     JsonCache cache;
+` : ""}${publisher ? `
+    @Inject
+    NotificationPublisher publisher;
 ` : ""}
     @GET
     public List<${pascal}> list() {
@@ -1221,7 +1256,8 @@ ${cached ? `
     @POST
     @Transactional
     public Response create(${pascal} entity) {
-        entity.persist();
+        entity.persist();${publisher ? `
+        publisher.publish(${createdEvent(entity, `entity.${toCamel(pk?.name ?? "id")}`)});` : ""}
         return Response.status(Response.Status.CREATED).entity(entity).build();
     }
 
@@ -1231,8 +1267,7 @@ ${cached ? `
     public Response update(@PathParam("id") ${idType} id, ${pascal} updates) {
         ${pascal} existing = ${pascal}.findById(id);
         if (existing == null) return Response.status(Response.Status.NOT_FOUND).build();
-        // merge non-null fields from updates
-        existing.persist();${evict}
+${merge}${evict}
         return Response.ok(existing).build();
     }
 
@@ -1286,9 +1321,26 @@ public class HealthResource {
 `;
 }
 
-function quarkusResourceTest(entity: Entity, pascal: string, kebab: string, withAuth = false): string {
+function quarkusResourceTest(entity: Entity, pascal: string, kebab: string, withAuth = false, publisher = false): string {
   // A valid body (required fields filled, unique values fresh): "{}" violates the
   // NOT NULL columns and answers 500 once auth is off. ApiContractTest covers the rest of CRUD.
+  // PUT once answered 200 without touching the row: prove a field actually changes and sticks.
+  const pk = pkField(entity);
+  const str = entity.fields.find(f => !f.primaryKey && f !== pk && (f.type === "string" || f.type === "text"));
+  const updateTest = withAuth || !str ? "" : `
+    @Test
+    void update${pascal}_appliesBody() {
+        String id = given().contentType("application/json").body(${javaEntityBody(entity)})
+               .when().post("/${kebab}s")
+               .then().statusCode(201).extract().path("${toCamel(pk?.name ?? "id")}");
+        String changed = unique();
+        given().contentType("application/json").body("{\\"${toCamel(str.name)}\\":\\"" + changed + "\\"}")
+               .when().put("/${kebab}s/" + id)
+               .then().statusCode(200).body("${toCamel(str.name)}", org.hamcrest.Matchers.equalTo(changed));
+        given().when().get("/${kebab}s/" + id)
+               .then().statusCode(200).body("${toCamel(str.name)}", org.hamcrest.Matchers.equalTo(changed));
+    }
+`;
   return `package dev.helios.app;
 
 import io.quarkus.test.junit.QuarkusTest;
@@ -1298,7 +1350,7 @@ import static io.restassured.RestAssured.given;
 
 @QuarkusTest
 class ${pascal}ResourceTest {
-
+${publisher ? QUARKUS_PUBLISHER_MOCK : ""}
     private static String unique() {
         return "test-" + java.util.UUID.randomUUID();
     }
@@ -1315,7 +1367,7 @@ class ${pascal}ResourceTest {
                .when().post("/${kebab}s")
                .then().statusCode(${withAuth ? 401 : 201});
     }
-}
+${updateTest}}
 `;
 }
 
@@ -1423,7 +1475,7 @@ function javaContractMethods(cases: JavaContractCase[], render: JavaRender): str
   ).join("");
 }
 
-function springContractTest(cases: JavaContractCase[], entities: Entity[], withAuth: boolean): string {
+function springContractTest(cases: JavaContractCase[], entities: Entity[], withAuth: boolean, publisher: boolean): string {
   const jwt = (principal: boolean) => (principal ? ".with(jwt())" : "");
   const render: JavaRender = (fn, c, principal, status) => {
     const req = [`request(HttpMethod.${c.method}, ${c.path})${jwt(principal)}`];
@@ -1466,7 +1518,7 @@ ${entities.length ? "import com.jayway.jsonpath.JsonPath;\n" : ""}import org.jun
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-${withAuth ? "import org.springframework.boot.test.mock.mockito.MockBean;\n" : ""}import org.springframework.http.HttpMethod;
+${withAuth || publisher ? "import org.springframework.boot.test.mock.mockito.MockBean;\n" : ""}import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 ${withAuth ? "import org.springframework.security.oauth2.jwt.JwtDecoder;\n" : ""}import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
@@ -1491,7 +1543,7 @@ ${withAuth ? `
     // jwt() supplies the authenticated principal; the mock keeps the context off the JWKS endpoint.
     @MockBean
     JwtDecoder jwtDecoder;
-` : ""}
+` : ""}${publisher ? SPRING_PUBLISHER_MOCK : ""}
     private static String unique() {
         return "test-" + java.util.UUID.randomUUID();
     }
@@ -1499,7 +1551,7 @@ ${helpers}${javaContractMethods(cases, render)}}
 `;
 }
 
-function quarkusContractTest(cases: JavaContractCase[], entities: Entity[], withAuth: boolean): string {
+function quarkusContractTest(cases: JavaContractCase[], entities: Entity[], withAuth: boolean, publisher: boolean): string {
   const render: JavaRender = (fn, c, principal, status) => {
     const given = ["given()"];
     if (status !== 401 && c.rejectBody) given.push('.contentType(ContentType.TEXT).body("not json")');
@@ -1552,7 +1604,7 @@ import static org.hamcrest.Matchers.*;
  */
 @QuarkusTest
 class ApiContractTest {
-
+${publisher ? QUARKUS_PUBLISHER_MOCK : ""}
     private static String unique() {
         return "test-" + java.util.UUID.randomUUID();
     }
@@ -1564,10 +1616,11 @@ ${helpers}${javaContractMethods(cases, render)}}
 export function javaContractTestFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
   const withAuth = needsAuth(config, endpoints.some((e) => e.auth));
   const spring = config.framework !== "quarkus";
+  const publisher = javaQueue(config.queue) !== null;
   const cases = javaContractCases(config, endpoints, entities, withAuth, spring);
   return [{
     path: "src/test/java/dev/helios/app/ApiContractTest.java",
-    content: spring ? springContractTest(cases, entities, withAuth) : quarkusContractTest(cases, entities, withAuth),
+    content: spring ? springContractTest(cases, entities, withAuth, publisher) : quarkusContractTest(cases, entities, withAuth, publisher),
   }];
 }
 

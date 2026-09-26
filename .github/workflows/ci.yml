@@ -205,6 +205,9 @@ jobs:
             go build ./... && go vet ./...
           } 2>&1 | tee -a /tmp/smoke.log
           test -z "$(gofmt -l .)" || { echo "::error::generated Go is not gofmt-clean:"; gofmt -l .; exit 1; }
+          # The generated repo's own tests, as its Makefile runs them. No services here:
+          # contract tests skip (with the reason) when their database/broker is absent.
+          go test ./... -race -cover 2>&1 | tee -a /tmp/smoke.log
 
       - name: Setup Node (TS)
         if: matrix.combo.language == 'typescript'
@@ -286,7 +289,7 @@ jobs:
           # CI logs aren't always downloadable; surface the real errors as annotations.
           # Compiler errors first (Go, Rust, TS, Maven/javac, Kotlin), then failing tests from JUnit/surefire reports.
           sed -E 's/\x1b\[[0-9;]*m//g' /tmp/smoke.log 2>/dev/null > /tmp/smoke.clean.log || true
-          grep -E '\.go:[0-9]+:[0-9]+:|^error(\[E[0-9]+\])?:|^ *--> |error TS[0-9]+|\[ERROR\] .*\.(java|kt)|COMPILATION ERROR|^e: |What went wrong|undefined name|missing go.sum|Could not resolve|Cannot resolve|CMake Error|failed to run custom build command|Tests run:.*Failures: [1-9]|Caused by: ' /tmp/smoke.clean.log 2>/dev/null \
+          grep -E '\.go:[0-9]+:[0-9]+:|_test\.go:[0-9]+: |^--- FAIL|^panic: |DATA RACE|^error(\[E[0-9]+\])?:|^ *--> |error TS[0-9]+|\[ERROR\] .*\.(java|kt)|COMPILATION ERROR|^e: |What went wrong|undefined name|missing go.sum|Could not resolve|Cannot resolve|CMake Error|failed to run custom build command|Tests run:.*Failures: [1-9]|Caused by: ' /tmp/smoke.clean.log 2>/dev/null \
             | grep -vE '^\s*(Compiling|Checking|Downloaded|Downloading)' | head -30 | while IFS= read -r l; do echo "::error::$l"; done
           # Cargo build-script failures print the real cause under "--- stderr".
           grep -A400 -- '--- stderr' /tmp/smoke.clean.log 2>/dev/null \
@@ -304,15 +307,20 @@ jobs:
       fail-fast: false
       matrix:
         # One full-profile stack per language, each with a different broker: the image must
-        # build, the api must report ready (DB + cache + broker reachable), the worker must stay up.
+        # build, the api must report ready (DB + cache + broker reachable), the worker must stay up,
+        # and a message the app publishes must be consumed. `publish` picks the trigger
+        # (scripts/e2e-roundtrip.sh): "notification" = POST /notifications, "user" = POST /users.
+        # Then User CRUD against the real DB (scripts/e2e-crud.sh): `crud_case` is the JSON field
+        # casing the routes bind (default camel); `crud_send_id` sends a client id on create.
         combo:
-          - { label: "go-gin-rabbitmq", language: "go", framework: "gin", queue: "rabbitmq" }
-          - { label: "ts-express-kafka", language: "typescript", framework: "express", queue: "kafka" }
-          - { label: "python-fastapi-nats", language: "python", framework: "fastapi", queue: "nats" }
-          - { label: "rust-axum-sqs", language: "rust", framework: "axum", queue: "sqs" }
-          - { label: "java-spring-rabbitmq", language: "java", framework: "spring", queue: "rabbitmq" }
-          - { label: "java-quarkus-kafka", language: "java", framework: "quarkus", queue: "kafka" }
-          - { label: "kotlin-ktor-bullmq", language: "kotlin", framework: "ktor", queue: "bullmq" }
+          - { label: "go-gin-rabbitmq", language: "go", framework: "gin", queue: "rabbitmq", publish: "notification", crud_case: "camel" }
+          - { label: "ts-express-kafka", language: "typescript", framework: "express", queue: "kafka", publish: "notification" }
+          - { label: "ts-fastify-nats", language: "typescript", framework: "fastify", queue: "nats", publish: "notification" }
+          - { label: "python-fastapi-nats", language: "python", framework: "fastapi", queue: "nats", publish: "notification" }
+          - { label: "rust-axum-sqs", language: "rust", framework: "axum", queue: "sqs", publish: "notification", crud_case: "snake" }
+          - { label: "java-spring-rabbitmq", language: "java", framework: "spring", queue: "rabbitmq", publish: "user" }
+          - { label: "java-quarkus-kafka", language: "java", framework: "quarkus", queue: "kafka", publish: "user" }
+          - { label: "kotlin-ktor-bullmq", language: "kotlin", framework: "ktor", queue: "bullmq", publish: "user" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -338,6 +346,7 @@ jobs:
           cp .env.example .env
           docker compose up -d --build 2>&1 | tee /tmp/compose.log
       - name: API becomes ready and the worker stays up
+        id: ready
         working-directory: /tmp/smoke-repo
         run: |
           for i in $(seq 1 90); do
@@ -351,6 +360,17 @@ jobs:
             state=$(docker compose ps worker --format '{{.State}}')
             [ "$state" = "running" ] || { echo "::error::worker is $state"; exit 1; }
           fi
+      - name: Message round trip (app publishes, consumer logs it)
+        working-directory: /tmp/smoke-repo
+        run: bash "$GITHUB_WORKSPACE/scripts/e2e-roundtrip.sh" "${{ matrix.combo.publish }}"
+      # Runs even if the round trip failed, so one run reports both.
+      - name: Entity CRUD against the database
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        working-directory: /tmp/smoke-repo
+        env:
+          CRUD_CASE: ${{ matrix.combo.crud_case }}
+          CRUD_SEND_ID: ${{ matrix.combo.crud_send_id }}
+        run: bash "$GITHUB_WORKSPACE/scripts/e2e-crud.sh"
       # GitHub keeps at most 10 error annotations per step, so each source gets its own step.
       - name: "Report e2e: container states"
         if: failure()

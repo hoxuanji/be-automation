@@ -66,8 +66,8 @@
   },
   {
     "path": "app/db.py",
-    "lines": 74,
-    "size": 2307
+    "lines": 80,
+    "size": 2561
   },
   {
     "path": "app/logging_config.py",
@@ -82,7 +82,7 @@
   {
     "path": "app/models.py",
     "lines": 30,
-    "size": 991
+    "size": 1030
   },
   {
     "path": "app/queue.py",
@@ -96,8 +96,8 @@
   },
   {
     "path": "app/worker.py",
-    "lines": 42,
-    "size": 1235
+    "lines": 43,
+    "size": 1254
   },
   {
     "path": "DEPLOY.md",
@@ -181,8 +181,8 @@
   },
   {
     "path": "migrations/versions/0001_init.py",
-    "lines": 38,
-    "size": 1311
+    "lines": 50,
+    "size": 1119
   },
   {
     "path": "pyproject.toml",
@@ -207,7 +207,7 @@
   {
     "path": "sdk/test-app-client.ts",
     "lines": 76,
-    "size": 2175
+    "size": 2035
   },
   {
     "path": "tests/test_contracts.py",

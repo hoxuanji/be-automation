@@ -214,6 +214,15 @@ async fn connect() -> Result<Client, String> {
     Ok(Client { _conn: Arc::new(conn), ch })
 }
 
+// Readiness: lapin flags the connection/channel as closed once heartbeats or I/O fail.
+async fn check(c: &Client) -> Result<(), String> {
+    if c._conn.status().connected() && c.ch.status().connected() {
+        Ok(())
+    } else {
+        Err("AMQP connection closed".to_string())
+    }
+}
+
 async fn send(c: &Client, payload: &[u8]) -> Result<(), String> {
     let confirm = c
         .ch
@@ -265,7 +274,7 @@ pub async fn consume<F: Fn(&[u8])>(handle: F, shutdown: impl Future<Output = ()>
 
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
-use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
+use rskafka::client::partition::{Compression, OffsetAt, PartitionClient, UnknownTopicHandling};
 use rskafka::client::ClientBuilder;
 use rskafka::record::Record;
 use std::collections::BTreeMap;
@@ -300,6 +309,11 @@ async fn connect() -> Result<Client, String> {
     tokio::time::timeout(Duration::from_secs(10), open())
         .await
         .map_err(|_| "kafka: timed out connecting to KAFKA_BROKERS".to_string())?
+}
+
+// Readiness: a ListOffsets round-trip to the partition leader.
+async fn check(p: &Client) -> Result<(), String> {
+    p.get_offset(OffsetAt::Latest).await.map(|_| ()).map_err(err)
 }
 
 async fn send(p: &Client, payload: &[u8]) -> Result<(), String> {
@@ -369,6 +383,11 @@ async fn connect() -> Result<Client, String> {
     Ok(js)
 }
 
+// Readiness: a JetStream API round-trip (stream info).
+async fn check(js: &Client) -> Result<(), String> {
+    js.get_stream(STREAM).await.map(|_| ()).map_err(|e| e.to_string())
+}
+
 async fn send(js: &Client, payload: &[u8]) -> Result<(), String> {
     js.publish(QUEUE, payload.to_vec().into())
         .await
@@ -434,6 +453,11 @@ async fn connect() -> Result<Client, String> {
     Ok(Client { sqs, url })
 }
 
+// Readiness: GetQueueUrl is the cheapest authenticated SQS call.
+async fn check(c: &Client) -> Result<(), String> {
+    c.sqs.get_queue_url().queue_name(QUEUE).send().await.map(|_| ()).map_err(err)
+}
+
 async fn send(c: &Client, payload: &[u8]) -> Result<(), String> {
     c.sqs
         .send_message()
@@ -484,6 +508,13 @@ async fn connect() -> Result<Client, String> {
     client.get_connection_manager().await.map_err(|e| e.to_string())
 }
 
+// Readiness: Redis answers PING.
+async fn check(c: &Client) -> Result<(), String> {
+    let mut c = c.clone();
+    let _: String = redis::cmd("PING").query_async(&mut c).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 async fn send(c: &Client, payload: &[u8]) -> Result<(), String> {
     let mut c = c.clone();
     c.lpush::<_, _, ()>(KEY, payload).await.map_err(|e| e.to_string())
@@ -520,25 +551,44 @@ pub const QUEUE: &str = "notifications";
 
 static CLIENT: tokio::sync::Mutex<Option<Client>> = tokio::sync::Mutex::const_new(None);
 
-/// Publish one message. The connection opens on first use and is re-opened
-/// after a failed publish.
+// The shared connection opens on first use and is re-opened after a failure.
+async fn client() -> Result<Client, String> {
+    let mut slot = CLIENT.lock().await;
+    if let Some(c) = slot.as_ref() {
+        return Ok(c.clone());
+    }
+    let c = connect().await?;
+    *slot = Some(c.clone());
+    Ok(c)
+}
+
+/// Publish one message.
 pub async fn publish(payload: &[u8]) -> Result<(), String> {
-    let client = {
-        let mut slot = CLIENT.lock().await;
-        match slot.as_ref() {
-            Some(c) => c.clone(),
-            None => {
-                let c = connect().await?;
-                *slot = Some(c.clone());
-                c
-            }
-        }
-    };
-    let res = send(&client, payload).await;
+    let res = send(&client().await?, payload).await;
     if res.is_err() {
         *CLIENT.lock().await = None;
     }
     res
+}
+
+/// Readiness probe (/health?ready=1): reuses the publish connection and asks the
+/// broker for something cheap. Bounded at 2 s so readiness never hangs; the probe
+/// is spawned so a slow first connect still completes and is reused next time.
+pub async fn ping() -> Result<(), String> {
+    const LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+    let probe = tokio::spawn(async {
+        let c = client().await?;
+        let res = tokio::time::timeout(LIMIT, check(&c)).await.unwrap_or_else(|_| Err("broker timeout".to_string()));
+        if res.is_err() {
+            *CLIENT.lock().await = None;
+        }
+        res
+    });
+    match tokio::time::timeout(LIMIT, probe).await {
+        Ok(Ok(res)) => res,
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("broker timeout".to_string()),
+    }
 }
 `;
 }
@@ -572,7 +622,7 @@ async fn main() {
 /// Replace with the real work (send the email, push notification, …).
 /// Panicking crashes the worker; the message is redelivered where the broker supports it.
 fn handle(payload: &[u8]) {
-    tracing::info!(bytes = payload.len(), body = %String::from_utf8_lossy(payload), "worker: message");
+    tracing::info!(topic = queue::QUEUE, body = %String::from_utf8_lossy(&payload[..payload.len().min(200)]), "consumed");
 }
 
 async fn shutdown_signal() {

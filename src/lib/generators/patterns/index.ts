@@ -1,3 +1,6 @@
+import type { Endpoint, Entity, StackConfig } from "../types";
+import { authProviderSpec } from "../auth/providers";
+
 // Pattern catalog — every entry drives the UI dropdown and the generator dispatch.
 // The 'methods' hint what HTTP verbs make sense; it's advisory, not enforced.
 
@@ -36,4 +39,47 @@ export type PatternCategory = typeof PATTERN_CATALOG[number]["category"];
 export const PATTERN_BY_CATEGORY: Record<string, typeof PATTERN_CATALOG[number][]> = {};
 for (const p of PATTERN_CATALOG) {
   (PATTERN_BY_CATEGORY[p.category] ??= []).push(p);
+}
+
+// ── Self-issued auth storage ─────────────────────────────────────────────────
+// With auth "none", register/login/change_password keep bcrypt hashes in a
+// generated auth_credentials table keyed by the User's primary key — never on
+// the user's own entity. That works whatever fields User declares, and the hash
+// can't leak through (or be overwritten by) the User CRUD routes.
+
+/** The User entity self-issued auth registers into: needs `email` and a string/uuid PK (the handler mints ids). */
+export function selfAuthUser(entities: Entity[]) {
+  const entity = entities.find((e) => e.name.toLowerCase() === "user");
+  const pk = entity?.fields.find((f) => f.primaryKey);
+  const email = entity?.fields.find((f) => f.name === "email");
+  if (!entity || !pk || !email || !["uuid", "string", "text"].includes(pk.type)) return undefined;
+  const rest = entity.fields.filter((f) => f !== pk && f !== email);
+  // ponytail: register stamps required date columns with "now" instead of parsing client timestamps.
+  const settable = rest.filter((f) => f.type !== "date");
+  return {
+    entity, pk, email,
+    settable,                                     // columns the register body may set
+    required: settable.filter((f) => f.required), // register answers 400 naming any the body omits
+    dates: rest.filter((f) => f.type === "date" && f.required),
+  };
+}
+export type SelfAuthUser = NonNullable<ReturnType<typeof selfAuthUser>>;
+
+/** Entity id of the generated credentials table; its user_id is a FK to the User PK, ON DELETE CASCADE. */
+export const AUTH_CREDENTIAL_ID = "auth_credential";
+
+const HASH_PATTERNS = new Set(["auth_login", "auth_register", "auth_change_password"]);
+
+/** The auth_credentials entity to model + migrate when self-issued auth stores hashes; [] otherwise. */
+export function authCredentialEntities(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): Entity[] {
+  const user = selfAuthUser(entities);
+  if (authProviderSpec(config) || !user || !endpoints.some((e) => HASH_PATTERNS.has(e.pattern ?? ""))) return [];
+  return [{
+    id: AUTH_CREDENTIAL_ID,
+    name: "AuthCredential", // table auth_credentials
+    fields: [
+      { id: "user_id", name: "user_id", type: user.pk.type, required: true, unique: true, primaryKey: true },
+      { id: "password_hash", name: "password_hash", type: "string", required: true, unique: false },
+    ],
+  }];
 }

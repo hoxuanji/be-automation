@@ -41,13 +41,13 @@
   },
   {
     "path": "cmd/migrate/main.go",
-    "lines": 87,
-    "size": 2170
+    "lines": 76,
+    "size": 1784
   },
   {
     "path": "cmd/worker/main.go",
     "lines": 67,
-    "size": 1754
+    "size": 1778
   },
   {
     "path": "DEPLOY.md",
@@ -126,8 +126,8 @@
   },
   {
     "path": "internal/api/contract/contract_test.go",
-    "lines": 139,
-    "size": 3264
+    "lines": 142,
+    "size": 3687
   },
   {
     "path": "internal/auth/jwt.go",
@@ -150,6 +150,11 @@
     "size": 544
   },
   {
+    "path": "internal/db/migrate.go",
+    "lines": 52,
+    "size": 1483
+  },
+  {
     "path": "internal/db/sql.go",
     "lines": 58,
     "size": 1600
@@ -161,8 +166,8 @@
   },
   {
     "path": "internal/handlers/post.go",
-    "lines": 64,
-    "size": 2014
+    "lines": 65,
+    "size": 1994
   },
   {
     "path": "internal/handlers/user_test.go",
@@ -171,13 +176,13 @@
   },
   {
     "path": "internal/handlers/user.go",
-    "lines": 64,
-    "size": 2014
+    "lines": 65,
+    "size": 1994
   },
   {
     "path": "internal/models/models.go",
-    "lines": 44,
-    "size": 1022
+    "lines": 42,
+    "size": 940
   },
   {
     "path": "internal/monitoring/metrics.go",
@@ -211,8 +216,8 @@
   },
   {
     "path": "internal/server/server.go",
-    "lines": 110,
-    "size": 3301
+    "lines": 114,
+    "size": 3405
   },
   {
     "path": "internal/tracing/tracing.go",
@@ -228,6 +233,11 @@
     "path": "migrations/000001_init.up.sql",
     "lines": 22,
     "size": 756
+  },
+  {
+    "path": "migrations/migrations.go",
+    "lines": 8,
+    "size": 136
   },
   {
     "path": "QUICKSTART.md",
@@ -247,6 +257,6 @@
   {
     "path": "sdk/test-app-client.ts",
     "lines": 76,
-    "size": 2175
+    "size": 2035
   }
 ]

@@ -329,7 +329,7 @@ public class NotificationConsumer {
     private static final Logger log = LoggerFactory.getLogger(NotificationConsumer.class);
 ${extra}
 ${annotation ? `    ${annotation}\n` : ""}    public void onMessage(String payload) {
-        log.info("notification received: {}", payload);
+        log.info("consumed topic={} body={}", NotificationPublisher.DESTINATION, payload.substring(0, Math.min(payload.length(), 200)));
     }
 }
 `;
@@ -590,7 +590,7 @@ public class NotificationConsumer {
     }
 
     public void onMessage(String payload) {
-        log.info("notification received: {}", payload);
+        log.info("consumed topic={} body={}", NotificationPublisher.DESTINATION, payload.substring(0, Math.min(payload.length(), 200)));
     }
 }
 ` },
@@ -896,7 +896,7 @@ public class NotificationConsumer {
 
     @Incoming("notifications-in")
     public void onMessage(String payload) {
-        LOG.infof("notification received: %s", payload);
+        LOG.infof("consumed topic=%s body=%s", "notifications", payload.substring(0, Math.min(payload.length(), 200)));
     }
 }
 `),
@@ -928,7 +928,7 @@ ${start}
     }
 
     public void onMessage(String payload) {
-        LOG.infof("notification received: %s", payload);
+        LOG.infof("consumed topic=%s body=%s", NotificationPublisher.DESTINATION, payload.substring(0, Math.min(payload.length(), 200)));
     }
 ${extra}}
 `);

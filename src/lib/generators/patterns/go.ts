@@ -1,7 +1,9 @@
 import type { Endpoint, Entity, StackConfig } from "../types";
-import type { PatternId } from "./index";
+import { selfAuthUser, type PatternId, type SelfAuthUser } from "./index";
 import type { GeneratedFile } from "../types";
-import { safeName } from "../types";
+import { safeName, toPascal, toSnake } from "../types";
+
+const CRED_TABLE = "auth_credentials"; // see authCredentialEntities
 import { authProviderSpec } from "../auth/providers";
 import { goQueueKind } from "../queue/go";
 
@@ -35,6 +37,7 @@ interface FwCtx {
   pathParam: (name: string) => string;
   getBody: () => string;          // lines that bind body into `var body map[string]any`
   getBodyTyped: (typ: string) => string; // bind into typed struct
+  bindInto: (v: string) => string; // bind onto an existing variable (overlays the sent fields)
   sendJSON: (status: string, expr: string) => string;
   sendNoContent: () => string;
   retErr: (code: string, msg: string, indent?: string) => string; // return error response; indent = depth of the call site
@@ -51,6 +54,7 @@ function fwCtx(fw: Fw): FwCtx {
     pathParam: (n) => `c.Param(${JSON.stringify(n)})`,
     getBody: () => `\tvar body map[string]any\n\tif err := c.ShouldBindJSON(&body); err != nil {\n\t\tc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})\n\t\treturn\n\t}`,
     getBodyTyped: (t) => `\tvar body ${t}\n\tif err := c.ShouldBindJSON(&body); err != nil {\n\t\tc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})\n\t\treturn\n\t}`,
+    bindInto: (v) => `\tif err := c.ShouldBindJSON(&${v}); err != nil {\n\t\tc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})\n\t\treturn\n\t}`,
     sendJSON: (s, e) => `c.JSON(${s}, ${e})`,
     sendNoContent: () => `c.Status(http.StatusNoContent)`,
     retErr: (code, msg, ind = "\t\t") => `c.JSON(${code}, gin.H{"error": ${JSON.stringify(msg)}})\n${ind}return`,
@@ -66,6 +70,7 @@ function fwCtx(fw: Fw): FwCtx {
     pathParam: (n) => `c.Params(${JSON.stringify(n)})`,
     getBody: () => `\tvar body map[string]any\n\tif err := c.BodyParser(&body); err != nil {\n\t\treturn c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})\n\t}`,
     getBodyTyped: (t) => `\tvar body ${t}\n\tif err := c.BodyParser(&body); err != nil {\n\t\treturn c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})\n\t}`,
+    bindInto: (v) => `\tif err := c.BodyParser(&${v}); err != nil {\n\t\treturn c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})\n\t}`,
     sendJSON: (s, e) => `return c.Status(${s}).JSON(${e})`,
     sendNoContent: () => `return c.SendStatus(http.StatusNoContent)`,
     retErr: (code, msg) => `return c.Status(${code}).JSON(fiber.Map{"error": ${JSON.stringify(msg)}})`,
@@ -81,6 +86,7 @@ function fwCtx(fw: Fw): FwCtx {
     pathParam: (n) => `c.Param(${JSON.stringify(n)})`,
     getBody: () => `\tvar body map[string]any\n\tif err := c.Bind(&body); err != nil {\n\t\treturn c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t}`,
     getBodyTyped: (t) => `\tvar body ${t}\n\tif err := c.Bind(&body); err != nil {\n\t\treturn c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t}`,
+    bindInto: (v) => `\tif err := c.Bind(&${v}); err != nil {\n\t\treturn c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t}`,
     sendJSON: (s, e) => `return c.JSON(${s}, ${e})`,
     sendNoContent: () => `return c.NoContent(http.StatusNoContent)`,
     retErr: (code, msg) => `return c.JSON(${code}, map[string]any{"error": ${JSON.stringify(msg)}})`,
@@ -97,6 +103,7 @@ function fwCtx(fw: Fw): FwCtx {
     pathParam: (n) => `chi.URLParam(r, ${JSON.stringify(n)})`,
     getBody: () => `\tvar body map[string]any\n\tif err := json.NewDecoder(r.Body).Decode(&body); err != nil {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t\treturn\n\t}`,
     getBodyTyped: (t) => `\tvar body ${t}\n\tif err := json.NewDecoder(r.Body).Decode(&body); err != nil {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t\treturn\n\t}`,
+    bindInto: (v) => `\tif err := json.NewDecoder(r.Body).Decode(&${v}); err != nil {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t\treturn\n\t}`,
     sendJSON: (s, e) => `writeJSON(w, ${s}, ${e})`,
     sendNoContent: () => `w.WriteHeader(http.StatusNoContent)`,
     retErr: (code, msg, ind = "\t\t") => `writeJSON(w, ${code}, map[string]any{"error": ${JSON.stringify(msg)}})\n${ind}return`,
@@ -141,7 +148,12 @@ function mqNilCheck(fw: Fw): string {
 
 const reqCtx: Record<Fw, string> = { gin: "c.Request.Context()", fiber: "c.UserContext()", echo: "c.Request().Context()", chi: "r.Context()" };
 
-function crudList(fw: Fw, table: string): string {
+// The GORM model (internal/models) for a CRUD route's table, when there is one.
+// Typed rows let GORM run the model's hooks and return what the DB assigned
+// (id, timestamps); raw maps only echo back what the client sent.
+type GoModel = { type: string; pk: string };
+
+function crudList(fw: Fw, table: string, m?: GoModel): string {
   const x = fwCtx(fw);
   const meta = mapLit(fw, ["page", "page"], ["limit", "limit"], ["total", "total"], ["pages", "pages"]);
   return `${dbNilCheck(fw)}
@@ -162,7 +174,7 @@ function crudList(fw: Fw, table: string): string {
 \tvar total int64
 \tq.Count(&total)
 
-\tvar rows []map[string]any
+\tvar rows []${m ? m.type : "map[string]any"}
 \tif err := q.Order("created_at DESC").Offset((page - 1) * limit).Limit(limit).Scan(&rows).Error; err != nil {
 \t\th.log.Error("list", "table", ${JSON.stringify(table)}, "err", err)
 \t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
@@ -175,26 +187,27 @@ function crudList(fw: Fw, table: string): string {
 \t${x.retOK(mapLit(fw, ["data", "rows"], ["meta", meta]))}`;
 }
 
-function crudGet(fw: Fw, table: string): string {
+function crudGet(fw: Fw, table: string, m?: GoModel): string {
   const x = fwCtx(fw);
   return `${dbNilCheck(fw)}
 \tid := ${x.pathParam("id")}
 
-\tvar row map[string]any
+\tvar row ${m ? m.type : "map[string]any"}
 \tif err := h.db.Table(${JSON.stringify(table)}).Where("id = ?", id).First(&row).Error; err != nil {
 \t\t${x.retErr("http.StatusNotFound", "not found")}
 \t}
 \t${x.retOK("row")}`;
 }
 
-function crudCreate(fw: Fw, table: string): string {
+function crudCreate(fw: Fw, table: string, m?: GoModel): string {
   const x = fwCtx(fw);
-  return `${dbNilCheck(fw)}
-${x.getBody()}
+  const bind = m ? x.getBodyTyped(m.type) : `${x.getBody()}
 
 \tif len(body) == 0 {
 \t\t${x.retErr("http.StatusBadRequest", "empty request body")}
-\t}
+\t}`;
+  return `${dbNilCheck(fw)}
+${bind}
 
 \tif err := h.db.Table(${JSON.stringify(table)}).Create(&body).Error; err != nil {
 \t\th.log.Error("create", "table", ${JSON.stringify(table)}, "err", err)
@@ -203,8 +216,27 @@ ${x.getBody()}
 \t${x.retCreated("body")}`;
 }
 
-function crudUpdate(fw: Fw, table: string): string {
+function crudUpdate(fw: Fw, table: string, m?: GoModel): string {
   const x = fwCtx(fw);
+  // Typed: overlay the sent fields on the stored row and Save every column, so
+  // zero values (active=false, score=0) are written too; the key can't change.
+  if (m) return `${dbNilCheck(fw)}
+\tid := ${x.pathParam("id")}
+
+\tvar existing ${m.type}
+\tif err := h.db.Table(${JSON.stringify(table)}).Where("id = ?", id).First(&existing).Error; err != nil {
+\t\t${x.retErr("http.StatusNotFound", "not found")}
+\t}
+
+\tpk := existing.${m.pk}
+${x.bindInto("existing")}
+\texisting.${m.pk} = pk
+
+\tif err := h.db.Table(${JSON.stringify(table)}).Save(&existing).Error; err != nil {
+\t\th.log.Error("update", "table", ${JSON.stringify(table)}, "err", err)
+\t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
+\t}
+\t${x.retOK("existing")}`;
   return `${dbNilCheck(fw)}
 \tid := ${x.pathParam("id")}
 
@@ -243,37 +275,11 @@ function crudDelete(fw: Fw, table: string): string {
 \t${x.sendNoContent()}`;
 }
 
-// Simplified auth bodies — full version replaced by framework-aware helpers below
-function _authLoginUnused(fw: Fw): string {
-  const x = fwCtx(fw);
-  return `${dbNilCheck(fw)}
-\ttype creds struct {
-\t\tEmail    string \`json:"email"\`
-\t\tPassword string \`json:"password"\`
-\t}
-\tvar req creds
-\n\t// Fetch user record
-\tvar user map[string]any
-\tif err := h.db.Table("users").Where("email = ?", req.Email).First(&user).Error; err != nil {
-\t\t// Constant-time compare prevents user enumeration
-\t\t_ = bcrypt.CompareHashAndPassword([]byte("$2a$12$invalid"), []byte(req.Password))
-\t\t${x.retErr("http.StatusUnauthorized", "invalid_credentials")}
-\t}
+// Self-issued auth: bcrypt hashes live in auth_credentials (keyed by the User PK),
+// so these handlers work with whatever columns the user's own User entity has.
+const userTable = (u: SelfAuthUser) => `${toSnake(u.entity.name)}s`;
 
-\thash, _ := user["password_hash"].(string)
-\tif err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
-\t\t${x.retErr("http.StatusUnauthorized", "invalid_credentials")}
-\t}
-
-\ttoken, err := issueJWT(user["id"], h.jwtSecret())
-\tif err != nil {
-\t\th.log.Error("jwt sign", "err", err)
-\t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
-\t}
-\t${x.retOK(mapLit(fw, ["token", "token"], ["token_type", '"Bearer"']))}`;
-}
-
-function authLoginFw(fw: Fw): string {
+function authLoginFw(fw: Fw, u: SelfAuthUser): string {
   const x = fwCtx(fw);
   return `${dbNilCheck(fw)}
 \ttype loginReq struct {
@@ -283,14 +289,17 @@ function authLoginFw(fw: Fw): string {
 ${x.getBodyTyped("loginReq")}
 
 \tvar user struct {
-\t\tID           string \`json:"id"\`
-\t\tPasswordHash string \`json:"password_hash"\`
+\t\tID string \`gorm:"column:${toSnake(u.pk.name)}"\`
 \t}
-\tif err := h.db.Table("users").Where("email = ?", body.Email).First(&user).Error; err != nil {
+\tvar cred struct {
+\t\tPasswordHash string
+\t}
+\tif h.db.Table("${userTable(u)}").Where("${toSnake(u.email.name)} = ?", body.Email).Take(&user).Error != nil ||
+\t\th.db.Table("${CRED_TABLE}").Where("user_id = ?", user.ID).Take(&cred).Error != nil {
 \t\t_ = bcrypt.CompareHashAndPassword([]byte("$2a$12$invalid"), []byte(body.Password))
 \t\t${x.retErr("http.StatusUnauthorized", "invalid_credentials")}
 \t}
-\tif err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(body.Password)); err != nil {
+\tif err := bcrypt.CompareHashAndPassword([]byte(cred.PasswordHash), []byte(body.Password)); err != nil {
 \t\t${x.retErr("http.StatusUnauthorized", "invalid_credentials")}
 \t}
 \ttoken, err := h.issueJWT(user.ID)
@@ -301,54 +310,74 @@ ${x.getBodyTyped("loginReq")}
 \t${x.retOK(mapLit(fw, ["token", "token"], ["token_type", '"Bearer"']))}`;
 }
 
-function authRegisterFw(fw: Fw): string {
+// The body carries email + password plus the User's own columns; required ones
+// the client omits answer 400 by name, required dates are stamped with "now".
+function authRegisterFw(fw: Fw, u: SelfAuthUser): string {
   const x = fwCtx(fw);
+  const strs = (fs: { name: string }[]) => fs.map((f) => JSON.stringify(f.name)).join(", ");
+  const missingErr = `${x.sendJSON("http.StatusBadRequest", mapLit(fw, ["error", `"missing required fields: " + strings.Join(missing, ", ")`]))}${x.afterReturn === "return" ? "\n\t\treturn" : ""}`;
+  const row = [
+    `"${toSnake(u.pk.name)}": id`,
+    `"${toSnake(u.email.name)}": email`,
+    ...u.dates.map((f) => `"${toSnake(f.name)}": time.Now().UTC()`),
+  ].join(", ");
   return `${dbNilCheck(fw)}
-\ttype regReq struct {
-\t\tEmail    string \`json:"email"\`
-\t\tPassword string \`json:"password"\`
-\t\tName     string \`json:"name"\`
-\t}
-${x.getBodyTyped("regReq")}
+${x.getBody()}
 
-\tif body.Email == "" || body.Password == "" {
+\temail, _ := body["email"].(string)
+\tpassword, _ := body["password"].(string)
+\tif email == "" || password == "" {
 \t\t${x.retErr("http.StatusBadRequest", "email and password required")}
 \t}
-\tif len(body.Password) < 8 {
+\tif len(password) < 8 {
 \t\t${x.retErr("http.StatusBadRequest", "password must be at least 8 characters")}
 \t}
-
+${u.required.length ? `\tvar missing []string
+\tfor _, f := range []string{${strs(u.required)}} {
+\t\tif body[f] == nil {
+\t\t\tmissing = append(missing, f)
+\t\t}
+\t}
+\tif len(missing) > 0 {
+\t\t${missingErr}
+\t}
+` : ""}
 \tvar count int64
-\th.db.Table("users").Where("email = ?", body.Email).Count(&count)
+\th.db.Table("${userTable(u)}").Where("${toSnake(u.email.name)} = ?", email).Count(&count)
 \tif count > 0 {
 \t\t${x.retErr("http.StatusConflict", "email_already_registered")}
 \t}
 
-\thash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
+\thash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 \tif err != nil {
 \t\th.log.Error("bcrypt", "err", err)
 \t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
 \t}
 
-\tuser := map[string]any{
-\t\t"id":            generateID(),
-\t\t"email":         body.Email,
-\t\t"name":          body.Name,
-\t\t"password_hash": string(hash),
-\t\t"created_at":    time.Now().UTC(),
+\tid := generateID()
+\tuser := map[string]any{${row}}
+${u.settable.length ? `\tfor key, col := range map[string]string{${u.settable.map((f) => `"${f.name}": "${toSnake(f.name)}"`).join(", ")}} {
+\t\tif v, ok := body[key]; ok {
+\t\t\tuser[col] = v
+\t\t}
 \t}
-\tif err := h.db.Table("users").Create(&user).Error; err != nil {
+` : ""}\terr = h.db.Transaction(func(tx *gorm.DB) error {
+\t\tif err := tx.Table("${userTable(u)}").Create(&user).Error; err != nil {
+\t\t\treturn err
+\t\t}
+\t\treturn tx.Table("${CRED_TABLE}").Create(map[string]any{"user_id": id, "password_hash": string(hash)}).Error
+\t})
+\tif err != nil {
 \t\th.log.Error("create user", "err", err)
 \t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
 \t}
 
-\ttoken, err := h.issueJWT(user["id"].(string))
+\ttoken, err := h.issueJWT(id)
 \tif err != nil {
 \t\th.log.Error("jwt sign", "err", err)
 \t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
 \t}
-\tdelete(user, "password_hash")
-\t${x.retCreated(mapLit(fw, ["token", "token"], ["token_type", '"Bearer"'], ["user", "user"]))}`;
+\t${x.retCreated(mapLit(fw, ["token", "token"], ["token_type", '"Bearer"'], ["user", mapLit(fw, ["id", "id"], ["email", "email"])]))}`;
 }
 
 function authMeFw(fw: Fw): string {
@@ -403,20 +432,23 @@ ${x.getBodyTyped("cpReq")}
 \t\t${x.retErr("http.StatusUnauthorized", "missing_or_invalid_token")}
 \t}
 \tsub := claims.Subject
-\tvar user struct {
-\t\tPasswordHash string \`json:"password_hash"\`
+\tvar cred struct {
+\t\tPasswordHash string
 \t}
-\tif err := h.db.Table("users").Where("id = ?", sub).First(&user).Error; err != nil {
-\t\t${x.retErr("http.StatusNotFound", "user not found")}
+\tif err := h.db.Table("${CRED_TABLE}").Where("user_id = ?", sub).Take(&cred).Error; err != nil {
+\t\t${x.retErr("http.StatusUnauthorized", "invalid_current_password")}
 \t}
-\tif err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(body.CurrentPassword)); err != nil {
+\tif err := bcrypt.CompareHashAndPassword([]byte(cred.PasswordHash), []byte(body.CurrentPassword)); err != nil {
 \t\t${x.retErr("http.StatusUnauthorized", "invalid_current_password")}
 \t}
 \thash, err := bcrypt.GenerateFromPassword([]byte(body.NewPassword), bcrypt.DefaultCost)
 \tif err != nil {
 \t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
 \t}
-\th.db.Table("users").Where("id = ?", sub).Update("password_hash", string(hash))
+\tif err := h.db.Table("${CRED_TABLE}").Where("user_id = ?", sub).Update("password_hash", string(hash)).Error; err != nil {
+\t\th.log.Error("change password", "err", err)
+\t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
+\t}
 \t${x.sendNoContent()}`;
 }
 
@@ -698,8 +730,11 @@ function customHandler(fw: Fw, e: Endpoint): string {
 \t${x.retOK(mapLit(fw, ["ok", "true"], ["op", JSON.stringify(e.method + " " + e.path)]))}`;
 }
 
-function patternBody(pattern: string | undefined, fw: Fw, e: Endpoint, config: StackConfig, _entities: Entity[]): string {
+function patternBody(pattern: string | undefined, fw: Fw, e: Endpoint, config: StackConfig, entities: Entity[], sqlModels: boolean): string {
   const table = inferTableName(e.path);
+  const entity = sqlModels ? entities.find((en) => `${toSnake(en.name)}s` === table) : undefined;
+  const pk = entity?.fields.find((f) => f.primaryKey);
+  const model = entity && pk ? { type: `models.${entity.name}`, pk: toPascal(pk.name) } : undefined;
   // Token design: with an external provider (Clerk, Auth0, ...) authRequired
   // verifies provider-issued tokens via JWKS, so this service must not mint its
   // own — credential endpoints answer 501 and auth_me reads the provider's
@@ -709,14 +744,19 @@ function patternBody(pattern: string | undefined, fw: Fw, e: Endpoint, config: S
     return `\t// Credentials are managed by ${config.auth}; tokens minted here would fail JWKS verification.
 \t${fwCtx(fw).retErr("http.StatusNotImplemented", `handled_by_${config.auth}`, "\t")}`;
   }
+  const user = selfAuthUser(entities);
+  if (!user && ["auth_login", "auth_register", "auth_change_password"].includes(pattern ?? "")) {
+    return `\t// Declare a User entity with an email field and a uuid/string primary key to enable self-managed auth.
+\t${fwCtx(fw).retErr("http.StatusNotImplemented", "not_implemented", "\t")}`;
+  }
   switch (pattern as PatternId) {
-    case "crud_list":    return crudList(fw, table);
-    case "crud_get":     return crudGet(fw, table);
-    case "crud_create":  return crudCreate(fw, table);
-    case "crud_update":  return crudUpdate(fw, table);
+    case "crud_list":    return crudList(fw, table, model);
+    case "crud_get":     return crudGet(fw, table, model);
+    case "crud_create":  return crudCreate(fw, table, model);
+    case "crud_update":  return crudUpdate(fw, table, model);
     case "crud_delete":  return crudDelete(fw, table);
-    case "auth_login":   return authLoginFw(fw);
-    case "auth_register":return authRegisterFw(fw);
+    case "auth_login":   return authLoginFw(fw, user!);
+    case "auth_register":return authRegisterFw(fw, user!);
     case "auth_me":      return authMeFw(fw);
     case "auth_logout":  return authLogout(fw);
     case "auth_refresh": return authRefreshFw(fw);
@@ -757,7 +797,7 @@ function buildImports(code: string, module: string): string {
       .map(([, path]) => `\t"${path}"`)
       .sort()
       .join("\n");
-  const groups = [pick(GO_STD), pick([...GO_EXT, ["auth", `${module}/internal/auth`], ["queue", `${module}/internal/queue`]])];
+  const groups = [pick(GO_STD), pick([...GO_EXT, ["auth", `${module}/internal/auth`], ["models", `${module}/internal/models`], ["queue", `${module}/internal/queue`]])];
   return `import (\n${groups.filter(Boolean).join("\n\n")}\n)`;
 }
 
@@ -853,14 +893,15 @@ export function goApiHandlersFile(
   fw: string,
   config: StackConfig,
   endpoints: Endpoint[],
-  entities: Entity[]
+  entities: Entity[],
+  sqlModels = false // internal/models exists (SQL stack with entities)
 ): { file: GeneratedFile; usesDb: boolean; usesRdb: boolean; usesMq: boolean } {
   const framework = (["gin", "fiber", "echo", "chi"].includes(fw) ? fw : "gin") as Fw;
 
   const methods = endpoints
     .map((e) => {
       const name = handlerMethodName(e);
-      const body = patternBody(e.pattern, framework, e, config, entities);
+      const body = patternBody(e.pattern, framework, e, config, entities, sqlModels);
       const sig = fwCtx(framework).sig(name);
       return `${sig} {\n${body}\n}`;
     })

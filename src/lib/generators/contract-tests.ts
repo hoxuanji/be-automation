@@ -1,5 +1,6 @@
 import type { Endpoint, Entity, GeneratedFile, StackConfig } from "./types";
-import { isGraphqlSupported, safeName, toPascal } from "./types";
+import { isGraphqlSupported, safeName, toKebab, toPascal } from "./types";
+import { goQueueKind } from "./queue/go";
 import { goAuthMode, goDbKind } from "./go";
 import { kotlinContractTestFiles } from "./kotlin";
 import { javaContractTestFiles } from "./java";
@@ -89,74 +90,105 @@ ${tests}
 
 // ─── Go (testing + net/http/httptest) ────────────────────────────────────────
 
-function goContractTests(config: StackConfig, endpoints: Endpoint[]): string {
+// Every route must be mounted on the in-process server; protected routes must
+// reject a request without a bearer token (401, decided by authRequired before
+// any handler runs) and plain stub handlers answer 200. Pattern handlers'
+// statuses depend on data and dependencies, so for them the contract is "the
+// router matched" — their behaviour is covered by the e2e job.
+function goContractTests(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): string {
   const module = `github.com/your-username/${safeName(config.name)}`;
   const isFiber = config.framework === "fiber";
-  const needsStrings = endpoints.some((e) => ["POST", "PUT", "PATCH"].includes(e.method));
 
   // With a real verifier (goAuthMode) protected routes must reject a request
   // without a valid token; with auth off they behave like public routes.
   const authEnforced = goAuthMode(config, endpoints) !== "off";
 
   const testServerSetup = isFiber
-    ? `\tsrv := server.New(cfg, slog.Default())\n\tts = httptest.NewServer(adaptor.FiberApp(srv.App()))`
-    : `\tsrv := server.New(cfg, slog.Default())\n\tts = httptest.NewServer(srv.Handler())`;
+    ? `\t\tsrv := server.New(cfg, slog.Default())\n\t\tts = httptest.NewServer(adaptor.FiberApp(srv.App()))`
+    : `\t\tsrv := server.New(cfg, slog.Default())\n\t\tts = httptest.NewServer(srv.Handler())`;
 
-  const fiberImport = isFiber ? `\n\t"github.com/gofiber/fiber/v2/middleware/adaptor"\n` : "";
-
-  // server.New exits the process when its database is unreachable, so probe
-  // with the same opener first and skip (not fail) when there is no DB.
+  // server.New exits the process when its database or broker is unreachable,
+  // so probe them with the same openers first and skip (not fail) without them.
   const kind = goDbKind(config.database);
-  const probe =
+  const dbProbe =
     kind === "postgres" || kind === "mysql"
-      ? `\tif conn, err := db.Open(cfg.DatabaseURL); err != nil {\n\t\tskipReason = "database unreachable (set DATABASE_URL to run): " + err.Error()\n\t} else {\n\t\t_ = conn.Close()\n\t}\n`
+      ? `\tif cfg.DatabaseURL == "" {\n\t\tskipReason = "DATABASE_URL is not set; these tests need a reachable database"\n\t} else if conn, err := db.Open(cfg.DatabaseURL); err != nil {\n\t\tskipReason = "database unreachable (check DATABASE_URL): " + err.Error()\n\t} else {\n\t\t_ = conn.Close()\n\t}\n`
       : kind === "mongo"
         ? `\tif store, err := db.OpenMongo(context.Background(), cfg.MongoURI); err != nil {\n\t\tskipReason = "database unreachable (set MONGODB_URI to run): " + err.Error()\n\t} else {\n\t\t_ = store.Close(context.Background())\n\t}\n`
         : "";
-  const skipCheck = probe ? `\trequireServer(t)\n` : "";
+  const queueProbe = goQueueKind(config.queue)
+    ? `\tif skipReason == "" {\n\t\tif q, err := queue.Open(context.Background(), cfg); err != nil {\n\t\t\tskipReason = "message broker unavailable: " + err.Error()\n\t\t} else {\n\t\t\t_ = q.Close()\n\t\t}\n\t}\n`
+    : "";
+  const probes = dbProbe + queueProbe;
 
+  // Mirrors goServer's routing: GET /health is the server's liveness check, and
+  // a stub endpoint colliding with an entity CRUD route yields to that handler.
+  const key = (m: string, p: string) => `${m} ${p.replace(/:[A-Za-z0-9_]+/g, ":p")}`;
+  const entityKeys = new Set(entities.flatMap((e) => {
+    const base = `/${toKebab(e.name)}s`;
+    return [["GET", base], ["GET", `${base}/:id`], ["POST", base], ["PATCH", `${base}/:id`], ["DELETE", `${base}/:id`]].map(([m, p]) => key(m, p));
+  }));
+  const isStub = (ep: Endpoint) =>
+    (ep.method === "GET" && ep.path === "/health") ||
+    (!ep.pattern && !ep.logicCode && !entityKeys.has(key(ep.method, ep.path)));
+
+  let usesServed = false;
   const tests = endpoints.map((ep) => {
     const testPath = pathToParam(ep.path);
-    const status = ep.auth && authEnforced ? 401 : expectedStatus(ep.method, ep.auth);
-    const bodyLine = ["POST", "PUT", "PATCH"].includes(ep.method)
-      ? `\tbody := strings.NewReader("{}")\n\treq, err := http.NewRequest("${ep.method}", ts.URL+"${testPath}", body)`
-      : `\treq, err := http.NewRequest("${ep.method}", ts.URL+"${testPath}", nil)`;
+    const body = ["POST", "PUT", "PATCH"].includes(ep.method) ? "{}" : "";
+    let check: string;
+    if (ep.auth && authEnforced) {
+      check = `\tif resp.StatusCode != http.StatusUnauthorized {\n\t\tt.Errorf("${ep.method} ${ep.path}: expected 401 without a token, got %d", resp.StatusCode)\n\t}`;
+    } else if (isStub(ep)) {
+      check = `\tif resp.StatusCode != http.StatusOK {\n\t\tt.Errorf("${ep.method} ${ep.path}: expected 200, got %d", resp.StatusCode)\n\t}`;
+    } else {
+      usesServed = true;
+      check = `\tif !served(resp) {\n\t\tt.Errorf("${ep.method} ${ep.path}: route is not mounted (got %d)", resp.StatusCode)\n\t}`;
+    }
     return `
 func Test${toPascal(ep.method)}${toPascal(ep.path.replace(/[/:]/g, "_"))}(t *testing.T) {
-${skipCheck}\t// ${ep.summary}
-${bodyLine}
-\tif err != nil {
-\t\tt.Fatalf("build request: %v", err)
-\t}
-\tresp, err := http.DefaultClient.Do(req)
-\tif err != nil {
-\t\tt.Fatalf("request failed: %v", err)
-\t}
-\tdefer resp.Body.Close()
-\tif resp.StatusCode != ${status} {
-\t\tt.Errorf("${ep.method} ${ep.path}: expected ${status}, got %d", resp.StatusCode)
-\t}
+\trequireServer(t)
+\t// ${ep.summary}
+\tresp := call(t, "${ep.method}", "${testPath}", ${JSON.stringify(body)})
+${check}
 }`;
   }).join("\n");
+
+  const std = [
+    probes.includes("context.") ? "context" : "",
+    usesServed ? "encoding/json" : "",
+    "io", "log/slog", "net/http", "net/http/httptest", "os", "strings", "testing", "time",
+  ].filter(Boolean).map((p) => `\t"${p}"`).join("\n");
+  const local = ["config", dbProbe ? "db" : "", queueProbe ? "queue" : "", "server"]
+    .filter(Boolean).map((p) => `\t"${module}/internal/${p}"`).join("\n");
+  const fiberImport = isFiber ? `\n\t"github.com/gofiber/fiber/v2/middleware/adaptor"\n` : "";
+
+  const servedFn = usesServed ? `
+
+// served reports whether the router matched: a handler's own 404/405 carries a
+// JSON {"error": ...} body, the router's "no such route" response does not.
+func served(resp *http.Response) bool {
+\tif resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusMethodNotAllowed {
+\t\treturn true
+\t}
+\tvar body map[string]any
+\treturn json.NewDecoder(resp.Body).Decode(&body) == nil && body["error"] != nil
+}` : "";
 
   return `// Contract tests for ${safeName(config.name)}
 // Run with: go test ./internal/api/contract/...
 //
-// Prerequisites: ${probe ? "the server is started in-process; tests skip when the database is unreachable." : "no external dependencies — the server is started in-process."}
+// Every route is mounted, protected routes answer 401 without a token and stub
+// handlers answer 200. The server runs in-process${probes ? ";\n// the tests skip when its database or broker is unreachable." : " with no external services."}
 package api_contract_test
 
 import (
-${kind === "mongo" ? '\t"context"\n' : ""}\t"log/slog"
-\t"net/http"
-\t"net/http/httptest"
-\t"os"
-${needsStrings ? '\t"strings"\n' : ""}\t"testing"
+${std}
 ${fiberImport}
-\t"${module}/internal/config"
-${probe ? `\t"${module}/internal/db"\n` : ""}\t"${module}/internal/server"
+${local}
 )
 
-${probe ? `var (
+var (
 \tts         *httptest.Server
 \tskipReason string
 )
@@ -166,8 +198,8 @@ func TestMain(m *testing.M) {
 \tif err != nil {
 \t\tpanic(err)
 \t}
-${probe}\tif skipReason == "" {
-${testServerSetup.replace(/\t/g, "\t\t")}
+${probes}\tif skipReason == "" {
+${testServerSetup}
 \t}
 \tcode := m.Run()
 \tif ts != nil {
@@ -176,24 +208,42 @@ ${testServerSetup.replace(/\t/g, "\t\t")}
 \tos.Exit(code)
 }
 
-// requireServer skips the test when TestMain could not reach the database.
+// requireServer skips the test when TestMain could not reach a dependency.
 func requireServer(t *testing.T) {
 \tt.Helper()
 \tif ts == nil {
 \t\tt.Skip(skipReason)
 \t}
-}` : `var ts *httptest.Server
+}
 
-func TestMain(m *testing.M) {
-\tcfg, err := config.Load() // reads from env; defaults work for tests
-\tif err != nil {
-\t\tpanic(err)
+// call sends one request to the in-process server. A rate limiter answers 429
+// once the suite outruns its burst, so wait for a token and resend.
+func call(t *testing.T, method, path, body string) *http.Response {
+\tt.Helper()
+\tfor attempt := 1; ; attempt++ {
+\t\tvar rd io.Reader
+\t\tif body != "" {
+\t\t\trd = strings.NewReader(body)
+\t\t}
+\t\treq, err := http.NewRequest(method, ts.URL+path, rd)
+\t\tif err != nil {
+\t\t\tt.Fatalf("build request: %v", err)
+\t\t}
+\t\tif body != "" {
+\t\t\treq.Header.Set("Content-Type", "application/json")
+\t\t}
+\t\tresp, err := http.DefaultClient.Do(req)
+\t\tif err != nil {
+\t\t\tt.Fatalf("%s %s: %v", method, path, err)
+\t\t}
+\t\tif resp.StatusCode != http.StatusTooManyRequests || attempt == 30 {
+\t\t\tt.Cleanup(func() { _ = resp.Body.Close() })
+\t\t\treturn resp
+\t\t}
+\t\t_ = resp.Body.Close()
+\t\ttime.Sleep(100 * time.Millisecond)
 \t}
-${testServerSetup}
-\tcode := m.Run()
-\tts.Close()
-\tos.Exit(code)
-}`}
+}${servedFn}
 ${tests}
 `;
 }
@@ -289,7 +339,7 @@ export function contractTestFiles(
     case "go":
       // gRPC / GraphQL stacks have no internal/server HTTP router to test.
       if (config.api === "grpc" || (config.api === "graphql" && isGraphqlSupported("go"))) return [];
-      return [{ path: "internal/api/contract/contract_test.go", content: goContractTests(config, endpoints) }];
+      return [{ path: "internal/api/contract/contract_test.go", content: goContractTests(config, endpoints, entities) }];
     case "python":
       return [{ path: "tests/test_contracts.py", content: pythonContractTests(config, endpoints) }];
     case "rust":

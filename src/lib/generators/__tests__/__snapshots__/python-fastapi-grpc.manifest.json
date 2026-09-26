@@ -56,8 +56,8 @@
   },
   {
     "path": "app/db.py",
-    "lines": 74,
-    "size": 2307
+    "lines": 80,
+    "size": 2561
   },
   {
     "path": "app/interceptors.py",
@@ -72,7 +72,7 @@
   {
     "path": "app/models.py",
     "lines": 30,
-    "size": 991
+    "size": 1030
   },
   {
     "path": "app/services/__init__.py",
@@ -196,8 +196,8 @@
   },
   {
     "path": "migrations/versions/0001_init.py",
-    "lines": 38,
-    "size": 1311
+    "lines": 50,
+    "size": 1119
   },
   {
     "path": "proto/test_app/v1/service.proto",
@@ -227,7 +227,7 @@
   {
     "path": "sdk/test-app-client.ts",
     "lines": 76,
-    "size": 2175
+    "size": 2035
   },
   {
     "path": "tests/test_contracts.py",

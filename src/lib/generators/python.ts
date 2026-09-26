@@ -3,7 +3,8 @@ import { toPascal, toSnake, toKebab } from "./types";
 import { pyGrpcFiles } from "./grpc/python";
 import { pythonGraphqlFiles } from "./graphql/python";
 import { isGraphqlSupported } from "./types";
-import { pyPatternRoute, pyPatternImports, pyNativeRoutes, pyNativeImports, pyHasRedis, pyAuthMode, type PyAuthMode, type NativeRoute } from "./patterns/python";
+import { AUTH_CREDENTIAL_ID, authCredentialEntities, selfAuthUser } from "./patterns/index";
+import { pyPatternRoute, pyPatternImports, pyNativeRoutes, pyNativeImports, pyHasRedis, pyAuthMode, pyCrudPatternEntityIds, type PyAuthMode, type NativeRoute } from "./patterns/python";
 import { pyQueue, pyQueueDeps, pyQueueModule, pyWorkerModule } from "./queue/python";
 
 export function pythonFiles(
@@ -57,9 +58,9 @@ settings = Settings()
 
   if (hasEntities && !isMongo && config.framework === "fastapi") {
     files.push({ path: "app/db.py", content: dbFile(config) });
-    files.push({ path: "app/models.py", content: sqlalchemyModels(config, entities) });
+    files.push({ path: "app/models.py", content: sqlalchemyModels(config, isMongo ? entities : [...entities, ...authCredentialEntities(config, endpoints, entities)]) });
     files.push({ path: "app/routers/__init__.py", content: "" });
-    for (const entity of entities) {
+    for (const entity of routerEntities(endpoints, entities)) {
       const snake = toSnake(entity.name);
       const pascal = toPascal(entity.name);
       const kebab = toKebab(entity.name);
@@ -71,7 +72,7 @@ settings = Settings()
     }
     files.push({ path: "tests/__init__.py", content: "" });
     files.push({ path: "tests/conftest.py", content: confpyFile() });
-    for (const entity of entities) {
+    for (const entity of routerEntities(endpoints, entities)) {
       const snake = toSnake(entity.name);
       const kebab = toKebab(entity.name);
       const nonPkFields = entity.fields.filter((f) => !f.primaryKey);
@@ -83,7 +84,7 @@ settings = Settings()
   } else if (hasEntities) {
     // Litestar / Django pattern handlers use the same SQLAlchemy session helper.
     if (!isMongo) files.push({ path: "app/db.py", content: dbFile(config) });
-    files.push({ path: "app/models.py", content: sqlalchemyModels(config, entities) });
+    files.push({ path: "app/models.py", content: sqlalchemyModels(config, isMongo ? entities : [...entities, ...authCredentialEntities(config, endpoints, entities)]) });
   }
 
   files.push({
@@ -177,6 +178,13 @@ def configure_logging() -> None:
   return files;
 }
 
+// FastAPI routers (unauthenticated generic CRUD) only for entities no crud_* pattern
+// serves: a router mounted beside the guarded pattern routes would shadow them.
+function routerEntities(endpoints: Endpoint[], entities: Entity[]): Entity[] {
+  const served = pyCrudPatternEntityIds(endpoints, entities);
+  return entities.filter((e) => !served.has(e.id));
+}
+
 function dbFile(config: StackConfig): string {
   const isSqlite = /sqlite/.test(config.database);
   return `"""Database connection helper.
@@ -192,7 +200,7 @@ from __future__ import annotations
 import logging
 import time
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
@@ -218,6 +226,12 @@ _engine_kwargs = {
 }
 
 engine = create_engine(_url, **_engine_kwargs)
+
+if _is_sqlite:
+    # SQLite ignores FOREIGN KEY / ON DELETE CASCADE unless each connection opts in.
+    @event.listens_for(engine, "connect")
+    def _sqlite_foreign_keys(dbapi_conn, _record):
+        dbapi_conn.execute("PRAGMA foreign_keys=ON")
 
 
 def _wait_for_db(max_attempts: int = 6, base_delay: float = 0.5) -> None:
@@ -261,14 +275,15 @@ function entityRouterFile(
 ): string {
   const inputFields = nonPkFields
     .map((f) => {
-      const t = pyType(f.type);
+      // DateTime columns need a datetime (SQLite's driver rejects ISO strings); Pydantic parses the JSON string.
+      const t = f.type === "date" ? "datetime" : pyType(f.type);
       return f.required ? `    ${f.name}: ${t}` : `    ${f.name}: ${t} | None = None`;
     })
     .join("\n");
 
   const assignFields = nonPkFields.map((f) => `        ${f.name}=body.${f.name},`).join("\n");
 
-  return `from fastapi import APIRouter, Depends, HTTPException
+  return `${nonPkFields.some((f) => f.type === "date") ? "from datetime import datetime\n\n" : ""}from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from ..db import get_db
@@ -350,21 +365,31 @@ ${docs}
 
   const isPostgres = /postgres|neon|supabase|cockroach/.test(config.database);
 
+  // The credentials row is deleted with its user (see AUTH_CREDENTIAL_ID).
+  const credUser = selfAuthUser(entities);
   const models = entities
     .map((e) => {
       const tableName = toSnake(e.name) + "s";
       const cols = e.fields.map((f) => {
+        const fk = e.id === AUTH_CREDENTIAL_ID && credUser && f.name === "user_id"
+          ? `, ForeignKey("${toSnake(credUser.entity.name)}s.${credUser.pk.name}", ondelete="CASCADE")` : "";
         const colType = saColType(f.type, isPostgres);
         const pk = f.primaryKey ? ", primary_key=True" : "";
         const uniq = f.unique && !f.primaryKey ? ", unique=True" : "";
         const nullable = !f.required && !f.primaryKey ? ", nullable=True" : "";
         // String(36) PKs (non-Postgres) need a str; the DB drivers can't bind uuid.UUID.
         const default_ = f.primaryKey && f.type === "uuid" ? (isPostgres ? ", default=uuid.uuid4" : ", default=lambda: str(uuid.uuid4())") : "";
-        return `    ${f.name} = Column(${colType}${pk}${default_}${uniq}${nullable})`;
+        // Attribute keeps the entity (JSON) name; the column is snake_case like db/sql.ts's migration.
+        const col = toSnake(f.name);
+        const colName = col === f.name ? "" : `"${col}", `;
+        // The migration makes these server-managed (NOT NULL DEFAULT now); mirror that here.
+        if (col === "created_at") return `    ${f.name} = Column(${colName}DateTime, default=datetime.utcnow)`;
+        if (col === "updated_at") return `    ${f.name} = Column(${colName}DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)`;
+        return `    ${f.name} = Column(${colName}${colType}${fk}${pk}${default_}${uniq}${nullable})`;
       });
-      if (!e.fields.some((f) => f.name === "createdAt"))
+      if (!e.fields.some((f) => toSnake(f.name) === "created_at"))
         cols.push("    created_at = Column(DateTime, default=datetime.utcnow)");
-      if (!e.fields.some((f) => f.name === "updatedAt"))
+      if (!e.fields.some((f) => toSnake(f.name) === "updated_at"))
         cols.push("    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)");
 
       return `class ${e.name}(Base):\n    __tablename__ = "${tableName}"\n${cols.join("\n")}`;
@@ -372,7 +397,7 @@ ${docs}
     .join("\n\n");
 
   return `# Auto-generated by Helios — edit freely
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, Text
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, Text${entities.some((e) => e.id === AUTH_CREDENTIAL_ID) ? ", ForeignKey" : ""}
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase
 from datetime import datetime
@@ -805,10 +830,10 @@ async def ${handlerName(e)}(${paramsDecl}):
       .join("\n\n");
 
     if (entities.length > 0) {
-      const routerImports = entities
+      const routerImports = routerEntities(endpoints, entities)
         .map((e) => `from .routers import ${toSnake(e.name)}`)
         .join("\n");
-      const routerIncludes = entities
+      const routerIncludes = routerEntities(endpoints, entities)
         .map((e) => `app.include_router(${toSnake(e.name)}.router)`)
         .join("\n");
 

@@ -42,7 +42,7 @@ function goMigrationFiles(config: StackConfig, up: string, down: string): Genera
   // DATABASE_URL onto the scheme of the driver we import.
   const dialect = dialectFor(config.database);
   const cockroach = config.database === "cockroach";
-  const driver = dialect === "mysql" ? "mysql" : dialect === "sqlite" ? "sqlite" : cockroach ? "cockroachdb" : "postgres";
+  const driver = dialect === "mysql" ? "mysql" : cockroach ? "cockroachdb" : "pgx/v5";
   const urlFn =
     dialect === "mysql"
       ? `
@@ -68,15 +68,8 @@ func migrateURL(raw string) (string, error) {
 \treturn out, nil
 }
 `
-      : dialect === "sqlite"
+      : cockroach
         ? `
-// migrateURL turns file:./app.db (the .env.example form) into sqlite://./app.db.
-func migrateURL(raw string) (string, error) {
-\treturn "sqlite://" + strings.TrimPrefix(strings.TrimPrefix(raw, "sqlite://"), "file:"), nil
-}
-`
-        : cockroach
-          ? `
 // migrateURL swaps postgres:// for cockroachdb:// so golang-migrate uses its
 // CockroachDB driver (the postgres driver's advisory locks are unsupported).
 func migrateURL(raw string) (string, error) {
@@ -86,40 +79,104 @@ func migrateURL(raw string) (string, error) {
 \treturn raw, nil
 }
 `
-          : `
-// migrateURL is the identity: the postgres driver accepts DATABASE_URL as-is.
-func migrateURL(raw string) (string, error) { return raw, nil }
+        : `
+// migrateURL swaps the scheme for pgx5:// so golang-migrate connects with pgx,
+// like the app does (lib/pq's sslmode=require default rejects a local Postgres).
+func migrateURL(raw string) (string, error) {
+\tif _, rest, ok := strings.Cut(raw, "://"); ok {
+\t\treturn "pgx5://" + rest, nil
+\t}
+\treturn raw, nil
+}
 `;
-  const needsStrings = dialect !== "postgres" || cockroach;
-  return [
+  const base: GeneratedFile[] = [
     { path: "migrations/000001_init.up.sql", content: up },
     { path: "migrations/000001_init.down.sql", content: down },
+    {
+      // Embedded so the api binary carries its own schema: it migrates at
+      // startup, with no file paths or extra step in compose, k8s or locally.
+      path: "migrations/migrations.go",
+      content: `// Package migrations embeds the SQL migrations into the binaries.
+package migrations
+
+import "embed"
+
+//go:embed *.sql
+var FS embed.FS
+`,
+    },
+  ];
+  if (dialect === "sqlite") return [...base, ...goSqliteMigrateFiles(module)];
+  return [
+    ...base,
+    {
+      path: "internal/db/migrate.go",
+      content: `package db
+
+import (
+\t"errors"
+\t"fmt"
+${dialect === "mysql" ? '\t"net/url"\n' : ""}\t"strings"
+
+\t"github.com/golang-migrate/migrate/v4"
+\t_ "github.com/golang-migrate/migrate/v4/database/${driver}"
+\t"github.com/golang-migrate/migrate/v4/source/iofs"
+
+\t"${module}/migrations"
+)
+
+// NewMigrate opens golang-migrate on the embedded migrations/*.sql.
+func NewMigrate(databaseURL string) (*migrate.Migrate, error) {
+\tdbURL, err := migrateURL(databaseURL)
+\tif err != nil {
+\t\treturn nil, fmt.Errorf("DATABASE_URL: %w", err)
+\t}
+\tsrc, err := iofs.New(migrations.FS, ".")
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\treturn migrate.NewWithSourceInstance("iofs", src, dbURL)
+}
+
+// Migrate applies pending migrations; the api runs it before serving. Safe with
+// many replicas: golang-migrate holds a database lock while migrating (advisory
+// lock on Postgres, GET_LOCK on MySQL), so one replica applies the migrations
+// and the others find nothing to do.
+func Migrate(databaseURL string) error {
+\tm, err := NewMigrate(databaseURL)
+\tif err != nil {
+\t\treturn err
+\t}
+\tdefer m.Close()
+\tif err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+\t\treturn fmt.Errorf("migrate up: %w", err)
+\t}
+\treturn nil
+}
+${urlFn}`,
+    },
     {
       path: "cmd/migrate/main.go",
       content: `package main
 
-// Runs database migrations using golang-migrate.
+// Runs the embedded database migrations using golang-migrate. The api applies
+// pending migrations itself at startup; use this to inspect or roll back.
 //
 // Usage:
 //   go run ./cmd/migrate up       # apply all pending migrations
 //   go run ./cmd/migrate down 1   # rollback the last migration
 //   go run ./cmd/migrate version  # print current schema version
-//
-// In CI / production this is typically run as a Kubernetes Job before the
-// rolling deployment of the API Deployment — see deploy/k8s for an example
-// Job template.
 
 import (
 \t"errors"
 \t"log"
-${dialect === "mysql" ? '\t"net/url"\n' : ""}\t"os"
+\t"os"
 \t"strconv"
-${needsStrings ? '\t"strings"\n' : ""}
+
 \t"github.com/golang-migrate/migrate/v4"
-\t_ "github.com/golang-migrate/migrate/v4/database/${driver}"
-\t_ "github.com/golang-migrate/migrate/v4/source/file"
 
 \t"${module}/internal/config"
+\t"${module}/internal/db"
 )
 
 func main() {
@@ -130,12 +187,8 @@ func main() {
 \tif cfg.DatabaseURL == "" {
 \t\tlog.Fatal("DATABASE_URL must be set to run migrations")
 \t}
-\tdbURL, err := migrateURL(cfg.DatabaseURL)
-\tif err != nil {
-\t\tlog.Fatalf("DATABASE_URL: %v", err)
-\t}
 
-\tm, err := migrate.New("file://migrations", dbURL)
+\tm, err := db.NewMigrate(cfg.DatabaseURL)
 \tif err != nil {
 \t\tlog.Fatalf("open migrations: %v", err)
 \t}
@@ -179,7 +232,102 @@ func main() {
 \t\tlog.Fatalf("unknown subcommand: %s (want up/down/version)", cmd)
 \t}
 }
-${urlFn}`,
+`,
+    },
+  ];
+}
+
+// golang-migrate's sqlite driver links modernc.org/sqlite, which registers the
+// same database/sql name ("sqlite") as the app's glebarez driver, so the api
+// would panic at init. SQLite is one file behind one process, so a small
+// forward-only runner over the embedded files is enough.
+function goSqliteMigrateFiles(module: string): GeneratedFile[] {
+  return [
+    {
+      path: "internal/db/migrate.go",
+      content: `package db
+
+import (
+\t"database/sql"
+\t"fmt"
+\t"io/fs"
+
+\t"${module}/migrations"
+)
+
+// Migrate applies the embedded *.up.sql files not yet recorded in
+// applied_migrations, in file-name order, each in its own transaction; the api
+// runs it before serving.
+func Migrate(databaseURL string) error {
+\tconn, err := sql.Open("sqlite", databaseURL) // registered by glebarez/sqlite (gorm.go)
+\tif err != nil {
+\t\treturn err
+\t}
+\tdefer conn.Close()
+\tif _, err := conn.Exec("CREATE TABLE IF NOT EXISTS applied_migrations (version TEXT PRIMARY KEY)"); err != nil {
+\t\treturn fmt.Errorf("migrate: %w", err)
+\t}
+\tfiles, err := fs.Glob(migrations.FS, "*.up.sql")
+\tif err != nil {
+\t\treturn err
+\t}
+\tfor _, f := range files {
+\t\tvar n int
+\t\tif err := conn.QueryRow("SELECT COUNT(*) FROM applied_migrations WHERE version = ?", f).Scan(&n); err != nil {
+\t\t\treturn fmt.Errorf("migrate: %w", err)
+\t\t}
+\t\tif n > 0 {
+\t\t\tcontinue
+\t\t}
+\t\tbody, err := migrations.FS.ReadFile(f)
+\t\tif err != nil {
+\t\t\treturn err
+\t\t}
+\t\ttx, err := conn.Begin()
+\t\tif err != nil {
+\t\t\treturn err
+\t\t}
+\t\tif _, err := tx.Exec(string(body)); err != nil {
+\t\t\t_ = tx.Rollback()
+\t\t\treturn fmt.Errorf("migrate %s: %w", f, err)
+\t\t}
+\t\tif _, err := tx.Exec("INSERT INTO applied_migrations (version) VALUES (?)", f); err != nil {
+\t\t\t_ = tx.Rollback()
+\t\t\treturn fmt.Errorf("migrate %s: %w", f, err)
+\t\t}
+\t\tif err := tx.Commit(); err != nil {
+\t\t\treturn fmt.Errorf("migrate %s: %w", f, err)
+\t\t}
+\t}
+\treturn nil
+}
+`,
+    },
+    {
+      path: "cmd/migrate/main.go",
+      content: `package main
+
+// Applies pending database migrations (the api also does this at startup).
+// SQLite is forward-only here: roll back by running migrations/*.down.sql.
+
+import (
+\t"log"
+
+\t"${module}/internal/config"
+\t"${module}/internal/db"
+)
+
+func main() {
+\tcfg, err := config.Load()
+\tif err != nil {
+\t\tlog.Fatalf("config: %v", err)
+\t}
+\tif err := db.Migrate(cfg.DatabaseURL); err != nil {
+\t\tlog.Fatal(err)
+\t}
+\tlog.Println("migrations applied")
+}
+`,
     },
   ];
 }
@@ -193,16 +341,19 @@ function pythonMigrationFiles(
   down: string
 ): GeneratedFile[] {
   const rev = "0001_init";
-  // Convert SQL UP/DOWN into op.execute() calls. Alembic version files are
-  // Python, so we quote the SQL as a triple-quoted string.
-  const upLines = up
-    .split("\n")
-    .filter((l) => l.trim() && !l.startsWith("--"))
-    .map((l) => l.trim());
-  const downLines = down
-    .split("\n")
-    .filter((l) => l.trim() && !l.startsWith("--"))
-    .map((l) => l.trim());
+  // One op.execute() per whole statement (split at a line-ending `;`) so
+  // multi-line CREATE TABLEs stay intact; sqlite3 also rejects multi-statement
+  // execute(). Triple-quoted: the generated SQL has no quotes or backslashes.
+  const ops = (sql: string) =>
+    sql
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("--"))
+      .join("\n")
+      .split(/;\s*$/m)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => `    op.execute("""\n${s};\n""")`)
+      .join("\n") || "    pass";
 
   return [
     {
@@ -344,11 +495,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-${upLines.map((l) => `    op.execute(${JSON.stringify(l)})`).join("\n") || "    pass"}
+${ops(up)}
 
 
 def downgrade() -> None:
-${downLines.map((l) => `    op.execute(${JSON.stringify(l)})`).join("\n") || "    pass"}
+${ops(down)}
 `,
     },
   ];

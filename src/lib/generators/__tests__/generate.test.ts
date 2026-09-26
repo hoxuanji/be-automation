@@ -671,10 +671,13 @@ describe("Stack-option wiring", () => {
 
   it("Go migrate command matches the database driver and handles config errors", () => {
     const main = (database: string) => gen({ database }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("cmd/migrate/main.go")!;
-    assert.match(main("postgres"), /migrate\/v4\/database\/postgres"/);
-    assert.match(main("cockroach"), /migrate\/v4\/database\/cockroachdb"/);
-    assert.match(main("mysql"), /migrate\/v4\/database\/mysql"/);
-    assert.match(main("sqlite"), /migrate\/v4\/database\/sqlite"/);
+    const runner = (database: string) => gen({ database }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("internal/db/migrate.go")!;
+    // pgx (not lib/pq): lib/pq defaults to sslmode=require and a local Postgres has no TLS.
+    assert.match(runner("postgres"), /migrate\/v4\/database\/pgx\/v5"/);
+    assert.match(runner("cockroach"), /migrate\/v4\/database\/cockroachdb"/);
+    assert.match(runner("mysql"), /migrate\/v4\/database\/mysql"/);
+    // golang-migrate's sqlite driver registers "sqlite" like glebarez does -> init panic.
+    assert.doesNotMatch(runner("sqlite"), /golang-migrate/);
     assert.match(main("postgres"), /cfg, err := config\.Load\(\)/);
     // Pure-Go sqlite so CGO_ENABLED=0 Docker builds work.
     assert.ok(gen({ database: "sqlite" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("internal/db/gorm.go")!.includes("github.com/glebarez/sqlite"));
@@ -859,14 +862,14 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     const verifierPath = (fw: string) => (fw === "nestjs" ? "src/auth/jwt.guard.ts" : "src/middleware/auth.ts");
     const code = (g: ReturnType<typeof gen>) => (g.get("src/app.controller.ts") ?? "") + g.get("src/main.ts");
     for (const fw of ["express", "fastify", "hono", "nestjs"]) {
-      const ts = (auth: string) => gen({ language: "typescript", framework: fw, auth }, eps);
+      const ts = (auth: string) => gen({ language: "typescript", framework: fw, auth }, eps, [{ id: "e1", name: "User", fields: [{ id: "f1", name: "id", type: "uuid", required: true, unique: true, primaryKey: true }, { id: "f2", name: "email", type: "string", required: true, unique: true }] }]);
       // Self-managed: login mints HS256 tokens with JWT_SECRET, so authRequired must verify exactly those.
       const self = ts("none");
       const selfVerifier = self.get(verifierPath(fw))!;
       assert.ok(selfVerifier, `${fw}: auth "none" + auth patterns must emit a verifier`);
       assert.match(selfVerifier, /algorithms: \["HS256"\]/, fw);
       assert.match(selfVerifier, /process\.env\.JWT_SECRET/, fw);
-      assert.match(code(self), /jwt\.sign\(\{ sub: user!\.id \}, process\.env\.JWT_SECRET!/, fw);
+      assert.match(code(self), /jwt\.sign\(\{ sub: user\.id \}, process\.env\.JWT_SECRET!/, fw);
       // auth_me reads the caller from authRequired, so it must run behind it even without e.auth.
       assert.match(code(self), fw === "nestjs" ? /@UseGuards\(JwtAuthGuard\)\n\s+async getAuthMe/ : fw === "fastify" ? /"\/auth\/me", \{ preHandler: authRequired \}/ : /"\/auth\/me", authRequired,/, fw);
       assert.match(self.get("package.json")!, /"jsonwebtoken"/, fw);
@@ -1245,7 +1248,7 @@ describe("Every deployment target gets a real CI deploy job", () => {
   const TS_QUEUE_CLIENT: Record<string, { dep: string; env: string | null }> = {
     kafka: { dep: "kafkajs", env: "KAFKA_BROKERS" },
     rabbitmq: { dep: "amqplib", env: "RABBITMQ_URL" },
-    nats: { dep: "nats", env: "NATS_URL" },
+    nats: { dep: "@nats-io/transport-node", env: "NATS_URL" },
     sqs: { dep: "@aws-sdk/client-sqs", env: null }, // endpoint override via AWS_ENDPOINT_URL_SQS, read by the SDK itself
     bullmq: { dep: "bullmq", env: "REDIS_URL" },
   };
@@ -1680,6 +1683,48 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.doesNotMatch(gen({ language: "go", framework: "gin", api: "grpc", queue: "kafka" }).get("docker-compose.yml")!, /^  worker:/m);
   });
 
+  // CI's e2e round trip (scripts/e2e-roundtrip.sh) publishes through the app and greps the
+  // logs for a `consumed` line carrying the message id: every consumer must log one with the body.
+  it("every language's consumer logs a greppable `consumed` line with the message body", () => {
+    const cases: [string, string, string, RegExp][] = [
+      ["go", "gin", "cmd/worker/main.go", /log\.Info\("consumed", "topic", topic, "body", string\(msg\[:min\(len\(msg\), 200\)\]\)\)/],
+      ["typescript", "express", "src/worker.ts", /msg: "consumed", topic: TOPICS\.notifications, body: excerpt\(message\)/],
+      ["python", "fastapi", "app/worker.py", /log\.info\("consumed", extra=\{"topic": topic, "body": json\.dumps\(payload\)\[:200\]\}\)/],
+      ["rust", "axum", "src/bin/worker.rs", /tracing::info!\(topic = queue::QUEUE, body = [^;]*"consumed"\)/],
+      ["java", "spring", "src/main/java/dev/helios/app/messaging/NotificationConsumer.java", /log\.info\("consumed topic=\{\} body=\{\}", NotificationPublisher\.DESTINATION, payload/],
+      ["java", "quarkus", "src/main/java/dev/helios/app/messaging/NotificationConsumer.java", /LOG\.infof\("consumed topic=%s body=%s", "notifications", payload/], // Quarkus publisher has no DESTINATION constant
+      ["kotlin", "ktor", "src/main/kotlin/Queue.kt", /info\("consumed topic=\{\} body=\{\}", JOBS, message\.take\(200\)\)/],
+    ];
+    for (const [language, framework, path, re] of cases) {
+      for (const queue of ["kafka", "rabbitmq"]) {
+        assert.match(gen({ language, framework, queue }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get(path) ?? "", re, `${language}-${framework}/${queue}: ${path}`);
+      }
+    }
+  });
+
+  // JVM stacks have no send_notification route once entities own the API, so the round trip
+  // goes through entity create — which must publish the id the e2e job then looks for.
+  it("Java entity create publishes <entity>.created with the new id; tests mock the publisher", () => {
+    const spring = gen({ language: "java", framework: "spring", queue: "rabbitmq" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const quarkus = gen({ language: "java", framework: "quarkus", queue: "kafka" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const pascal = SAMPLE_ENTITIES[0].name.replace(/^./, (c) => c.toUpperCase());
+    const springCtl = spring.get(`src/main/java/dev/helios/app/controller/${pascal}Controller.java`)!;
+    assert.match(springCtl, /saved = service\.create\([\s\S]*publisher\.publish\("\{\\"event\\":\\"[a-z-]+\.created\\",\\"id\\":\\"" \+ saved\.get\w+\(\) \+ "\\"\}"\);/);
+    const qRes = quarkus.get(`src/main/java/dev/helios/app/${pascal}Resource.java`)!;
+    assert.match(qRes, /entity\.persist\(\);\s*publisher\.publish\("\{\\"event\\":\\"[a-z-]+\.created\\",\\"id\\":\\"" \+ entity\.\w+ \+ "\\"\}"\);/);
+    // Unit tests run without a broker: every test that creates entities mocks the publisher.
+    for (const f of spring.files.filter((f) => f.path.startsWith("src/test/java/") && f.content.includes("@SpringBootTest"))) {
+      assert.match(f.content, /@MockBean\s+dev\.helios\.app\.messaging\.NotificationPublisher publisher;/, f.path);
+    }
+    for (const f of quarkus.files.filter((f) => f.path.startsWith("src/test/java/") && f.content.includes("@QuarkusTest"))) {
+      assert.match(f.content, /@io\.quarkus\.test\.InjectMock\s+dev\.helios\.app\.messaging\.NotificationPublisher publisher;/, f.path);
+    }
+    assert.match(quarkus.get("pom.xml")!, /quarkus-junit5-mockito/);
+    // No queue: no publisher to call or mock.
+    const none = gen({ language: "java", framework: "spring", queue: "none" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.doesNotMatch(none.files.map((f) => f.content).join("\n"), /NotificationPublisher/);
+  });
+
   // ─── Java parity: tracing / rate limit / audit / monitoring / cache / queues ──
 
   const JAVA = ["spring", "quarkus"] as const;
@@ -1967,5 +2012,479 @@ describe("Every deployment target gets a real CI deploy job", () => {
       assert.match(model.content, /(private|public) Double score;/, `${framework}: score is Double`); // Panache uses public fields
       assert.match(g.files.find((f) => f.path.endsWith(".sql"))!.content, /score DOUBLE PRECISION/);
     }
+  });
+  // K8s must stop routing traffic to a pod whose broker is gone, or send_notification
+  // 503s while the pod still looks ready. Rust used to ping only Redis.
+  it("Rust /health?ready=1 pings the queue broker with a bounded timeout", () => {
+    const brokerCall: Record<string, RegExp> = {
+      rabbitmq: /_conn\.status\(\)\.connected\(\)/,
+      kafka: /get_offset\(OffsetAt::Latest\)/,
+      nats: /get_stream\(STREAM\)/,
+      sqs: /get_queue_url\(\)/,
+      bullmq: /cmd\("PING"\)/,
+    };
+    for (const framework of ["axum", "actix"]) {
+      for (const queue of Object.keys(brokerCall)) {
+        // mongodb = in-memory store in Rust: the broker alone must still gate readiness.
+        const g = gen({ language: "rust", framework, queue, cache: "none", database: "mongodb" });
+        const q = g.get("src/queue.rs")!;
+        const check = q.slice(q.indexOf("async fn check"));
+        assert.match(check.slice(0, check.indexOf("\n}\n")), brokerCall[queue], `${framework}/${queue}: check() talks to the broker`);
+        assert.match(q, /pub async fn ping\(\)[\s\S]*from_secs\(2\)[\s\S]*timeout\(LIMIT, probe\)/, `${framework}/${queue}: ping is bounded`);
+        const main = g.get("src/main.rs")!;
+        assert.match(main, /ready=1[\s\S]*readiness\(\)/, `${framework}/${queue}: /health serves readiness without a cache`);
+        assert.match(main, /tokio::join!\(queue::ping\(\)\)/);
+        assert.doesNotMatch(main, /db_ping/, "the in-memory store has nothing to ping");
+        assert.match(main, /SERVICE_UNAVAILABLE|ServiceUnavailable\(\)/, "a down broker is a 503");
+      }
+      // A DB that is down must make the pod unready even with no cache or queue.
+      for (const [database, pool] of [["postgres", "PgPool"], ["mysql", "MySqlPool"]]) {
+        const main = gen({ language: "rust", framework, database, cache: "none", queue: "none" }).get("src/main.rs")!;
+        assert.match(main, /tokio::join!\(db_ping\(pool\)\)/, `${framework}/${database}: readiness pings the db`);
+        assert.match(main, new RegExp(`async fn db_ping\\(pool: &sqlx::${pool}\\)[\\s\\S]*from_secs\\(2\\), sqlx::query\\("SELECT 1"\\)`), `${framework}/${database}: bounded SELECT 1`);
+        assert.match(main, /"\/health", (axum::routing::get|web::get\(\)\.to)\(health\)/);
+      }
+    }
+    // Everything configured: all three are pinged together and reported by name.
+    assert.match(gen({ language: "rust", framework: "axum", queue: "nats", cache: "redis", database: "postgres" }).get("src/main.rs")!, /tokio::join!\(db_ping\(pool\), cache::ping\(\), queue::ping\(\)\)/);
+  });
+  // An auth:true route outside the auth layer is callable by anyone. Rust used to skip
+  // the layer entirely for auth "none", leaving POST /notifications (send_notification) open.
+  it("Rust: every auth:true route (stub and pattern) sits behind require_auth; auth:false routes don't", () => {
+    const ep = (id: string, method: string, path: string, auth: boolean, pattern?: string) =>
+      ({ id, method, path, summary: path, auth, ...(pattern ? { pattern } : {}) }) as (typeof SAMPLE_ENDPOINTS)[number];
+    const endpoints = [
+      ep("1", "GET", "/health", false),
+      ep("2", "GET", "/reports/:id", true),
+      ep("3", "GET", "/public", false),
+      ep("4", "POST", "/notifications", true, "send_notification"),
+      ep("5", "POST", "/auth/login", false, "auth_login"),
+      ep("6", "GET", "/auth/me", true, "auth_me"),
+    ];
+    // Protected routes live between the layer's router and its wrap (axum) / inside the scope (actix).
+    const protectedBlock = (main: string, fw: string) =>
+      fw === "axum"
+        ? main.slice(main.indexOf("let protected = Router::new()"), main.indexOf(".route_layer(axum::middleware::from_fn(auth::require_auth))"))
+        : main.slice(main.indexOf(".wrap(actix_web::middleware::from_fn(auth::require_auth))"), main.indexOf("\n            )", main.indexOf('web::scope("")')));
+    const routeOf = (path: string, fw: string) => `.route("${fw === "axum" ? path : path.replace(/:(\w+)/g, "{$1}")}"`;
+    for (const framework of ["axum", "actix"]) {
+      for (const auth of ["clerk", "none"]) {
+        const g = gen({ language: "rust", framework, auth, queue: "sqs" }, endpoints);
+        const main = g.get("src/main.rs")!;
+        const block = protectedBlock(main, framework);
+        assert.ok(block.length > 0, `${framework}/${auth}: an auth layer exists`);
+        for (const e of endpoints.filter((e) => e.path !== "/health")) {
+          const r = routeOf(e.path, framework);
+          assert.ok(main.includes(r), `${framework}/${auth}: ${e.path} is routed`);
+          assert.equal(block.includes(r), e.auth, `${framework}/${auth}: ${e.path} protected iff auth:true`);
+        }
+        assert.ok(g.get("src/auth.rs"), `${framework}/${auth}: src/auth.rs is emitted`);
+      }
+      // With entities, only the publish route stays a stub — it and the entity CRUD are protected.
+      const main = gen({ language: "rust", framework, auth: "none", queue: "sqs" }, endpoints, SAMPLE_ENTITIES).get("src/main.rs")!;
+      const block = protectedBlock(main, framework);
+      assert.ok(block.includes(routeOf("/notifications", framework)), `${framework}: /notifications protected alongside entities`);
+      assert.match(block, /handlers::user::(router|config)/, `${framework}: entity CRUD protected`);
+    }
+  });
+  // auth "none" + auth_* patterns = self-issued HS256 tokens (JWT_SECRET), exactly like Go/TS/Python;
+  // e2e-roundtrip.sh signs its token that way. A missing secret/JWKS config must be a 500, not a pass.
+  it("Rust auth.rs verifies the right tokens and fails closed when unconfigured", () => {
+    const ep = (id: string, method: string, path: string, auth: boolean, pattern?: string) =>
+      ({ id, method, path, summary: path, auth, ...(pattern ? { pattern } : {}) }) as (typeof SAMPLE_ENDPOINTS)[number];
+    const selfIssued = [ep("1", "POST", "/auth/login", false, "auth_login"), ep("2", "POST", "/notifications", true, "send_notification")];
+    for (const framework of ["axum", "actix"]) {
+      const hs = gen({ language: "rust", framework, auth: "none", queue: "sqs" }, selfIssued);
+      const hsAuth = hs.get("src/auth.rs")!;
+      assert.match(hsAuth, /Validation::new\(Algorithm::HS256\)/);
+      assert.match(hsAuth, /DecodingKey::from_secret\(secret\.as_bytes\(\)\)/);
+      assert.match(hsAuth, /\["JWT_SECRET"\]/, "missing JWT_SECRET fails closed");
+      assert.doesNotMatch(hs.get("Cargo.toml")!, /^reqwest = /m, "no JWKS fetch for self-issued tokens");
+      assert.match(hs.get(".env.example")!, /^JWT_SECRET=/m);
+
+      const jw = gen({ language: "rust", framework, auth: "clerk", queue: "sqs" }, selfIssued).get("src/auth.rs")!;
+      assert.match(jw, /\["AUTH_JWKS_URL", "AUTH_ISSUER"\]/);
+      assert.doesNotMatch(jw, /Algorithm::HS256/, "a provider's tokens are never accepted as HS256");
+
+      for (const a of [hsAuth, jw]) {
+        const mw = a.slice(a.indexOf("pub async fn require_auth"));
+        const fail = mw.search(/INTERNAL_SERVER_ERROR|ErrorInternalServerError/);
+        assert.ok(fail > 0 && fail < mw.search(/UNAUTHORIZED|ErrorUnauthorized/), `${framework}: unconfigured → 500 before any token check`);
+      }
+      // Nothing protected and nothing issued: no verifier, same as the other languages.
+      assert.equal(gen({ language: "rust", framework, auth: "none" }, [ep("1", "GET", "/public", false)]).get("src/auth.rs"), undefined);
+    }
+  });
+
+  // The server owns GET /health (liveness + readiness). A user GET /health used to
+  // be registered a second time, and Fastify refuses to boot on a duplicate route.
+  it("TypeScript: a user GET /health (stub or health_check pattern) never duplicates the built-in route", () => {
+    for (const pattern of [undefined, "health_check"]) {
+      const eps = [{ id: "h", method: "GET", path: "/health", summary: "Health", auth: false, ...(pattern ? { pattern } : {}) }];
+      for (const framework of ["express", "fastify", "hono", "nestjs"]) {
+        for (const queue of ["none", "nats"]) {
+          const g = gen({ language: "typescript", framework, queue }, eps as never);
+          const main = g.get(framework === "nestjs" ? "src/app.controller.ts" : "src/main.ts")!;
+          const n = main.match(/\b(get|Get)\("\/health"/g)?.length ?? 0;
+          assert.equal(n, 1, `${framework} queue=${queue} pattern=${pattern}: /health registered ${n} times`);
+        }
+      }
+    }
+  });
+  // `nats` on npm is deprecated; its maintained successors are the @nats-io/* v3 modules.
+  it("TypeScript NATS uses @nats-io/transport-node + @nats-io/jetstream, not the deprecated `nats` package", () => {
+    const g = gen({ language: "typescript", framework: "fastify", queue: "nats" });
+    const deps = JSON.parse(g.get("package.json")!).dependencies;
+    assert.equal(deps.nats, undefined);
+    assert.ok(deps["@nats-io/transport-node"] && deps["@nats-io/jetstream"]);
+    const q = g.get("src/queue.ts")!;
+    assert.doesNotMatch(q, /from "nats"/);
+    assert.match(q, /from "@nats-io\/transport-node"/);
+    assert.match(q, /jetstreamManager\(c\)/); // v3 API: free functions over the connection
+    assert.match(q, /process\.env\.NATS_URL/);
+  });
+  // Self-issued auth used to INSERT password_hash/name into the user's own `users`
+  // table and skip its required columns, so register failed for any User entity that
+  // didn't happen to declare them. Hashes now live in a generated auth_credentials
+  // table keyed by the User PK; register fills the entity's real columns.
+  it("self-issued auth (go/python) stores hashes in auth_credentials, never on the user's entity", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+      { id: "f3", name: "score", type: "number" as const, required: false, unique: false },
+      { id: "f4", name: "active", type: "boolean" as const, required: true, unique: false },
+      { id: "f5", name: "createdAt", type: "date" as const, required: true, unique: false },
+    ] }];
+    const eps = (["auth_register", "auth_login", "auth_change_password", "auth_me"] as const).map((pattern, i) =>
+      ({ id: `a${i}`, method: "POST" as const, path: `/auth/${pattern}`, summary: pattern, auth: pattern === "auth_change_password" || pattern === "auth_me", pattern }));
+    const sql = (g: ReturnType<typeof gen>) => g.files.filter((f) => f.path.endsWith(".sql") || f.path.includes("migrations/versions/")).map((f) => f.content).join("\n");
+    for (const [language, framework] of [["go", "gin"], ["go", "chi"], ["python", "fastapi"], ["python", "litestar"], ["python", "django"]]) {
+      const g = gen({ language, framework, auth: "none", database: "postgres" }, eps, user);
+      const usersDdl = sql(g).match(/CREATE TABLE IF NOT EXISTS users \(([\s\S]*?)\);/)![1];
+      assert.doesNotMatch(usersDdl, /password/, `${framework}: the user's table keeps exactly its declared columns`);
+      assert.match(sql(g), /CREATE TABLE IF NOT EXISTS auth_credentials \([\s\S]{0,30}user_id UUID PRIMARY KEY[\s\S]*password_hash VARCHAR\(255\) NOT NULL/, `${framework}: hashes get their own table, typed like the User PK`);
+      const code = language === "go" ? g.get("internal/handlers/api.go")! : g.get("app/main.py")!;
+      assert.match(code, /missing required fields/, `${framework}: an omitted required column is a 400, not a NOT NULL failure`);
+      assert.match(code, language === "go" ? /\[\]string\{"active"\}/ : /\["active"\] if payload\.get\(f\) is None/, `${framework}: 'active' is required; optional 'score' and stamped 'createdAt' are not`);
+      assert.match(code, language === "go" ? /"created_at": time\.Now\(\)/ : /createdAt=datetime\.utcnow\(\)/, `${framework}: required dates are stamped`);
+      assert.doesNotMatch(code, /"name":|\bname=/, `${framework}: register no longer writes an undeclared name column`);
+      assert.ok(code.match(/auth_credentials|AuthCredential\b/g)!.length >= 3, `${framework}: register, login and change_password all use the credentials table`);
+      if (language === "python") assert.match(g.get("app/models.py")!, /class AuthCredential\(Base\):\n    __tablename__ = "auth_credentials"/);
+    }
+    // With a provider the credential endpoints are 501s, so there is nothing to store.
+    assert.doesNotMatch(sql(gen({ language: "python", framework: "fastapi", auth: "clerk", database: "postgres" }, eps, user)), /auth_credentials/);
+    // No usable User entity: an explicit 501 instead of queries against a table that doesn't exist.
+    assert.match(gen({ language: "go", framework: "gin", auth: "none" }, eps, []).get("internal/handlers/api.go")!, /Declare a User entity[\s\S]*StatusNotImplemented/);
+  });
+  // TS register/login/change_password were commented-out stubs: register answered 201
+  // without persisting anything and login could never succeed. They now use a Prisma
+  // AuthCredential (auth_credentials) like Go/Python. And a credential row must die
+  // with its user everywhere — otherwise a deleted account keeps a live password.
+  it("self-issued auth: TS persists hashes via Prisma AuthCredential; credentials cascade with the user", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+      { id: "f4", name: "active", type: "boolean" as const, required: true, unique: false },
+      { id: "f5", name: "createdAt", type: "date" as const, required: true, unique: false },
+    ] }];
+    const eps = (["auth_register", "auth_login", "auth_change_password", "auth_me"] as const).map((pattern, i) =>
+      ({ id: `a${i}`, method: "POST" as const, path: `/auth/${pattern}`, summary: pattern, auth: pattern === "auth_change_password" || pattern === "auth_me", pattern }));
+    for (const framework of ["express", "fastify", "hono", "nestjs"]) {
+      const g = gen({ language: "typescript", framework, auth: "none", database: "postgres" }, eps, user);
+      const schema = g.get("prisma/schema.prisma")!;
+      assert.match(schema, /model AuthCredential \{[\s\S]*@relation\(fields: \[user_id\], references: \[id\], onDelete: Cascade\)[\s\S]*@@map\("auth_credentials"\)/, `${framework}: credential row is deleted with its user`);
+      assert.match(schema, /model User \{[^}]*authCredential AuthCredential\?/, `${framework}: Prisma needs the back-relation`);
+      const code = g.get(framework === "nestjs" ? "src/app.controller.ts" : "src/main.ts")!;
+      assert.match(code, /import \{ prisma \} from "\.\/db"/, `${framework}: auth handlers reach the DB`);
+      assert.match(code, /prisma\.\$transaction\(async \(tx\) => \{[\s\S]*tx\.user\.create[\s\S]*tx\.authCredential\.create/, `${framework}: user + credential are written atomically`);
+      assert.match(code, /\["active"\]\.filter\(\(k\) => body\[k\] == null\)/, `${framework}: an omitted required column is a 400 by name`);
+      assert.match(code, /createdAt: new Date\(\)/, `${framework}: required dates are stamped`);
+      assert.match(code, /email_already_registered/);
+      assert.match(code, /include: \{ authCredential: true \}/, `${framework}: login checks the stored hash`);
+      assert.match(code, /prisma\.authCredential\.update/, `${framework}: change_password persists the new hash`);
+      assert.doesNotMatch(code, /passwordHash: string \} \| null|\/\/ await prisma\.user\.update/, `${framework}: no placeholder stubs left`);
+    }
+    // Mongo has no Prisma data layer: an explicit 501 rather than a fake success.
+    assert.match(gen({ language: "typescript", framework: "express", auth: "none", database: "mongodb" }, eps, user).get("src/main.ts")!, /Declare a User entity[\s\S]*res\.status\(501\)/);
+    // With a provider the credential endpoints are 501s: no credentials model.
+    assert.doesNotMatch(gen({ language: "typescript", framework: "express", auth: "clerk", database: "postgres" }, eps, user).get("prisma/schema.prisma")!, /AuthCredential/);
+    // SQL migrations (every dialect) and SQLAlchemy carry the FK; SQLite connections opt into enforcing it.
+    const sql = (g: ReturnType<typeof gen>) => g.files.filter((f) => f.path.endsWith(".sql") || f.path.includes("migrations/versions/")).map((f) => f.content).join("\n");
+    for (const database of ["postgres", "mysql", "sqlite"]) {
+      assert.match(sql(gen({ language: "go", framework: "gin", auth: "none", database }, eps, user)), /FOREIGN KEY \(user_id\) REFERENCES users\(id\) ON DELETE CASCADE/, `${database}: table-level FK (MySQL ignores inline REFERENCES)`);
+    }
+    const py = gen({ language: "python", framework: "fastapi", auth: "none", database: "sqlite" }, eps, user);
+    assert.match(py.get("app/models.py")!, /user_id = Column\(String\(36\), ForeignKey\("users\.id", ondelete="CASCADE"\)/);
+    assert.match(py.get("app/db.py")!, /PRAGMA foreign_keys=ON/, "SQLite ignores ON DELETE CASCADE unless each connection enables it");
+    assert.match(gen({ language: "go", framework: "gin", auth: "none", database: "sqlite" }, eps, user).get("internal/db/gorm.go")!, /_pragma=foreign_keys\(1\)/);
+  });
+
+  // e2e CRUD (scripts/e2e-crud.sh) runs against a fresh database: the Rust api must create
+  // its tables itself, and a NULL in an optional column must still decode into the row type.
+  it("rust: api runs the sqlx migrations at startup; optional fields are Option<T> in the row", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+      { id: "f3", name: "score", type: "number" as const, required: false, unique: false },
+      { id: "f6", name: "meta", type: "json" as const, required: false, unique: false },
+      { id: "f4", name: "active", type: "boolean" as const, required: true, unique: false },
+    ] }];
+    for (const framework of ["axum", "actix"]) {
+      for (const database of ["postgres", "mysql"]) {
+        const g = gen({ language: "rust", framework, auth: "none", database }, SAMPLE_ENDPOINTS, user);
+        const label = `${framework}/${database}`;
+        assert.match(g.get("Cargo.toml")!, /sqlx = \{[^}]*"migrate"/, `${label}: migrate!() needs the sqlx migrate feature`);
+        assert.match(g.get("src/main.rs")!, /db::connect[^\n]*\n[\s\S]*sqlx::migrate!\("\.\/migrations"\)\.run\(&pool\)/, `${label}: api migrates right after connecting`);
+        assert.ok(g.files.some((f) => /^migrations\/\d+_[a-z_]+\.up\.sql$/.test(f.path)), `${label}: sqlx's <version>_<name>.up.sql naming`);
+        if (g.get("src/bin/worker.rs")) assert.doesNotMatch(g.get("src/bin/worker.rs")!, /migrate!/, `${label}: only the api migrates`);
+        const model = g.get("src/models/user.rs")!.split("pub struct CreateUser")[0];
+        assert.match(model, /pub id: [^\n]*Uuid|pub id: String/, `${label}: pk stays non-optional`);
+        assert.match(model, /pub email: String,/);
+        assert.match(model, /pub score: Option<f64>,/, `${label}: nullable column decodes as Option`);
+        assert.match(model, /pub meta: Option<serde_json::Value>,/);
+        assert.match(model, /pub active: bool,/);
+      }
+    }
+    // MySQL 8 rejects CREATE INDEX IF NOT EXISTS, which would fail the startup migration.
+    const up = (database: string) => gen({ language: "rust", framework: "axum", database }, SAMPLE_ENDPOINTS, user).files.find((f) => f.path.endsWith(".up.sql"))!.content;
+    assert.doesNotMatch(up("mysql"), /IF NOT EXISTS idx_/);
+    assert.match(up("mysql"), /CREATE INDEX idx_users_id ON users \(id\);/);
+    // No entities → no migrations dir, so no migrate!() (it would fail to compile).
+    assert.doesNotMatch(gen({ language: "rust", framework: "axum", database: "postgres" }).get("src/main.rs")!, /migrate!/);
+  });
+  // Python repos couldn't run against a migrated DB: Alembic executed each SQL *line*
+  // on its own (a CREATE TABLE split mid-statement), and SQLAlchemy mapped camelCase
+  // column names while db/sql.ts creates snake_case ones. JSON keeps the entity names.
+  it("python: alembic runs whole statements; models map onto the migration's snake_case columns", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+      { id: "f3", name: "lastLoginAt", type: "date" as const, required: false, unique: false },
+      { id: "f5", name: "createdAt", type: "date" as const, required: true, unique: false },
+    ] }];
+    const eps = [{ id: "a", method: "POST" as const, path: "/auth/register", summary: "r", auth: false, pattern: "auth_register" as const }];
+    for (const database of ["postgres", "mysql", "sqlite"]) {
+      const g = gen({ language: "python", framework: "fastapi", auth: "none", database }, eps, user);
+      const mig = g.get("migrations/versions/0001_init.py")!;
+      const stmts = [...mig.matchAll(/op\.execute\("""\n([\s\S]*?)\n"""\)/g)].map((m) => m[1]);
+      assert.equal(stmts.length, (mig.match(/op\.execute\(/g) ?? []).length, `${database}: every execute is one triple-quoted statement`);
+      for (const s of stmts) {
+        assert.match(s, /^(CREATE|DROP) /, `${database}: each execute starts a statement, not a column line`);
+        assert.equal((s.match(/\(/g) ?? []).length, (s.match(/\)/g) ?? []).length, `${database}: statement is whole: ${s}`);
+      }
+      const ddl = mig.match(/CREATE TABLE IF NOT EXISTS users \(([\s\S]*?)\n\)/)![1];
+      const dbCols = new Set([...ddl.matchAll(/^ {2}(\w+) /gm)].map((m) => m[1]));
+      const model = g.get("app/models.py")!.split("class AuthCredential")[0].split("class User(Base):")[1];
+      const mapped = [...model.matchAll(/^ {4}(\w+) = Column\((?:"(\w+)", )?/gm)].map((m) => m[2] ?? m[1]);
+      assert.deepEqual(new Set(mapped), dbCols, `${database}: SQLAlchemy columns are exactly the migrated ones`);
+      assert.match(model, /createdAt = Column\("created_at", DateTime, default=datetime\.utcnow\)/, "attribute (JSON) stays camelCase; the managed column gets a default");
+    }
+  });
+  // FastAPI mounted app/routers/<entity>.py (no auth, raw ORM objects) before main.py's
+  // pattern handlers, so GET/PUT/DELETE /users/{id} marked auth:true were served unauthenticated.
+  it("python: an auth:true entity route is never also served by an unguarded router", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+    ] }];
+    const crud = ([["GET", "/users", "crud_list", false], ["GET", "/users/:id", "crud_get", true], ["POST", "/users", "crud_create", true],
+      ["PUT", "/users/:id", "crud_update", true], ["DELETE", "/users/:id", "crud_delete", true], ["POST", "/auth/login", "auth_login", false]] as const)
+      .map(([method, path, pattern, auth], i) => ({ id: `c${i}`, method, path, summary: pattern, auth, pattern }));
+    const g = gen({ language: "python", framework: "fastapi", auth: "none", database: "postgres" }, crud, user);
+    const main = g.get("app/main.py")!;
+    assert.equal(g.get("app/routers/user.py"), undefined, "no second CRUD implementation for a pattern-served entity");
+    assert.doesNotMatch(main, /include_router/);
+    for (const route of ['get("/users/{id}"', 'post("/users"', 'put("/users/{id}"', 'delete("/users/{id}"'])
+      assert.match(main, new RegExp(`@app\\.${route.replace(/[(){}]/g, "\\$&")}[^\\n]*dependencies=\\[Depends\\(auth_required\\)\\]`), `${route} is guarded`);
+    assert.match(main, /__mapper__\.column_attrs/, "responses serialize by attribute (JSON) name, not ORM objects or DB column names");
+    // Without crud_* patterns the router remains the entity's only CRUD surface.
+    assert.ok(gen({ language: "python", framework: "fastapi", auth: "none", database: "postgres" }, [], user).get("app/routers/user.py"));
+  });
+  // Nothing created the schema at container start, so every TS CRUD route hit a missing
+  // table against a fresh database. The api now runs `prisma db push` before listening;
+  // the worker (compose `command:` override) must not, or two processes race on DDL.
+  it("TS images create the Prisma schema at api start (api only, CLI kept in the runtime)", () => {
+    for (const framework of ["express", "fastify", "hono", "nestjs"]) {
+      const g = gen({ language: "typescript", framework, database: "postgres", queue: "kafka" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const docker = g.get("Dockerfile")!;
+      assert.match(docker, /CMD \["sh", "-c", "node_modules\/\.bin\/prisma db push --skip-generate && exec node dist\/main\.js"\]/, `${framework}: schema synced before the api listens`);
+      assert.doesNotMatch(docker, /--accept-data-loss/, `${framework}: a destructive schema change must stop the boot, not drop data`);
+      assert.match(docker, /COPY --from=build \/app\/prisma \.\/prisma/, `${framework}: db push needs schema.prisma at runtime`);
+      const pkg = JSON.parse(g.get("package.json")!);
+      assert.ok(pkg.dependencies.prisma && !pkg.devDependencies.prisma, `${framework}: prisma CLI survives npm prune --omit=dev`);
+      assert.match(g.get("docker-compose.yml")!, /worker:[\s\S]*?command: \["node", "dist\/worker\.js"\]/, `${framework}: worker overrides CMD, so only the api touches the schema`);
+    }
+    // No Prisma (no entities), no schema step: the image just starts the server.
+    const plain = gen({ language: "typescript", framework: "express", database: "postgres" }, SAMPLE_ENDPOINTS, []).get("Dockerfile")!;
+    assert.match(plain, /CMD \["node", "dist\/main\.js"\]/);
+    assert.doesNotMatch(plain, /prisma db push/);
+  });
+  // Quarkus PUT answered 200 but never copied the body onto the row, so e2e-crud.sh's
+  // score→42 / active→false check failed. And Hibernate's default naming kept camelCase
+  // columns, diverging from the snake_case migration every other stack uses.
+  it("Quarkus: PUT applies every writable field; columns are snake_case like the migration", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+      { id: "f3", name: "score", type: "number" as const, required: false, unique: false },
+      { id: "f4", name: "active", type: "boolean" as const, required: true, unique: false },
+      { id: "f5", name: "createdAt", type: "date" as const, required: true, unique: false },
+    ] }];
+    const g = gen({ language: "java", framework: "quarkus", auth: "none", database: "postgres" }, [], user);
+    const update = g.get("src/main/java/dev/helios/app/UserResource.java")!.match(/public Response update[\s\S]*?\n    }/)![0];
+    for (const f of ["email", "score", "active", "createdAt"]) {
+      assert.match(update, new RegExp(`if \\(updates\\.${f} != null\\) existing\\.${f} = updates\\.${f};`), `PUT writes ${f}`);
+    }
+    assert.doesNotMatch(update, /updates\.id\b/, "the path id wins; the body can't re-key the row");
+    assert.match(g.get("src/main/resources/application.properties")!, /physical-naming-strategy=org\.hibernate\.boot\.model\.naming\.CamelCaseToUnderscoresNamingStrategy/);
+    assert.match(g.get("src/test/java/dev/helios/app/UserResourceTest.java")!, /void updateUser_appliesBody\(\)[\s\S]*put\("\/users\/" \+ id\)[\s\S]*equalTo\(changed\)[\s\S]*get\("\/users\/" \+ id\)/, "mvn test proves the change sticks");
+  });
+
+  // e2e CRUD against compose Postgres: nothing created the tables (cmd/migrate was never run),
+  // so every /users call 500'd. The api now migrates itself from embedded SQL before serving.
+  it("Go api applies embedded migrations at startup, before opening GORM, on every SQL dialect", () => {
+    for (const database of ["postgres", "mysql", "sqlite"]) {
+      const g = gen({ database, auth: "none" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      assert.match(g.get("migrations/migrations.go")!, /\/\/go:embed \*\.sql\nvar FS embed\.FS/, `${database}: SQL ships inside the binary`);
+      assert.match(g.get("internal/db/migrate.go")!, /migrations\.FS/, `${database}: runner reads the embedded files, not ./migrations on disk`);
+      const server = g.get("internal/server/server.go")!;
+      assert.ok(server.indexOf("db.Migrate(cfg.DatabaseURL)") > 0 && server.indexOf("db.Migrate(") < server.indexOf("db.OpenGorm("), `${database}: schema exists before serving`);
+      assert.match(server, /db\.Migrate\(cfg\.DatabaseURL\); err != nil \{\n\t\tlog\.Error\("migrate", "err", err\)\n\t\tos\.Exit\(1\)/, `${database}: a failed migration stops the pod instead of serving 500s`);
+    }
+    // Replicas race at startup: golang-migrate's DB lock + ErrNoChange make that safe.
+    assert.match(gen({ auth: "none" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("internal/db/migrate.go")!, /errors\.Is\(err, migrate\.ErrNoChange\)/);
+    // No entities -> no migrations -> no Migrate call (it would not compile).
+    assert.doesNotMatch(gen({ auth: "none" }, SAMPLE_ENDPOINTS, []).get("internal/server/server.go")!, /db\.Migrate/);
+  });
+  // POST /users inserted a map, so the response only echoed the client's fields: no id
+  // unless the client invented one. The model's hooks and DB defaults need a typed row.
+  it("Go CRUD pattern handlers use the entity's GORM model so ids/timestamps come back and updates write zero values", () => {
+    const eps = ([["GET", "/users", "crud_list"], ["GET", "/users/:id", "crud_get"], ["POST", "/users", "crud_create"],
+      ["PUT", "/users/:id", "crud_update"], ["DELETE", "/users/:id", "crud_delete"], ["GET", "/reports/:id", "crud_get"]] as const)
+      .map(([method, path, pattern], i) => ({ id: `c${i}`, method, path, summary: pattern, auth: false, pattern }));
+    for (const framework of ["gin", "fiber", "echo", "chi"]) {
+      const g = gen({ framework, auth: "none" }, eps as never, SAMPLE_ENTITIES);
+      const api = g.get("internal/handlers/api.go")!;
+      const fn = (name: string) => api.match(new RegExp(`\\) ${name}\\([\\s\\S]*?\\n}\\n`))![0];
+      assert.match(api, /"github\.com\/your-username\/[\w-]+\/internal\/models"/, `${framework}: imports the models`);
+      assert.match(fn("HandlePostUsers"), /var body models\.User[\s\S]*\.Create\(&body\)/, `${framework}: create returns the typed row (BeforeCreate id, CreatedAt)`);
+      assert.doesNotMatch(fn("HandlePostUsers"), /var body map\[string\]any/);
+      assert.match(fn("HandleGetUsersById"), /var row models\.User/);
+      assert.match(fn("HandleGetUsers"), /var rows \[\]models\.User/);
+      const put = fn("HandlePutUsersById");
+      assert.match(put, /pk := existing\.Id[\s\S]*&existing\)[\s\S]*existing\.Id = pk[\s\S]*\.Save\(&existing\)/, `${framework}: overlay + Save writes active=false; the key can't be changed by the body`);
+      assert.doesNotMatch(put, /Updates\(/, `${framework}: Updates(struct) would silently skip zero values`);
+      assert.match(fn("HandleDeleteUsersById"), /RowsAffected == 0/, `${framework}: deleting a missing row is a 404`);
+      // A table with no entity keeps the untyped fallback.
+      assert.match(fn("HandleGetReportsById"), /var row map\[string\]any/);
+    }
+    // Non-SQL stacks have no internal/models package.
+    assert.doesNotMatch(gen({ database: "mongodb", auth: "none" }, eps as never, SAMPLE_ENTITIES).get("internal/handlers/api.go") ?? "", /models\./);
+    // Soft delete would keep "deleted" rows visible (and needs a deleted_at column the migration lacks).
+    assert.doesNotMatch(gen({ auth: "none" }, eps as never, SAMPLE_ENTITIES).get("internal/models/models.go")!, /DeletedAt/);
+  });
+  // Fastify refused to boot: the crud_* pattern handlers in main.ts and the generic
+  // /users route plugin both registered GET/POST /users and GET/DELETE /users/:id.
+  // Express/Hono/Nest booted but served whichever came first, and the plugin has no auth.
+  it("typescript: each entity CRUD route is registered exactly once, auth:true ones behind auth", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+    ] }];
+    const crud = ([["GET", "/users", "crud_list", false], ["GET", "/users/:id", "crud_get", true], ["POST", "/users", "crud_create", true],
+      ["PUT", "/users/:id", "crud_update", true], ["DELETE", "/users/:id", "crud_delete", true]] as const)
+      .map(([method, path, pattern, auth], i) => ({ id: `c${i}`, method, path, summary: pattern, auth, pattern }));
+    // auth_login makes the service issue (and so verify) its own tokens, like the e2e fixture.
+    const eps = [...crud, { id: "l", method: "POST" as const, path: "/auth/login", summary: "login", auth: false, pattern: "auth_login" as const }];
+    for (const framework of ["express", "fastify", "hono", "nestjs"]) {
+      const g = gen({ language: "typescript", framework, auth: "none", database: "postgres" }, eps, user);
+      assert.ok(!g.files.some((f) => /routes\/user\.route|modules\/user\//.test(f.path)), `${framework}: no second (unguarded) User router`);
+      const src = g.files.filter((f) => f.path.startsWith("src/") && !/\.(test|spec)\.ts$/.test(f.path)).map((f) => f.content).join("\n");
+      assert.doesNotMatch(src, /app\.(use|route)\("\/users"|register\(userRoutes|UserModule/, `${framework}: nothing mounts one`);
+      for (const { method, path, auth } of crud) {
+        const reg = framework === "nestjs"
+          ? new RegExp(`@${method[0] + method.slice(1).toLowerCase()}\\("${path}"\\)\\n(.*)`, "g")
+          : new RegExp(`app\\.${method.toLowerCase()}\\("${path}", (.*)`, "g");
+        const hits = [...src.matchAll(reg)];
+        assert.equal(hits.length, 1, `${framework}: ${method} ${path} registered once`);
+        assert.equal(/authRequired|JwtAuthGuard/.test(hits[0][1]), auth, `${framework}: ${method} ${path} guarded iff auth:true`);
+      }
+    }
+    // Without crud_* patterns the entity router stays the entity's only CRUD surface.
+    const plain = gen({ language: "typescript", framework: "fastify", auth: "none", database: "postgres" }, [], user);
+    assert.ok(plain.get("src/routes/user.route.ts"));
+    assert.match(plain.get("src/main.ts")!, /register\(userRoutes, \{ prefix: "\/users" \}\)/);
+  });
+  // The gRPC image had the gap the REST one just closed: no tables unless someone ran
+  // prisma by hand (the CLI was a devDependency, missing from the runtime image).
+  it("typescript gRPC: the api pushes the Prisma schema at start; the CLI and prisma/ ship in the image", () => {
+    const g = gen({ language: "typescript", framework: "fastify", api: "grpc", auth: "none", database: "postgres" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const runtime = g.get("Dockerfile")!.split(/^FROM node:22-alpine$/m)[1];
+    assert.match(runtime, /COPY --from=build \/app\/prisma \.\/prisma/);
+    assert.match(runtime, /COPY --from=build \/app\/node_modules \.\/node_modules/, "generated client + CLI come from the build stage");
+    assert.match(runtime, /CMD \["sh", "-c", "node_modules\/\.bin\/prisma db push --skip-generate && exec node dist\/main\.js"\]/);
+    const pkg = JSON.parse(g.get("package.json")!);
+    assert.ok(pkg.dependencies.prisma && !pkg.devDependencies.prisma, "prisma CLI survives npm prune --omit=dev");
+    const plain = gen({ language: "typescript", framework: "fastify", api: "grpc", database: "postgres" }, SAMPLE_ENDPOINTS, []).get("Dockerfile")!;
+    assert.match(plain, /CMD \["node", "dist\/main\.js"\]/);
+    assert.doesNotMatch(plain, /prisma/);
+  });
+  // Fastify (and strict proxies) reject an empty body declared as JSON, so the generated
+  // client must not send Content-Type on bodyless calls — DELETE /users/:id used to 400.
+  it("TS client SDK only declares a JSON body when it sends one", () => {
+    const eps = [
+      { id: "1", method: "GET" as const, path: "/users/:id", summary: "", auth: true },
+      { id: "2", method: "DELETE" as const, path: "/users/:id", summary: "", auth: true },
+      { id: "3", method: "POST" as const, path: "/users", summary: "", auth: true },
+    ];
+    const sdk = gen({ language: "typescript", framework: "fastify" }, eps).files.find((f) => /sdk\/.*\.ts$/.test(f.path))!.content;
+    const blocks = sdk.split(/\n  async /).slice(1);
+    for (const b of blocks) {
+      const sendsBody = b.includes("JSON.stringify(body)");
+      assert.equal(b.includes('"Content-Type": "application/json"'), sendsBody, `Content-Type iff body in: ${b.slice(0, 40)}`);
+    }
+    assert.ok(blocks.some((b) => b.includes("JSON.stringify(body)")), "POST still sends JSON");
+  });
+  // The Go handler tests ran PATCH with {"createdAt": "updated"}: a non-RFC-3339 time
+  // is a 400, and Updates(map) sends "createdAt" as a column name (no such column).
+  it("go: entity Update overlays the JSON on the stored row and Saves it; test bodies send RFC 3339 dates", () => {
+    for (const framework of ["gin", "fiber", "echo", "chi"]) {
+      const g = gen({ framework, auth: "none" }, [], [{ id: "e1", name: "User", fields: [
+        SAMPLE_ENTITIES[0].fields[0], SAMPLE_ENTITIES[0].fields[2], SAMPLE_ENTITIES[0].fields[4],
+      ] }]);
+      const update = g.get("internal/handlers/user.go")!.split("Update(")[1].split("\nfunc ")[0];
+      assert.match(update, /pk := item\.Id\n[\s\S]*\(&item\)[\s\S]*item\.Id = pk\n\tif err := h\.db\.Save\(&item\)/, `${framework}: json tags map camelCase keys; the key can't change`);
+      assert.doesNotMatch(update, /map\[string\]any\n|Updates\(/, `${framework}: raw map keys are not column names`);
+      const test = g.get("internal/handlers/user_test.go")!;
+      assert.match(test, /"createdAt": "2024-01-01T00:00:00Z"/, `${framework}: time.Time only decodes RFC 3339`);
+      assert.doesNotMatch(test, /"createdAt": "(test|updated)"/);
+    }
+  });
+  // go test ./... must pass with no services: the in-process server exits when its
+  // database or broker is down, so those are probed and the tests skip with the reason;
+  // expectations are only what's knowable without data (401 / stub 200 / route mounted).
+  it("go: contract tests skip without their database/broker and never assert data-dependent statuses", () => {
+    const contract = (o: Record<string, unknown>, entities: typeof SAMPLE_ENTITIES = SAMPLE_ENTITIES) =>
+      gen(o, SAMPLE_ENDPOINTS, entities).get("internal/api/contract/contract_test.go")!;
+    const pg = contract({});
+    assert.match(pg, /if cfg\.DatabaseURL == "" \{\n\t\tskipReason = "DATABASE_URL is not set/, "no 30s ping retry against an unset URL");
+    assert.match(pg, /if skipReason == "" \{\n\t\tif q, err := queue\.Open\(context\.Background\(\), cfg\); err != nil \{\n\t\t\tskipReason = "message broker unavailable: "/);
+    assert.match(pg, /if skipReason == "" \{\n\t\tsrv := server\.New/, "server.New only runs once every dependency answered");
+    assert.equal(pg.match(/func Test(?!Main)/g)!.length, pg.match(/\trequireServer\(t\)\n/g)!.length, "every test skips when the server couldn't start");
+    // clerk: protected routes are rejected by authRequired before any handler runs.
+    assert.match(pg, /call\(t, "POST", "\/users", "\{\}"\)\n\tif resp\.StatusCode != http\.StatusUnauthorized/);
+    assert.match(pg, /call\(t, "GET", "\/health", ""\)\n\tif resp\.StatusCode != http\.StatusOK/);
+    // auth off: GET /users is the entity handler (stub yields to CRUD), so only "mounted" is knowable.
+    const open = contract({ auth: "none", queue: "none", database: "dynamodb" });
+    assert.match(open, /call\(t, "GET", "\/users", ""\)\n\tif !served\(resp\)/);
+    assert.doesNotMatch(open, /skipReason = |queue\.Open|internal\/db"/, "in-memory store + no broker: nothing to probe, the tests run");
+    assert.doesNotMatch(open + pg, /StatusCreated|StatusNoContent|!= 201|!= 204/, "stubs answer 200; CRUD statuses depend on data");
+    // A stub endpoint with no entity to yield to answers the stub's 200.
+    assert.match(contract({ auth: "none" }, []), /call\(t, "POST", "\/users", "\{\}"\)\n\tif resp\.StatusCode != http\.StatusOK/);
+  });
+  it("ci: the Go smoke step runs the generated repo's own go test after build/vet/gofmt", () => {
+    const ci = readFileSync(new URL("../../../../.github/workflows/ci.yml", import.meta.url), "utf8");
+    const step = ci.split("- name: Smoke build (Go)")[1].split("\n      - name:")[0];
+    assert.match(step, /go build \.\/\.\.\. && go vet \.\/\.\.\.[\s\S]*gofmt -l[\s\S]*go test \.\/\.\.\. -race -cover 2>&1 \| tee -a \/tmp\/smoke\.log/);
   });
 });

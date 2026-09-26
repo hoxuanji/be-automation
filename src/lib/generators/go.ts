@@ -16,8 +16,9 @@ export function goFiles(
   // Keep the Dockerfile + shared helpers; replace the cmd / internal/server
   // output with the gRPC tree.
   const module = `github.com/your-username/${safeName(config.name)}`;
-  // grpc/graphql trees also get cmd/migrate from db/migrations.ts (SQL + entities).
-  const migrate = entities.length > 0 && !/mongo|dynamo|redis/i.test(config.database) ? ["github.com/golang-migrate/migrate/v4"] : [];
+  // grpc/graphql trees also get cmd/migrate from db/migrations.ts (SQL + entities);
+  // SQLite's runner there is golang-migrate-free.
+  const migrate = entities.length > 0 && !/mongo|dynamo|redis|sqlite/i.test(config.database) ? ["github.com/golang-migrate/migrate/v4"] : [];
 
   if (config.api === "grpc") {
     const files: GeneratedFile[] = [];
@@ -46,10 +47,10 @@ export function goFiles(
   const authMode = goAuthMode(config, endpoints);
   const withAuth = authMode !== "off";
   const hasPatterns = endpoints.some((e) => e.pattern);
-  const api = hasPatterns ? goApiHandlersFile(fw, config, endpoints, entities) : null;
-
   const kind = goDbKind(config.database);
   const isSQL = kind === "postgres" || kind === "mysql" || kind === "sqlite";
+  const api = hasPatterns ? goApiHandlersFile(fw, config, endpoints, entities, isSQL) : null;
+
   const needsGorm = isSQL && (entities.length > 0 || !!api?.usesDb);
   const docStore = !isSQL && entities.length > 0;
   const withRedis = /redis|upstash|dragonfly/.test(config.cache);
@@ -131,9 +132,10 @@ export function goFiles(
 
   // go.mod is derived from what the emitted code actually imports, so it can
   // never drift from the source (missing or unused requirements).
-  // cmd/migrate is emitted later by db/migrations.ts (SQL stacks with entities)
-  // and imports golang-migrate, so require it here too.
-  const migrations = entities.length > 0 && !/mongo|dynamo|redis/i.test(config.database);
+  // cmd/migrate + internal/db/migrate.go are emitted later by db/migrations.ts
+  // (SQL stacks with entities) and import golang-migrate (not on SQLite), so
+  // require it here too.
+  const migrations = entities.length > 0 && !/mongo|dynamo|redis|sqlite/i.test(config.database);
   files.push({ path: "go.mod", content: goMod(module, files, migrations ? ["github.com/golang-migrate/migrate/v4"] : []) });
 
   return files;
@@ -891,6 +893,12 @@ function goEntityHandler(module: string, framework: string, entity: Entity): str
   const pascal = entity.name;
   const snake = toSnake(entity.name);
   const kebab = toKebab(entity.name);
+  // Update overlays the sent JSON on the stored row and saves every column, so
+  // camelCase keys map through the json tags, zero values (false, 0) are
+  // written too, and the primary key can't be changed by the body.
+  const pk = entity.fields.find((f) => f.primaryKey);
+  const keepPk = pk ? `\tpk := item.${toPascal(pk.name)}\n` : "";
+  const restorePk = pk ? `\titem.${toPascal(pk.name)} = pk\n` : "";
 
   if (framework === "gin") {
     return `package handlers
@@ -945,12 +953,11 @@ func (h *${pascal}Handler) Update(c *gin.Context) {
 \t\tc.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 \t\treturn
 \t}
-\tvar payload map[string]any
-\tif err := c.ShouldBindJSON(&payload); err != nil {
+${keepPk}\tif err := c.ShouldBindJSON(&item); err != nil {
 \t\tc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 \t\treturn
 \t}
-\tif err := h.db.Model(&item).Updates(payload).Error; err != nil {
+${restorePk}\tif err := h.db.Save(&item).Error; err != nil {
 \t\tc.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 \t\treturn
 \t}
@@ -1013,11 +1020,10 @@ func (h *${pascal}Handler) Update(c *fiber.Ctx) error {
 \tif err := h.db.First(&item, "id = ?", c.Params("id")).Error; err != nil {
 \t\treturn c.Status(404).JSON(fiber.Map{"error": "not found"})
 \t}
-\tvar payload map[string]any
-\tif err := c.BodyParser(&payload); err != nil {
+${keepPk}\tif err := c.BodyParser(&item); err != nil {
 \t\treturn c.Status(400).JSON(fiber.Map{"error": err.Error()})
 \t}
-\tif err := h.db.Model(&item).Updates(payload).Error; err != nil {
+${restorePk}\tif err := h.db.Save(&item).Error; err != nil {
 \t\treturn c.Status(500).JSON(fiber.Map{"error": err.Error()})
 \t}
 \treturn c.JSON(item)
@@ -1080,11 +1086,10 @@ func (h *${pascal}Handler) Update(c echo.Context) error {
 \tif err := h.db.First(&item, "id = ?", c.Param("id")).Error; err != nil {
 \t\treturn c.JSON(http.StatusNotFound, map[string]any{"error": "not found"})
 \t}
-\tvar payload map[string]any
-\tif err := c.Bind(&payload); err != nil {
+${keepPk}\tif err := c.Bind(&item); err != nil {
 \t\treturn c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
 \t}
-\tif err := h.db.Model(&item).Updates(payload).Error; err != nil {
+${restorePk}\tif err := h.db.Save(&item).Error; err != nil {
 \t\treturn c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
 \t}
 \treturn c.JSON(http.StatusOK, item)
@@ -1159,12 +1164,11 @@ func (h *${pascal}Handler) Update(w http.ResponseWriter, r *http.Request) {
 \t\th.writeJSON(w, 404, map[string]any{"error": "not found"})
 \t\treturn
 \t}
-\tvar payload map[string]any
-\tif err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+${keepPk}\tif err := json.NewDecoder(r.Body).Decode(&item); err != nil {
 \t\th.writeJSON(w, 400, map[string]any{"error": err.Error()})
 \t\treturn
 \t}
-\tif err := h.db.Model(&item).Updates(payload).Error; err != nil {
+${restorePk}\tif err := h.db.Save(&item).Error; err != nil {
 \t\th.writeJSON(w, 500, map[string]any{"error": err.Error()})
 \t\treturn
 \t}
@@ -1191,6 +1195,7 @@ function goTestBody(entity: Entity, valueString = "test", valueNum = 1): string 
     if (f.type === "number") return `"${f.name}": ${valueNum}`;
     if (f.type === "boolean") return `"${f.name}": true`;
     if (f.type === "uuid") return `"${f.name}": "00000000-0000-0000-0000-000000000001"`;
+    if (f.type === "date") return `"${f.name}": "2024-01-0${valueNum}T00:00:00Z"`; // time.Time needs RFC 3339
     return `"${f.name}": "${valueString}"`;
   });
   return `map[string]any{${pairs.join(", ")}}`;
@@ -1682,6 +1687,8 @@ function goGormDB(kind: GoDbKind): string {
     return `package db
 
 import (
+\t"strings"
+
 \t"github.com/glebarez/sqlite"
 \t"gorm.io/gorm"
 )
@@ -1690,7 +1697,12 @@ func OpenGorm(dsn string) (*gorm.DB, error) {
 \tif dsn == "" {
 \t\tdsn = "app.db"
 \t}
-\treturn gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+\t// SQLite enforces FOREIGN KEY / ON DELETE CASCADE only when each connection opts in.
+\tsep := "?"
+\tif strings.Contains(dsn, "?") {
+\t\tsep = "&"
+\t}
+\treturn gorm.Open(sqlite.Open(dsn+sep+"_pragma=foreign_keys(1)"), &gorm.Config{})
 }
 `;
   }
@@ -1796,20 +1808,16 @@ ${lines.join("\n")}
 `;
 }
 function goModels(module: string, entities: Entity[]): string {
-  const needsTime = entities.some((e) =>
-    e.fields.some((f) => f.type === "date" || f.name === "createdAt" || f.name === "updatedAt")
-  );
   const needsJSON = entities.some((e) => e.fields.some((f) => f.type === "json"));
 
+  // gorm is only referenced by the uuid BeforeCreate hook; time by CreatedAt/UpdatedAt (always present).
   const needsUUID = entities.some((e) => e.fields.some((f) => f.primaryKey && f.type === "uuid"));
-  const imports = [
-    needsTime ? `\t"time"\n` : "",
+  const ext = [
     needsUUID ? `\t"github.com/google/uuid"` : "",
     needsJSON ? `\t"gorm.io/datatypes"` : "",
-    `\t"gorm.io/gorm"`,
-  ]
-    .filter(Boolean)
-    .join("\n");
+    needsUUID ? `\t"gorm.io/gorm"` : "",
+  ].filter(Boolean);
+  const imports = [`\t"time"`, ext.join("\n")].filter(Boolean).join("\n\n");
 
   const structs = entities
     .map((e) => {
@@ -1817,7 +1825,8 @@ function goModels(module: string, entities: Entity[]): string {
         [toPascal(f.name), goFieldType(f.type), `\`${buildGORMTags(f)} json:"${f.name}"\``]);
       if (!e.fields.some((f) => f.name === "createdAt")) rows.push(["CreatedAt", "time.Time"]);
       if (!e.fields.some((f) => f.name === "updatedAt")) rows.push(["UpdatedAt", "time.Time"]);
-      if (!e.fields.some((f) => f.name === "deletedAt")) rows.push(["DeletedAt", "gorm.DeletedAt", '`gorm:"index"`']);
+      // No gorm.DeletedAt: the migrations have no deleted_at column, and a soft
+      // delete would leave rows visible to the table-based pattern handlers.
       const fields = goAlignFields(rows);
       const uuidPk = e.fields.find((f) => f.primaryKey && f.type === "uuid");
       // UUIDs are assigned in Go so inserts behave the same on Postgres,
@@ -2078,6 +2087,12 @@ function goServerDeps(config: StackConfig, entities: Entity[], d: GoDeps): strin
   if (d.monitoring === "datadog") out.push(`\ts.closers = append(s.closers, monitoring.InitDatadog(cfg.AppName, log))`);
 
   if (d.needsGorm) {
+    // Schema first (internal/db/migrate.go, embedded migrations/*.sql): every
+    // replica runs it, golang-migrate's DB lock lets exactly one apply it.
+    if (entities.length > 0) out.push(`\tif err := db.Migrate(cfg.DatabaseURL); err != nil {
+\t\tlog.Error("migrate", "err", err)
+\t\tos.Exit(1)
+\t}`);
     out.push(`\tgormDB, err := db.OpenGorm(cfg.DatabaseURL)
 \tif err != nil {
 \t\tlog.Error("database", "err", err)

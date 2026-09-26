@@ -111,8 +111,8 @@
   },
   {
     "path": "pom.xml",
-    "lines": 108,
-    "size": 3435
+    "lines": 114,
+    "size": 3668
   },
   {
     "path": "QUICKSTART.md",
@@ -132,7 +132,7 @@
   {
     "path": "sdk/test-app-client.ts",
     "lines": 76,
-    "size": 2175
+    "size": 2035
   },
   {
     "path": "src/main/java/dev/helios/app/HealthResource.java",
@@ -157,7 +157,7 @@
   {
     "path": "src/main/java/dev/helios/app/messaging/NotificationConsumer.java",
     "lines": 18,
-    "size": 564
+    "size": 627
   },
   {
     "path": "src/main/java/dev/helios/app/messaging/NotificationPublisher.java",
@@ -176,8 +176,8 @@
   },
   {
     "path": "src/main/java/dev/helios/app/PostResource.java",
-    "lines": 68,
-    "size": 1922
+    "lines": 74,
+    "size": 2251
   },
   {
     "path": "src/main/java/dev/helios/app/User.java",
@@ -186,13 +186,13 @@
   },
   {
     "path": "src/main/java/dev/helios/app/UserResource.java",
-    "lines": 68,
-    "size": 1922
+    "lines": 75,
+    "size": 2321
   },
   {
     "path": "src/main/resources/application.properties",
-    "lines": 46,
-    "size": 2420
+    "lines": 48,
+    "size": 2630
   },
   {
     "path": "src/main/resources/db/migration/V1__init.sql",
@@ -201,17 +201,17 @@
   },
   {
     "path": "src/test/java/dev/helios/app/ApiContractTest.java",
-    "lines": 213,
-    "size": 6997
+    "lines": 216,
+    "size": 7092
   },
   {
     "path": "src/test/java/dev/helios/app/PostResourceTest.java",
-    "lines": 28,
-    "size": 704
+    "lines": 31,
+    "size": 799
   },
   {
     "path": "src/test/java/dev/helios/app/UserResourceTest.java",
-    "lines": 28,
-    "size": 740
+    "lines": 31,
+    "size": 835
   }
 ]

@@ -142,7 +142,7 @@
   {
     "path": "sdk/test-app-client.ts",
     "lines": 76,
-    "size": 2175
+    "size": 2035
   },
   {
     "path": "src/cache.ts",
@@ -212,7 +212,7 @@
   {
     "path": "src/worker.ts",
     "lines": 36,
-    "size": 1502
+    "size": 1505
   },
   {
     "path": "tests/api.contract.test.ts",
