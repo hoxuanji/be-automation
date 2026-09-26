@@ -474,7 +474,7 @@ fun connectQueue(): JobQueue = ${impl.ctor}
 
 /** Replace with real work. Runs in the API process (module()) and in Worker.kt. */
 fun handleJob(message: String) {
-    LoggerFactory.getLogger("jobs").info("job received: {}", message)
+    LoggerFactory.getLogger("jobs").info("consumed topic={} body={}", JOBS, message.take(200))
 }
 
 /** Keeps a consumer running; after a broker error it reconnects every 5s. */
@@ -831,7 +831,7 @@ interface JobPublisher {
 
 /** Replace with real work. */
 fun handleJob(message: String) {
-    LoggerFactory.getLogger("jobs").info("job received: {}", message)
+    LoggerFactory.getLogger("jobs").info("consumed topic={} body={}", JOBS, message.take(200))
 }
 
 ${impl.body}

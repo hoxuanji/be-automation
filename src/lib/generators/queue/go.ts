@@ -458,7 +458,7 @@ func main() {
 // the notification, apply the webhook event). A returned error marks the
 // message failed; redelivery depends on the broker (see queue.Subscribe).
 func handle(_ context.Context, log *slog.Logger, topic string, msg []byte) error {
-\tlog.Info("message", "topic", topic, "bytes", len(msg))
+\tlog.Info("consumed", "topic", topic, "body", string(msg[:min(len(msg), 200)]))
 \treturn nil
 }
 `;

@@ -96,8 +96,8 @@
   },
   {
     "path": "app/worker.py",
-    "lines": 42,
-    "size": 1235
+    "lines": 43,
+    "size": 1254
   },
   {
     "path": "DEPLOY.md",

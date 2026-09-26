@@ -304,15 +304,17 @@ jobs:
       fail-fast: false
       matrix:
         # One full-profile stack per language, each with a different broker: the image must
-        # build, the api must report ready (DB + cache + broker reachable), the worker must stay up.
+        # build, the api must report ready (DB + cache + broker reachable), the worker must stay up,
+        # and a message the app publishes must be consumed. `publish` picks the trigger
+        # (scripts/e2e-roundtrip.sh): "notification" = POST /notifications, "user" = POST /users.
         combo:
-          - { label: "go-gin-rabbitmq", language: "go", framework: "gin", queue: "rabbitmq" }
-          - { label: "ts-express-kafka", language: "typescript", framework: "express", queue: "kafka" }
-          - { label: "python-fastapi-nats", language: "python", framework: "fastapi", queue: "nats" }
-          - { label: "rust-axum-sqs", language: "rust", framework: "axum", queue: "sqs" }
-          - { label: "java-spring-rabbitmq", language: "java", framework: "spring", queue: "rabbitmq" }
-          - { label: "java-quarkus-kafka", language: "java", framework: "quarkus", queue: "kafka" }
-          - { label: "kotlin-ktor-bullmq", language: "kotlin", framework: "ktor", queue: "bullmq" }
+          - { label: "go-gin-rabbitmq", language: "go", framework: "gin", queue: "rabbitmq", publish: "notification" }
+          - { label: "ts-express-kafka", language: "typescript", framework: "express", queue: "kafka", publish: "notification" }
+          - { label: "python-fastapi-nats", language: "python", framework: "fastapi", queue: "nats", publish: "notification" }
+          - { label: "rust-axum-sqs", language: "rust", framework: "axum", queue: "sqs", publish: "notification" }
+          - { label: "java-spring-rabbitmq", language: "java", framework: "spring", queue: "rabbitmq", publish: "user" }
+          - { label: "java-quarkus-kafka", language: "java", framework: "quarkus", queue: "kafka", publish: "user" }
+          - { label: "kotlin-ktor-bullmq", language: "kotlin", framework: "ktor", queue: "bullmq", publish: "user" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -351,6 +353,9 @@ jobs:
             state=$(docker compose ps worker --format '{{.State}}')
             [ "$state" = "running" ] || { echo "::error::worker is $state"; exit 1; }
           fi
+      - name: Message round trip (app publishes, consumer logs it)
+        working-directory: /tmp/smoke-repo
+        run: bash "$GITHUB_WORKSPACE/scripts/e2e-roundtrip.sh" "${{ matrix.combo.publish }}"
       # GitHub keeps at most 10 error annotations per step, so each source gets its own step.
       - name: "Report e2e: container states"
         if: failure()
