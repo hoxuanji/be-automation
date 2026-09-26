@@ -61,6 +61,10 @@ export function typescriptFiles(
     return files;
   }
 
+  // /health belongs to the server (liveness + readiness), as in Go and Python:
+  // a user GET /health (stub or health_check pattern) is skipped — Fastify
+  // refuses duplicate routes at boot, the others would silently shadow it.
+  endpoints = endpoints.filter((e) => !(e.method === "GET" && e.path === "/health"));
   const name = safeName(config.name);
   const files: GeneratedFile[] = [];
   const withAuth = tsAuthMode(config, endpoints) !== "off";

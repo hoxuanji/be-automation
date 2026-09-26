@@ -151,8 +151,8 @@
   },
   {
     "path": "src/main.ts",
-    "lines": 70,
-    "size": 2845
+    "lines": 69,
+    "size": 2778
   },
   {
     "path": "src/middleware/auth.ts",

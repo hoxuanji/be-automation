@@ -1245,7 +1245,7 @@ describe("Every deployment target gets a real CI deploy job", () => {
   const TS_QUEUE_CLIENT: Record<string, { dep: string; env: string | null }> = {
     kafka: { dep: "kafkajs", env: "KAFKA_BROKERS" },
     rabbitmq: { dep: "amqplib", env: "RABBITMQ_URL" },
-    nats: { dep: "nats", env: "NATS_URL" },
+    nats: { dep: "@nats-io/transport-node", env: "NATS_URL" },
     sqs: { dep: "@aws-sdk/client-sqs", env: null }, // endpoint override via AWS_ENDPOINT_URL_SQS, read by the SDK itself
     bullmq: { dep: "bullmq", env: "REDIS_URL" },
   };
@@ -1689,7 +1689,7 @@ describe("Every deployment target gets a real CI deploy job", () => {
       ["python", "fastapi", "app/worker.py", /log\.info\("consumed", extra=\{"topic": topic, "body": json\.dumps\(payload\)\[:200\]\}\)/],
       ["rust", "axum", "src/bin/worker.rs", /tracing::info!\(topic = queue::QUEUE, body = [^;]*"consumed"\)/],
       ["java", "spring", "src/main/java/dev/helios/app/messaging/NotificationConsumer.java", /log\.info\("consumed topic=\{\} body=\{\}", NotificationPublisher\.DESTINATION, payload/],
-      ["java", "quarkus", "src/main/java/dev/helios/app/messaging/NotificationConsumer.java", /LOG\.infof\("consumed topic=%s body=%s", NotificationPublisher\.DESTINATION, payload/],
+      ["java", "quarkus", "src/main/java/dev/helios/app/messaging/NotificationConsumer.java", /LOG\.infof\("consumed topic=%s body=%s", "notifications", payload/], // Quarkus publisher has no DESTINATION constant
       ["kotlin", "ktor", "src/main/kotlin/Queue.kt", /info\("consumed topic=\{\} body=\{\}", JOBS, message\.take\(200\)\)/],
     ];
     for (const [language, framework, path, re] of cases) {
@@ -2111,5 +2111,33 @@ describe("Every deployment target gets a real CI deploy job", () => {
       // Nothing protected and nothing issued: no verifier, same as the other languages.
       assert.equal(gen({ language: "rust", framework, auth: "none" }, [ep("1", "GET", "/public", false)]).get("src/auth.rs"), undefined);
     }
+  });
+
+  // The server owns GET /health (liveness + readiness). A user GET /health used to
+  // be registered a second time, and Fastify refuses to boot on a duplicate route.
+  it("TypeScript: a user GET /health (stub or health_check pattern) never duplicates the built-in route", () => {
+    for (const pattern of [undefined, "health_check"]) {
+      const eps = [{ id: "h", method: "GET", path: "/health", summary: "Health", auth: false, ...(pattern ? { pattern } : {}) }];
+      for (const framework of ["express", "fastify", "hono", "nestjs"]) {
+        for (const queue of ["none", "nats"]) {
+          const g = gen({ language: "typescript", framework, queue }, eps as never);
+          const main = g.get(framework === "nestjs" ? "src/app.controller.ts" : "src/main.ts")!;
+          const n = main.match(/\b(get|Get)\("\/health"/g)?.length ?? 0;
+          assert.equal(n, 1, `${framework} queue=${queue} pattern=${pattern}: /health registered ${n} times`);
+        }
+      }
+    }
+  });
+  // `nats` on npm is deprecated; its maintained successors are the @nats-io/* v3 modules.
+  it("TypeScript NATS uses @nats-io/transport-node + @nats-io/jetstream, not the deprecated `nats` package", () => {
+    const g = gen({ language: "typescript", framework: "fastify", queue: "nats" });
+    const deps = JSON.parse(g.get("package.json")!).dependencies;
+    assert.equal(deps.nats, undefined);
+    assert.ok(deps["@nats-io/transport-node"] && deps["@nats-io/jetstream"]);
+    const q = g.get("src/queue.ts")!;
+    assert.doesNotMatch(q, /from "nats"/);
+    assert.match(q, /from "@nats-io\/transport-node"/);
+    assert.match(q, /jetstreamManager\(c\)/); // v3 API: free functions over the connection
+    assert.match(q, /process\.env\.NATS_URL/);
   });
 });
