@@ -16,7 +16,7 @@ export function tsQueueDeps(config: StackConfig): Record<string, string> {
   switch (tsQueueKind(config)) {
     case "kafka": return { kafkajs: "^2.2.4" };
     case "rabbitmq": return { amqplib: "^2.0.1" }; // ships its own types since 2.0
-    case "nats": return { nats: "^2.29.3" };
+    case "nats": return { "@nats-io/transport-node": "^3.4.0", "@nats-io/jetstream": "^3.4.0" }; // successors of the deprecated `nats` package
     case "sqs": return { "@aws-sdk/client-sqs": "^3.1140.0" };
     // ponytail: BullMQ 5.x line (still maintained). 6.x moved Redis clients to pluggable peer adapters — upgrade deliberately.
     case "bullmq": return { bullmq: "^5.81.5" };
@@ -43,7 +43,7 @@ export function tsQueueFiles(config: StackConfig): GeneratedFile[] {
 const LABELS: Record<TsQueueKind, string> = {
   kafka: "Kafka (kafkajs)",
   rabbitmq: "RabbitMQ (amqplib)",
-  nats: "NATS JetStream (nats)",
+  nats: "NATS JetStream (@nats-io/transport-node + @nats-io/jetstream)",
   sqs: "AWS SQS (@aws-sdk/client-sqs)",
   bullmq: "BullMQ (Redis)",
 };
@@ -226,7 +226,12 @@ export async function closeQueue(): Promise<void> {
 }
 `,
 
-  nats: (name) => `import { AckPolicy, connect, type NatsConnection } from "nats";
+  nats: (name) => `import { AckPolicy, jetstream, jetstreamManager } from "@nats-io/jetstream";
+import { connect } from "@nats-io/transport-node";
+
+// Not imported by name: transport-node re-exports the type from a subpath export
+// ("@nats-io/nats-core/internal") that moduleResolution "node" can't resolve.
+type NatsConnection = Awaited<ReturnType<typeof connect>>;
 
 let nc: Promise<NatsConnection> | undefined;
 const ensured = new Set<string>();
@@ -251,7 +256,7 @@ const streamName = (topic: string) => topic.replace(/[^A-Za-z0-9_-]/g, "_").toUp
 
 async function ensureStream(c: NatsConnection, topic: string) {
   if (ensured.has(topic)) return;
-  const jsm = await c.jetstreamManager();
+  const jsm = await jetstreamManager(c);
   await jsm.streams.info(streamName(topic)).catch(() => jsm.streams.add({ name: streamName(topic), subjects: [topic] }));
   ensured.add(topic);
 }
@@ -259,16 +264,16 @@ async function ensureStream(c: NatsConnection, topic: string) {
 async function send(topic: Topic, message: unknown): Promise<void> {
   const c = await getConnection();
   await ensureStream(c, topic);
-  await c.jetstream().publish(topic, JSON.stringify(message));
+  await jetstream(c).publish(topic, JSON.stringify(message));
 }
 
 export async function subscribe(topic: Topic, handler: Handler): Promise<void> {
   const c = await getConnection();
   await ensureStream(c, topic);
   const durable = \`${name}-\${topic}\`;
-  const jsm = await c.jetstreamManager();
+  const jsm = await jetstreamManager(c);
   await jsm.consumers.add(streamName(topic), { durable_name: durable, ack_policy: AckPolicy.Explicit, max_deliver: 5 });
-  const consumer = await c.jetstream().consumers.get(streamName(topic), durable);
+  const consumer = await jetstream(c).consumers.get(streamName(topic), durable);
   const messages = await consumer.consume();
   void (async () => {
     for await (const m of messages) {

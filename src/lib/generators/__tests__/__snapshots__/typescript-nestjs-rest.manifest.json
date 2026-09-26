@@ -141,8 +141,8 @@
   },
   {
     "path": "src/app.controller.ts",
-    "lines": 52,
-    "size": 1510
+    "lines": 47,
+    "size": 1427
   },
   {
     "path": "src/app.module.ts",
