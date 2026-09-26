@@ -1,5 +1,6 @@
 import { type NextRequest } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { getVercelUser, VercelError } from "@/lib/vercel";
 
 export const runtime = "nodejs";
@@ -9,8 +10,12 @@ export const runtime = "nodejs";
 // Returns the Vercel user associated with the token so the UI can confirm
 // "connected as <username>". Mirrors the shape of /api/railway/verify.
 export async function POST(req: NextRequest) {
-  if (!(await getCurrentUser(req))) {
+  const claims = await getCurrentUser(req);
+  if (!claims) {
     return Response.json({ code: "unauthorized", error: "Sign in required." }, { status: 401 });
+  }
+  if (!checkRateLimit(`verify:vercel:${claims.sub}`, 10)) {
+    return Response.json({ code: "rate_limited", error: "Too many verification attempts.", hint: "Wait a minute and retry." }, { status: 429 });
   }
   let body: unknown;
   try {

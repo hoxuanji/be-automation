@@ -63,6 +63,13 @@ describe("cloudSecretsFor", () => {
     assert.deepEqual(s, { AWS_ACCESS_KEY_ID: "AKIAEXAMPLE12345678", AWS_SECRET_ACCESS_KEY: "secretsecretsecret" });
   });
 
+  // With both set, configure-aws-credentials would use the keys to AssumeRole
+  // instead of OIDC — so OIDC mode must never also emit the key pair.
+  it("aws OIDC → AWS_ROLE_ARN only, no access keys", () => {
+    const roleArn = "arn:aws:iam::123456789012:role/helios-deploy";
+    assert.deepEqual(cloudSecretsFor("aws", { roleArn }), { AWS_ROLE_ARN: roleArn });
+  });
+
   it("gcp → GCP_SA_KEY only, and rejects a non-service-account JSON", () => {
     assert.deepEqual(cloudSecretsFor("gcp", { serviceAccountKey: GCP_KEY }), { GCP_SA_KEY: GCP_KEY });
     assert.throws(() => cloudSecretsFor("gcp", { serviceAccountKey: '{"type":"authorized_user"}' }));
@@ -252,5 +259,41 @@ describe("one-click secrets match the generated deploy workflow", () => {
         assert.ok(read.has(name), `${provider}: Helios sets ${name}, but deploy.yml doesn't read it`);
       }
     }
+  });
+
+  it("the OIDC role secret is in the drift check (not silently dropped)", async () => {
+    const { CLOUD_SECRET_NAMES } = await import("@/lib/cloud-deploy");
+    const { DEPLOY_SECRETS } = await import("@/lib/generators/deploy");
+    assert.equal(CLOUD_SECRET_NAMES.aws.roleArn, "AWS_ROLE_ARN");
+    assert.ok(DEPLOY_SECRETS.aws.some((s) => s.name === CLOUD_SECRET_NAMES.aws.roleArn));
+  });
+});
+
+// Settings and the deploy stream both gate on this; a loose check would store
+// ARNs that configure-aws-credentials can't assume, failing only mid-workflow.
+describe("AWS role ARN validation", () => {
+  it("accepts role ARNs, with or without a path", async () => {
+    const { isAwsRoleArn, CLOUD_CRED_SCHEMAS } = await import("@/lib/cloud-providers");
+    for (const arn of ["arn:aws:iam::123456789012:role/helios-deploy", "arn:aws:iam::123456789012:role/ci/gh+deploy@x", " arn:aws:iam::123456789012:role/a "]) {
+      assert.equal(isAwsRoleArn(arn), true, arn);
+    }
+    assert.ok(CLOUD_CRED_SCHEMAS.aws.safeParse({ roleArn: "arn:aws:iam::123456789012:role/r" }).success);
+  });
+
+  it("rejects users, short/long account ids, other services and trailing slashes", async () => {
+    const { isAwsRoleArn, CLOUD_CRED_SCHEMAS } = await import("@/lib/cloud-providers");
+    for (const arn of [
+      "arn:aws:iam::123456789012:user/alice",
+      "arn:aws:iam::12345678901:role/r",
+      "arn:aws:iam::1234567890123:role/r",
+      "arn:aws:sts::123456789012:assumed-role/r/s",
+      "arn:aws:iam::123456789012:role/",
+      "arn:aws:iam::123456789012:role/ci/",
+      "AKIAEXAMPLE12345678",
+    ]) {
+      assert.equal(isAwsRoleArn(arn), false, arn);
+    }
+    // A bad ARN must not fall through to the access-key branch of the union.
+    assert.ok(!CLOUD_CRED_SCHEMAS.aws.safeParse({ roleArn: "arn:aws:iam::123:role/r" }).success);
   });
 });

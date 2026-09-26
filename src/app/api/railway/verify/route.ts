@@ -1,5 +1,6 @@
 import { type NextRequest } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { verifyRailwayToken } from "@/lib/railway";
 
 export const runtime = "nodejs";
@@ -40,8 +41,12 @@ function classify(err: unknown): { code: VerifyErrorCode; status: number; error:
 }
 
 export async function POST(req: NextRequest) {
-  if (!(await getCurrentUser(req))) {
+  const claims = await getCurrentUser(req);
+  if (!claims) {
     return Response.json({ code: "unauthorized", error: "Sign in required." }, { status: 401 });
+  }
+  if (!checkRateLimit(`verify:railway:${claims.sub}`, 10)) {
+    return Response.json({ code: "rate_limited", error: "Too many verification attempts.", hint: "Wait a minute and retry." }, { status: 429 });
   }
   let body: unknown;
   try {

@@ -16,7 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { toast } from "@/components/ui/toast";
 import { useStackStore } from "@/lib/store";
 import { BrandIcon } from "@/components/shared/brand-icon";
-import { CLOUD_META, CLOUD_PROVIDERS, type CloudProvider } from "@/lib/cloud-providers";
+import { AWS_OIDC_FIELDS, CLOUD_META, CLOUD_PROVIDERS, isAwsRoleArn, type CloudProvider } from "@/lib/cloud-providers";
 
 export default function SettingsPage() {
   const { authUser, loadAuth } = useStackStore();
@@ -830,11 +830,15 @@ function cloudIdentity(provider: CloudProvider, r: Record<string, unknown>): str
 
 function CloudIntegrationRow({ provider }: { provider: CloudProvider }) {
   const meta = CLOUD_META[provider];
-  const emptyFields = () => Object.fromEntries(meta.fields.map((f) => [f.key, ""]));
+  // AWS offers two modes; OIDC (role ARN only, no long-lived keys) is the default.
+  const [awsMode, setAwsMode] = React.useState<"oidc" | "keys">("oidc");
+  const oidc = provider === "aws" && awsMode === "oidc";
+  const fieldDefs = oidc ? AWS_OIDC_FIELDS : meta.fields;
+  const emptyFields = () => ({});
   const [saved, setSaved] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const [expanded, setExpanded] = React.useState(false);
-  const [fields, setFields] = React.useState<Record<string, string>>(emptyFields);
+  const [fields, setFields] = React.useState<Record<string, string>>({});
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState<{ message: string; hint?: string } | null>(null);
   const [verifiedIdentity, setVerifiedIdentity] = React.useState<string | null>(null);
@@ -849,11 +853,15 @@ function CloudIntegrationRow({ provider }: { provider: CloudProvider }) {
       .finally(() => setLoading(false));
   }, [provider]);
 
-  const complete = meta.fields.every((f) => fields[f.key]?.trim());
+  const complete = fieldDefs.every((f) => fields[f.key]?.trim());
 
   async function save() {
     if (!complete) { setError({ message: "All fields are required" }); return; }
-    const payload = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v.trim()]));
+    if (oidc && !isAwsRoleArn(fields.roleArn)) {
+      setError({ message: "That doesn't look like an IAM role ARN", hint: "Expected arn:aws:iam::123456789012:role/name." });
+      return;
+    }
+    const payload = Object.fromEntries(fieldDefs.map((f) => [f.key, fields[f.key].trim()]));
     setSaving(true);
     setError(null);
     try {
@@ -880,7 +888,13 @@ function CloudIntegrationRow({ provider }: { provider: CloudProvider }) {
       setSaved(true);
       setFields(emptyFields());
       setExpanded(false);
-      toast({ title: `${meta.label} credentials saved`, description: "Stored encrypted; pushed to GitHub Actions secrets at deploy time.", kind: "success" });
+      toast({
+        title: `${meta.label} credentials saved`,
+        description: oidc
+          ? "Role ARN format checked — AWS validates the role on the first workflow run. Finish the one-time OIDC setup shown on the Deploy page."
+          : "Stored encrypted; pushed to GitHub Actions secrets at deploy time.",
+        kind: "success",
+      });
     } catch {
       setError({ message: "Request failed", hint: "Check your network and try again." });
     } finally {
@@ -955,7 +969,29 @@ function CloudIntegrationRow({ provider }: { provider: CloudProvider }) {
             </span>
             <Badge variant="purple"><Shield className="h-2.5 w-2.5" /> encrypted</Badge>
           </div>
-          {meta.fields.map((f) => (
+          {provider === "aws" && (
+            <div className="space-y-1.5">
+              <div className="flex gap-1.5">
+                {([["oidc", "IAM role (OIDC, recommended)"], ["keys", "Access keys"]] as const).map(([m, label]) => (
+                  <Button
+                    key={m}
+                    variant={awsMode === m ? "secondary" : "ghost"}
+                    size="sm"
+                    onClick={() => { setAwsMode(m); setFields({}); setError(null); }}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+              {oidc && (
+                <p className="text-[11px] text-muted-foreground">
+                  No long-lived keys: the deploy workflow exchanges a GitHub-issued token for this role. Helios can only check the ARN format —
+                  AWS verifies the role when the workflow runs. The Deploy page shows the one-time IAM setup (identity provider + trust policy).
+                </p>
+              )}
+            </div>
+          )}
+          {fieldDefs.map((f) => (
             <label key={f.key} className="block space-y-1">
               <span className="text-[11px] text-muted-foreground">{f.label}</span>
               {f.multiline ? (

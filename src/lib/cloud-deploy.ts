@@ -19,7 +19,7 @@ export const CLOUD_SECRET_NAMES = {
   aws: {
     accessKeyId: "AWS_ACCESS_KEY_ID",
     secretAccessKey: "AWS_SECRET_ACCESS_KEY",
-    // deploy.yml also accepts AWS_ROLE_ARN (OIDC) instead of keys; Helios doesn't collect it yet.
+    roleArn: "AWS_ROLE_ARN", // OIDC mode — set instead of (never alongside) the key pair
   },
   gcp: {
     serviceAccountKey: "GCP_SA_KEY",
@@ -54,6 +54,7 @@ export function cloudSecretsFor<P extends CloudProvider>(
     case "aws": {
       const c = creds as CloudCreds<"aws">;
       const n = CLOUD_SECRET_NAMES.aws;
+      if ("roleArn" in c) return { [n.roleArn]: c.roleArn };
       return { [n.accessKeyId]: c.accessKeyId, [n.secretAccessKey]: c.secretAccessKey };
     }
     case "gcp": {
