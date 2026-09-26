@@ -1045,17 +1045,30 @@ const otelShutdown = `    if let Some(provider) = otel {
 
 // Readiness shared by both frameworks: every dependency is pinged concurrently
 // (each ping is bounded ≤ 2 s) and reported by name; any failure means 503.
-function rustReadiness(feat: RustFeatures): string {
+// The in-memory store has nothing to ping, so it adds no "db" key.
+function rustReadiness(feat: RustFeatures, sql: RustSql | null): string {
   const deps: [string, string][] = [
+    ...(sql ? [["db", "db_ping(pool)"] as [string, string]] : []),
     ...(feat.cache ? [["cache", "cache::ping()"] as [string, string]] : []),
     ...(feat.queue ? [["queue", "queue::ping()"] as [string, string]] : []),
   ];
   const convert = (n: string) =>
     n === "cache" ? `("cache", if cache { Ok(()) } else { Err("PING failed".to_string()) })` : `("${n}", ${n})`;
+  const dbPing = sql
+    ? `
+async fn db_ping(pool: &sqlx::${sql.pool}) -> Result<(), String> {
+    match tokio::time::timeout(std::time::Duration::from_secs(2), sqlx::query("SELECT 1").execute(pool)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("db timeout".to_string()),
+    }
+}
+`
+    : "";
   return `
-// Liveness: GET /health. Readiness: GET /health?ready=1 also pings ${deps.map(([n]) => n).join(" and ")};
+// Liveness: GET /health. Readiness: GET /health?ready=1 also pings ${deps.map(([n]) => n).join(", ")};
 // the body names each dependency ("ok" or the error) and any failure is a 503.
-async fn readiness() -> (bool, serde_json::Value) {
+async fn readiness(${sql ? `pool: &sqlx::${sql.pool}` : ""}) -> (bool, serde_json::Value) {
     let (${deps.map(([n]) => n).join(", ")},) = tokio::join!(${deps.map(([, e]) => e).join(", ")});
     let mut ok = true;
     let mut body = serde_json::Map::new();
@@ -1072,7 +1085,7 @@ async fn readiness() -> (bool, serde_json::Value) {
     body.insert("ok".to_string(), ok.into());
     (ok, body.into())
 }
-`;
+${dbPing}`;
 }
 
 function axumMain(entities: Entity[], endpoints: Endpoint[], sql: RustSql | null, withAuth: boolean, metrics: boolean, feat: RustFeatures): string {
@@ -1145,14 +1158,14 @@ ${protectedRoutes.join("\n")}
   const connectInfo = feat.rateLimit || feat.audit;
   const service = connectInfo ? "app.into_make_service_with_connect_info::<std::net::SocketAddr>()" : "app";
 
-  const readyChecks = feat.cache || feat.queue !== null;
+  const readyChecks = sql !== null || feat.cache || feat.queue !== null;
   const health = readyChecks
-    ? `${rustReadiness(feat)}
-async fn health(uri: axum::http::Uri) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    ? `${rustReadiness(feat, sql)}
+async fn health(${sql ? `axum::extract::State(pool): axum::extract::State<sqlx::${sql.pool}>, ` : ""}uri: axum::http::Uri) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
     if !uri.query().is_some_and(|q| q.split('&').any(|p| p == "ready=1")) {
         return (axum::http::StatusCode::OK, axum::Json(serde_json::json!({"ok": true})));
     }
-    let (ok, body) = readiness().await;
+    let (ok, body) = readiness(${sql ? "&pool" : ""}).await;
     let code = if ok { axum::http::StatusCode::OK } else { axum::http::StatusCode::SERVICE_UNAVAILABLE };
     (code, axum::Json(body))
 }
@@ -1289,7 +1302,7 @@ ${protectedRoutes.map((r) => `                    ${r}`).join("\n")},
 `
     : "";
 
-  const readyChecks = feat.cache || feat.queue !== null;
+  const readyChecks = sql !== null || feat.cache || feat.queue !== null;
   // App::wrap: the last middleware registered runs first.
   const body = [
     ...(metrics ? [`            .wrap(prometheus.clone())`] : []),
@@ -1306,12 +1319,12 @@ ${protectedRoutes.map((r) => `                    ${r}`).join("\n")},
   ].join("\n");
 
   const health = readyChecks
-    ? `${rustReadiness(feat)}
-async fn health(req: actix_web::HttpRequest) -> actix_web::HttpResponse {
+    ? `${rustReadiness(feat, sql)}
+async fn health(${sql ? `pool: actix_web::web::Data<sqlx::${sql.pool}>, ` : ""}req: actix_web::HttpRequest) -> actix_web::HttpResponse {
     if !req.query_string().split('&').any(|p| p == "ready=1") {
         return actix_web::HttpResponse::Ok().json(serde_json::json!({"ok": true}));
     }
-    match readiness().await {
+    match readiness(${sql ? "&pool" : ""}).await {
         (true, body) => actix_web::HttpResponse::Ok().json(body),
         (false, body) => actix_web::HttpResponse::ServiceUnavailable().json(body),
     }
