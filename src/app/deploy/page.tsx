@@ -29,7 +29,7 @@ import { useStackStore, type GithubRepo } from "@/lib/store";
 import { deployments } from "@/data/stack-options";
 import { toast } from "@/components/ui/toast";
 import { BrandIcon } from "@/components/shared/brand-icon";
-import { CLOUD_META, CLOUD_PROVIDERS, isCloudProvider, type CloudProvider } from "@/lib/cloud-providers";
+import { CLOUD_META, CLOUD_PROVIDERS, awsOidcTrustPolicy, isCloudProvider, type CloudProvider } from "@/lib/cloud-providers";
 
 
 export default function DeployPage() {
@@ -519,6 +519,53 @@ function CredentialsPanel({ provider }: { provider: LiveProvider }) {
 }
 
 
+// ─── AWS OIDC one-time setup ────────────────────────────────────────────────
+
+const AWS_OIDC_PROVIDER_CMD =
+  "aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com";
+
+// Helios can't verify an OIDC role (the token is issued to the Actions run), so
+// spell out the IAM setup the first workflow run depends on.
+function AwsOidcSetup({ repo }: { repo: string | null }) {
+  const policy = awsOidcTrustPolicy(repo ?? "<owner>/<repo>");
+  async function copy(text: string, what: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast({ title: `${what} copied`, kind: "success" });
+    } catch {
+      toast({ title: "Copy failed", kind: "error" });
+    }
+  }
+  return (
+    <div className="rounded-lg border border-amber-500/20 bg-amber-500/[0.04] p-3 space-y-2.5 text-[11px] text-muted-foreground">
+      <p className="text-xs font-medium text-amber-200">One-time AWS setup for the IAM role (OIDC)</p>
+      <p>Helios only checked the role ARN format; AWS validates the role when the workflow runs. Do this once before deploying:</p>
+      <div className="space-y-1">
+        <p>1. Create the GitHub OIDC identity provider (once per AWS account):</p>
+        <div className="flex items-start gap-1.5">
+          <code className="block flex-1 overflow-x-auto rounded bg-black/40 px-2 py-1 font-mono text-[10.5px] text-foreground/90">{AWS_OIDC_PROVIDER_CMD}</code>
+          <Button variant="ghost" size="sm" onClick={() => void copy(AWS_OIDC_PROVIDER_CMD, "Command")} title="Copy">
+            <Copy className="h-3 w-3" />
+          </Button>
+        </div>
+      </div>
+      <div className="space-y-1">
+        <p>
+          2. Set this trust policy on the role{repo ? <> (scoped to <span className="font-mono text-foreground/90">{repo}</span>)</> : " (connect GitHub to fill in the repo)"}; replace{" "}
+          <span className="font-mono">&lt;AWS_ACCOUNT_ID&gt;</span> with the 12 digits in your role ARN:
+        </p>
+        <div className="flex items-start gap-1.5">
+          <pre className="flex-1 max-h-48 overflow-auto rounded bg-black/40 px-2 py-1 font-mono text-[10.5px] text-foreground/90">{policy}</pre>
+          <Button variant="ghost" size="sm" onClick={() => void copy(policy, "Trust policy")} title="Copy">
+            <Copy className="h-3 w-3" />
+          </Button>
+        </div>
+      </div>
+      <p>3. Give the role permission to push to ECR and update ECS (the same permissions an access-key user would need).</p>
+    </div>
+  );
+}
+
 // ─── Deploy panel ───────────────────────────────────────────────────────────
 
 type DeployPhase = "idle" | "deploying" | "done" | "error";
@@ -742,6 +789,8 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
   const [errorHint, setErrorHint] = React.useState("");
   const [errorPartial, setErrorPartial] = React.useState<{ projectId?: string; serviceId?: string; appName?: string; runUrl?: string } | null>(null);
   const [hasToken, setHasToken] = React.useState<boolean | null>(null);
+  const [awsOidc, setAwsOidc] = React.useState(false);
+  const [ghLogin, setGhLogin] = React.useState<string | null>(null);
   const [ghConnected, setGhConnected] = React.useState<boolean | null>(null);
   const [stages, setStages] = React.useState<Record<string, StageState>>(() => initialStages(stagesList));
   const [stageDetail, setStageDetail] = React.useState<Record<string, string>>({});
@@ -750,11 +799,13 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
   React.useEffect(() => {
     Promise.all([
       fetch("/api/deploy/credentials").then((r) => r.json()) as Promise<MaskedCreds>,
-      fetch("/api/auth/github/status").then((r) => r.json()) as Promise<{ connected: boolean }>,
+      fetch("/api/auth/github/status").then((r) => r.json()) as Promise<{ connected: boolean; login?: string }>,
     ])
       .then(([creds, gh]) => {
         setHasToken(hasProviderCreds(provider, creds));
+        setAwsOidc(!!creds.creds?.aws?.roleArn);
         setGhConnected(gh.connected);
+        setGhLogin(gh.login ?? null);
       })
       .catch(() => { setHasToken(false); setGhConnected(false); });
   }, [provider]);
@@ -910,6 +961,10 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
 
   const canDeploy = hasToken && ghConnected;
 
+  // Same repo the deploy stream creates/reuses: <login>/<slugged config.name>.
+  const slugged = config.name.toLowerCase().replace(/[^a-z0-9._-]/g, "-") || "helios-app";
+  const oidcRepo = result?.fullName ?? (ghLogin ? `${ghLogin}/${slugged}` : null);
+
   // Build a partial-state recovery link when the provider returned one.
   let partialRecovery: { href: string; label: string } | null = null;
   if (errorPartial?.projectId && provider === "railway") {
@@ -980,6 +1035,8 @@ function DeployPanel({ provider }: { provider: LiveProvider }) {
             />
           </div>
         )}
+
+        {provider === "aws" && awsOidc && phase !== "deploying" && <AwsOidcSetup repo={oidcRepo} />}
 
         {/* Idle state */}
         {phase === "idle" && (
