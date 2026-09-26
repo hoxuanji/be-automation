@@ -2316,4 +2316,24 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.match(plain, /CMD \["node", "dist\/main\.js"\]/);
     assert.doesNotMatch(plain, /prisma db push/);
   });
+  // Quarkus PUT answered 200 but never copied the body onto the row, so e2e-crud.sh's
+  // score→42 / active→false check failed. And Hibernate's default naming kept camelCase
+  // columns, diverging from the snake_case migration every other stack uses.
+  it("Quarkus: PUT applies every writable field; columns are snake_case like the migration", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+      { id: "f3", name: "score", type: "number" as const, required: false, unique: false },
+      { id: "f4", name: "active", type: "boolean" as const, required: true, unique: false },
+      { id: "f5", name: "createdAt", type: "date" as const, required: true, unique: false },
+    ] }];
+    const g = gen({ language: "java", framework: "quarkus", auth: "none", database: "postgres" }, [], user);
+    const update = g.get("src/main/java/dev/helios/app/UserResource.java")!.match(/public Response update[\s\S]*?\n    }/)![0];
+    for (const f of ["email", "score", "active", "createdAt"]) {
+      assert.match(update, new RegExp(`if \\(updates\\.${f} != null\\) existing\\.${f} = updates\\.${f};`), `PUT writes ${f}`);
+    }
+    assert.doesNotMatch(update, /updates\.id\b/, "the path id wins; the body can't re-key the row");
+    assert.match(g.get("src/main/resources/application.properties")!, /physical-naming-strategy=org\.hibernate\.boot\.model\.naming\.CamelCaseToUnderscoresNamingStrategy/);
+    assert.match(g.get("src/test/java/dev/helios/app/UserResourceTest.java")!, /void updateUser_appliesBody\(\)[\s\S]*put\("\/users\/" \+ id\)[\s\S]*equalTo\(changed\)[\s\S]*get\("\/users\/" \+ id\)/, "mvn test proves the change sticks");
+  });
 });

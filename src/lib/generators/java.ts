@@ -1152,6 +1152,8 @@ mp.jwt.verify.audiences=\${AUTH_AUDIENCE:}
 quarkus.datasource.db-kind=${mysql ? "mysql" : "postgresql"}
 quarkus.datasource.jdbc.url=\${DATABASE_URL:${mysql ? `jdbc:mysql://localhost:3306/${appName}` : `jdbc:postgresql://localhost:5432/${appName}`}}
 quarkus.hibernate-orm.database.generation=update
+# snake_case columns (createdAt → created_at), matching db/migration/V1__init.sql and Spring.
+quarkus.hibernate-orm.physical-naming-strategy=org.hibernate.boot.model.naming.CamelCaseToUnderscoresNamingStrategy
 quarkus.http.port=\${PORT:8080}
 # Tests use in-memory H2 so \`mvn test\` needs no database.
 %test.quarkus.datasource.db-kind=h2
@@ -1208,6 +1210,12 @@ function quarkusResource(entity: Entity, pascal: string, kebab: string, withAuth
   const evict = cached ? `\n        cache.evict(${key});` : "";
   const idType = pk ? javaShortType(pk.type) : "UUID";
   const idImport = "import java.util.UUID;";
+  // Same merge as the Spring service: every writable field the body carries replaces the
+  // stored value; the managed entity is flushed when the @Transactional method commits.
+  const merge = entity.fields.filter(f => !f.primaryKey && f !== pk).map(f => {
+    const n = toCamel(f.name);
+    return `        if (updates.${n} != null) existing.${n} = updates.${n};`;
+  }).join("\n");
 
   return `package dev.helios.app;
 
@@ -1259,8 +1267,7 @@ ${cached ? `
     public Response update(@PathParam("id") ${idType} id, ${pascal} updates) {
         ${pascal} existing = ${pascal}.findById(id);
         if (existing == null) return Response.status(Response.Status.NOT_FOUND).build();
-        // merge non-null fields from updates
-        existing.persist();${evict}
+${merge}${evict}
         return Response.ok(existing).build();
     }
 
@@ -1317,6 +1324,23 @@ public class HealthResource {
 function quarkusResourceTest(entity: Entity, pascal: string, kebab: string, withAuth = false, publisher = false): string {
   // A valid body (required fields filled, unique values fresh): "{}" violates the
   // NOT NULL columns and answers 500 once auth is off. ApiContractTest covers the rest of CRUD.
+  // PUT once answered 200 without touching the row: prove a field actually changes and sticks.
+  const pk = pkField(entity);
+  const str = entity.fields.find(f => !f.primaryKey && f !== pk && (f.type === "string" || f.type === "text"));
+  const updateTest = withAuth || !str ? "" : `
+    @Test
+    void update${pascal}_appliesBody() {
+        String id = given().contentType("application/json").body(${javaEntityBody(entity)})
+               .when().post("/${kebab}s")
+               .then().statusCode(201).extract().path("${toCamel(pk?.name ?? "id")}");
+        String changed = unique();
+        given().contentType("application/json").body("{\\"${toCamel(str.name)}\\":\\"" + changed + "\\"}")
+               .when().put("/${kebab}s/" + id)
+               .then().statusCode(200).body("${toCamel(str.name)}", org.hamcrest.Matchers.equalTo(changed));
+        given().when().get("/${kebab}s/" + id)
+               .then().statusCode(200).body("${toCamel(str.name)}", org.hamcrest.Matchers.equalTo(changed));
+    }
+`;
   return `package dev.helios.app;
 
 import io.quarkus.test.junit.QuarkusTest;
@@ -1343,7 +1367,7 @@ ${publisher ? QUARKUS_PUBLISHER_MOCK : ""}
                .when().post("/${kebab}s")
                .then().statusCode(${withAuth ? 401 : 201});
     }
-}
+${updateTest}}
 `;
 }
 
