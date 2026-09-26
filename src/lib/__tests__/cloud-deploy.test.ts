@@ -162,6 +162,8 @@ function mockGitHub(opts: { conclusion: string; secretStatus?: number }) {
       stored[path.split("/").pop()!] = open(b.encrypted_value);
       return json(201, {});
     }
+    // Stale-mode secrets usually don't exist: GitHub answers 404, which must be tolerated.
+    if (method === "DELETE" && path.startsWith(`${repo}/actions/secrets/`)) return json(404, { message: "Not Found" });
     if (path === repo) return json(200, { default_branch: "main" });
     if (method === "POST" && path === `${repo}/actions/workflows/deploy.yml/dispatches`) {
       // First attempt simulates GitHub not having indexed the new workflow yet.
@@ -222,6 +224,9 @@ describe("runCloudDeployPipeline", () => {
     const lastPut = calls.map((c) => c.method).lastIndexOf("PUT");
     const firstDispatch = calls.findIndex((c) => c.path.endsWith("/dispatches"));
     assert.ok(lastPut < firstDispatch);
+    // Key mode clears a stale OIDC role before the workflow runs.
+    const del = calls.findIndex((c) => c.method === "DELETE" && c.path.endsWith("/actions/secrets/AWS_ROLE_ARN"));
+    assert.ok(del !== -1 && del < firstDispatch, "stale AWS_ROLE_ARN deleted before dispatch");
   });
 
   it("a failed run surfaces workflow_run_failed with the run URL", async () => {
@@ -295,5 +300,16 @@ describe("AWS role ARN validation", () => {
     }
     // A bad ARN must not fall through to the access-key branch of the union.
     assert.ok(!CLOUD_CRED_SCHEMAS.aws.safeParse({ roleArn: "arn:aws:iam::123:role/r" }).success);
+  });
+});
+
+// A reused repo keeps secrets from the other AWS mode; configure-aws-credentials would
+// then use stale keys instead of OIDC (or assume a stale role in key mode).
+describe("switching AWS credential modes clears the other mode's secrets", () => {
+  it("OIDC removes the key pair; key mode removes the role", async () => {
+    const { supersededSecrets } = await import("@/lib/cloud-deploy");
+    assert.deepEqual(supersededSecrets("aws", { AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/deploy" }).sort(), ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]);
+    assert.deepEqual(supersededSecrets("aws", { AWS_ACCESS_KEY_ID: "a", AWS_SECRET_ACCESS_KEY: "b" }), ["AWS_ROLE_ARN"]);
+    assert.deepEqual(supersededSecrets("gcp", { GCP_SA_KEY: "{}" }), []);
   });
 });
