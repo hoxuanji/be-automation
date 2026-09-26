@@ -1,5 +1,5 @@
 import type { Endpoint, Entity, StackConfig } from "../types";
-import type { PatternId } from "./index";
+import { selfAuthUser, type PatternId, type SelfAuthUser } from "./index";
 import { authProviderSpec } from "../auth/providers";
 import { tsQueueKind } from "../queue/typescript";
 
@@ -244,24 +244,29 @@ function crudDelete(fw: TsFw, table: string, m: PrismaModel | null): string {
   }`;
 }
 
-function authLogin(fw: TsFw): string {
+// Self-issued auth: bcrypt hashes live in AuthCredential (auth_credentials, keyed
+// by the User PK, cascades on user delete), so these handlers work with whatever
+// columns the user's own User entity has. Needs Prisma — no SQL DB means a 501.
+export function tsSelfAuthUser(config: StackConfig, entities: Entity[]): SelfAuthUser | undefined {
+  return usesPrisma(config, entities) ? selfAuthUser(entities) : undefined;
+}
+export const SELF_AUTH_PATTERNS = ["auth_login", "auth_register", "auth_change_password"];
+const accessor = (u: SelfAuthUser) => u.entity.name[0].toLowerCase() + u.entity.name.slice(1);
+
+function authLogin(fw: TsFw, u: SelfAuthUser): string {
   const x = tsCtx(fw);
   return `${x.bindBody}  const { email, password } = ${x.getBody} as { email: string; password: string };
   if (!email || !password) { ${x.sendErr(400, "email and password required")} }
   try {
-    // 1. Fetch user by email
-    // const user = await prisma.user.findUnique({ where: { email } });
-    const user = null as { id: string; passwordHash: string } | null; // replace (the cast keeps TS from narrowing to never)
-    if (!user) {
-      // Constant-time compare to prevent timing-based user enumeration
+    const user = await prisma.${accessor(u)}.findFirst({ where: { ${u.email.name}: email }, include: { authCredential: true } });
+    const hash = user?.authCredential?.password_hash;
+    if (!user || !hash) {
+      // Burn a bcrypt check anyway so response timing doesn't reveal which emails exist.
       await bcrypt.compare(password, "$2b$12$invalidhashforenumprotect");
       ${x.sendErr(401, "invalid_credentials")}
     }
-    // 2. Verify password
-    const valid = await bcrypt.compare(password, user!.passwordHash);
-    if (!valid) { ${x.sendErr(401, "invalid_credentials")} }
-    // 3. Issue JWT
-    const token = jwt.sign({ sub: user!.id }, process.env.JWT_SECRET!, { expiresIn: "24h" });
+    if (!(await bcrypt.compare(password, hash))) { ${x.sendErr(401, "invalid_credentials")} }
+    const token = jwt.sign({ sub: user.${u.pk.name} }, process.env.JWT_SECRET!, { expiresIn: "24h" });
     ${x.sendJSON(200, '{ token, tokenType: "Bearer" }')}
   } catch (err) {
     ${x.logErr("auth login", "err")}
@@ -269,22 +274,39 @@ function authLogin(fw: TsFw): string {
   }`;
 }
 
-function authRegister(fw: TsFw): string {
+// The body carries email + password plus the User's own columns; required ones
+// the client omits answer 400 by name, required dates are stamped with "now".
+function authRegister(fw: TsFw, u: SelfAuthUser): string {
   const x = tsCtx(fw);
-  return `${x.bindBody}  const { email, password, name } = ${x.getBody} as { email: string; password: string; name?: string };
-  if (!email || !password) { ${x.sendErr(400, "email and password required")} }
+  const list = (fs: { name: string }[]) => `[${fs.map((f) => JSON.stringify(f.name)).join(", ")}]`;
+  const data = [
+    `${u.email.name}: email`,
+    // uuid PKs get @default(uuid()); string PKs are minted here.
+    ...(u.pk.type === "uuid" ? [] : [`${u.pk.name}: crypto.randomUUID()`]),
+    ...u.dates.map((f) => `${f.name}: new Date()`),
+    ...(u.settable.length ? [`...Object.fromEntries(${list(u.settable)}.filter((k) => k in body).map((k) => [k, body[k]]))`] : []),
+  ];
+  return `${x.bindBody}  const body = (${x.getBody} ?? {}) as Record<string, unknown>;
+  const { email, password } = body;
+  if (typeof email !== "string" || !email || typeof password !== "string") { ${x.sendErr(400, "email and password required")} }
   if (password.length < 8) { ${x.sendErr(400, "password must be at least 8 characters")} }
-  try {
-    // Check for existing user
-    // const existing = await prisma.user.findUnique({ where: { email } });
-    // if (existing) sendErr 409
+${u.required.length ? `  const missing = ${list(u.required)}.filter((k) => body[k] == null);
+  if (missing.length) { ${andReturn(x.sendJSON(400, '{ error: "missing required fields: " + missing.join(", ") }'))} }
+` : ""}  try {
+    if (await prisma.${accessor(u)}.findFirst({ where: { ${u.email.name}: email } })) { ${x.sendErr(409, "email_already_registered")} }
     const passwordHash = await bcrypt.hash(password, 12);
-    // const user = await prisma.user.create({ data: { email, passwordHash, name } });
-    const user = { id: crypto.randomUUID(), email, name, createdAt: new Date().toISOString() };
-    const token = jwt.sign({ sub: user.id }, process.env.JWT_SECRET!, { expiresIn: "24h" });
-    ${x.sendCreated('{ token, tokenType: "Bearer", user }')}
+    // User + credential commit together, or neither does.
+    const user = await prisma.$transaction(async (tx) => {
+      // ponytail: unchecked cast — Prisma rejects mistyped columns at runtime (mapped to 400 below).
+      const created = await tx.${accessor(u)}.create({ data: { ${data.join(", ")} } as any });
+      await tx.authCredential.create({ data: { user_id: created.${u.pk.name}, password_hash: passwordHash } });
+      return created;
+    });
+    const token = jwt.sign({ sub: user.${u.pk.name} }, process.env.JWT_SECRET!, { expiresIn: "24h" });
+    ${x.sendCreated(`{ token, tokenType: "Bearer", user: { id: user.${u.pk.name}, email: user.${u.email.name} } }`)}
   } catch (err: any) {
     if (err?.code === "P2002") { ${x.sendErr(409, "email_already_registered")} }
+    if (err?.name === "PrismaClientValidationError") { ${x.sendErr(400, "invalid request body")} }
     ${x.logErr("auth register", "err")}
     ${x.sendErr(500, "internal server error")}
   }`;
@@ -331,12 +353,10 @@ ${x.bindBody}  const { currentPassword, newPassword } = ${x.getBody} as { curren
   if (!currentPassword || !newPassword) { ${x.sendErr(400, "currentPassword and newPassword required")} }
   if (newPassword.length < 8) { ${x.sendErr(400, "new password must be at least 8 characters")} }
   try {
-    // const user = await prisma.user.findUnique({ where: { id: sub } });
-    // if (!user) sendErr 404
-    // const valid = await bcrypt.compare(currentPassword, user.passwordHash);
-    // if (!valid) sendErr 401 "invalid_current_password"
+    const cred = await prisma.authCredential.findUnique({ where: { user_id: String(sub) } });
+    if (!cred || !(await bcrypt.compare(currentPassword, cred.password_hash))) { ${x.sendErr(401, "invalid_current_password")} }
     const passwordHash = await bcrypt.hash(newPassword, 12);
-    // await prisma.user.update({ where: { id: sub }, data: { passwordHash } });
+    await prisma.authCredential.update({ where: { user_id: String(sub) }, data: { password_hash: passwordHash } });
     ${x.sendNoContent()}
   } catch (err) {
     ${x.logErr("change password", "err")}
@@ -530,6 +550,7 @@ export function tsPatternRoute(
   const pattern = e.pattern as PatternId | undefined;
   const m = resolveModel(table, config, entities);
   const cache = hasRedisCache(config);
+  const user = tsSelfAuthUser(config, entities);
   let body: string;
 
   // Token design (mirrors Go/Python): with an external provider authRequired
@@ -538,14 +559,17 @@ export function tsPatternRoute(
   if (mode === "jwks" && CREDENTIAL_PATTERNS.includes(pattern ?? "")) {
     body = `  // Credentials are managed by ${config.auth}; tokens minted here would fail JWKS verification.
   ${andReturn(tsCtx(fw).sendJSON(501, `{ error: "handled_by_${config.auth}" }`))}`;
+  } else if (SELF_AUTH_PATTERNS.includes(pattern ?? "") && !user) {
+    body = `  // Declare a User entity with an \`email\` field and a uuid/string primary key (on a SQL database) to enable self-managed auth.
+  ${andReturn(tsCtx(fw).sendJSON(501, '{ error: "not_implemented" }'))}`;
   } else switch (pattern) {
     case "crud_list":    body = crudList(fw, table, m); break;
     case "crud_get":     body = crudGet(fw, table, m); break;
     case "crud_create":  body = crudCreate(fw, table, m); break;
     case "crud_update":  body = crudUpdate(fw, table, m); break;
     case "crud_delete":  body = crudDelete(fw, table, m); break;
-    case "auth_login":   body = authLogin(fw); break;
-    case "auth_register":body = authRegister(fw); break;
+    case "auth_login":   body = authLogin(fw, user!); break;
+    case "auth_register":body = authRegister(fw, user!); break;
     case "auth_me":      body = authMe(fw, mode); break;
     case "auth_logout":  body = authLogout(fw); break;
     case "auth_refresh": body = authRefresh(fw); break;

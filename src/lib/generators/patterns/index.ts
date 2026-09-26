@@ -65,6 +65,9 @@ export function selfAuthUser(entities: Entity[]) {
 }
 export type SelfAuthUser = NonNullable<ReturnType<typeof selfAuthUser>>;
 
+/** Entity id of the generated credentials table; its user_id is a FK to the User PK, ON DELETE CASCADE. */
+export const AUTH_CREDENTIAL_ID = "auth_credential";
+
 const HASH_PATTERNS = new Set(["auth_login", "auth_register", "auth_change_password"]);
 
 /** The auth_credentials entity to model + migrate when self-issued auth stores hashes; [] otherwise. */
@@ -72,7 +75,7 @@ export function authCredentialEntities(config: StackConfig, endpoints: Endpoint[
   const user = selfAuthUser(entities);
   if (authProviderSpec(config) || !user || !endpoints.some((e) => HASH_PATTERNS.has(e.pattern ?? ""))) return [];
   return [{
-    id: "auth_credential",
+    id: AUTH_CREDENTIAL_ID,
     name: "AuthCredential", // table auth_credentials
     fields: [
       { id: "user_id", name: "user_id", type: user.pk.type, required: true, unique: true, primaryKey: true },

@@ -1,5 +1,6 @@
 import type { Entity, EntityField, FieldType } from "../types";
 import { toSnake } from "../types";
+import { AUTH_CREDENTIAL_ID, selfAuthUser } from "../patterns/index";
 
 export type SqlDialect = "postgres" | "mysql" | "sqlite";
 
@@ -87,7 +88,7 @@ function columnDef(field: EntityField, dialect: SqlDialect): string {
   return `  ${name} ${type}${pk}${def}${nullable}${unique}`;
 }
 
-function tableSql(entity: Entity, dialect: SqlDialect): string {
+function tableSql(entity: Entity, dialect: SqlDialect, entities: Entity[]): string {
   const tbl = tableName(entity);
   const fields = entity.fields;
   const hasPk = fields.some((f) => f.primaryKey);
@@ -110,6 +111,11 @@ function tableSql(entity: Entity, dialect: SqlDialect): string {
       `  id ${dialect === "postgres" ? "UUID PRIMARY KEY DEFAULT gen_random_uuid()" : dialect === "mysql" ? "CHAR(36) PRIMARY KEY" : "TEXT PRIMARY KEY"}`
     );
   }
+
+  // A user's credential row goes with the user. Table-level FOREIGN KEY because
+  // MySQL silently ignores inline column REFERENCES; SQLite needs foreign_keys=ON.
+  const user = entity.id === AUTH_CREDENTIAL_ID ? selfAuthUser(entities) : undefined;
+  if (user) cols.push(`  FOREIGN KEY (user_id) REFERENCES ${tableName(user.entity)}(${toSnake(user.pk.name)}) ON DELETE CASCADE`);
 
   return `CREATE TABLE IF NOT EXISTS ${tbl} (\n${cols.join(",\n")}\n);`;
 }
@@ -146,7 +152,7 @@ export function initialMigrationSql(
     };
   }
 
-  const tables = entities.map((e) => tableSql(e, dialect));
+  const tables = entities.map((e) => tableSql(e, dialect, entities));
   const indexes = entities.flatMap((e) => indexSql(e, dialect));
 
   const up = [

@@ -859,14 +859,14 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     const verifierPath = (fw: string) => (fw === "nestjs" ? "src/auth/jwt.guard.ts" : "src/middleware/auth.ts");
     const code = (g: ReturnType<typeof gen>) => (g.get("src/app.controller.ts") ?? "") + g.get("src/main.ts");
     for (const fw of ["express", "fastify", "hono", "nestjs"]) {
-      const ts = (auth: string) => gen({ language: "typescript", framework: fw, auth }, eps);
+      const ts = (auth: string) => gen({ language: "typescript", framework: fw, auth }, eps, [{ id: "e1", name: "User", fields: [{ id: "f1", name: "id", type: "uuid", required: true, unique: true, primaryKey: true }, { id: "f2", name: "email", type: "string", required: true, unique: true }] }]);
       // Self-managed: login mints HS256 tokens with JWT_SECRET, so authRequired must verify exactly those.
       const self = ts("none");
       const selfVerifier = self.get(verifierPath(fw))!;
       assert.ok(selfVerifier, `${fw}: auth "none" + auth patterns must emit a verifier`);
       assert.match(selfVerifier, /algorithms: \["HS256"\]/, fw);
       assert.match(selfVerifier, /process\.env\.JWT_SECRET/, fw);
-      assert.match(code(self), /jwt\.sign\(\{ sub: user!\.id \}, process\.env\.JWT_SECRET!/, fw);
+      assert.match(code(self), /jwt\.sign\(\{ sub: user\.id \}, process\.env\.JWT_SECRET!/, fw);
       // auth_me reads the caller from authRequired, so it must run behind it even without e.auth.
       assert.match(code(self), fw === "nestjs" ? /@UseGuards\(JwtAuthGuard\)\n\s+async getAuthMe/ : fw === "fastify" ? /"\/auth\/me", \{ preHandler: authRequired \}/ : /"\/auth\/me", authRequired,/, fw);
       assert.match(self.get("package.json")!, /"jsonwebtoken"/, fw);
@@ -2172,5 +2172,47 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.doesNotMatch(sql(gen({ language: "python", framework: "fastapi", auth: "clerk", database: "postgres" }, eps, user)), /auth_credentials/);
     // No usable User entity: an explicit 501 instead of queries against a table that doesn't exist.
     assert.match(gen({ language: "go", framework: "gin", auth: "none" }, eps, []).get("internal/handlers/api.go")!, /Declare a User entity[\s\S]*StatusNotImplemented/);
+  });
+  // TS register/login/change_password were commented-out stubs: register answered 201
+  // without persisting anything and login could never succeed. They now use a Prisma
+  // AuthCredential (auth_credentials) like Go/Python. And a credential row must die
+  // with its user everywhere — otherwise a deleted account keeps a live password.
+  it("self-issued auth: TS persists hashes via Prisma AuthCredential; credentials cascade with the user", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+      { id: "f4", name: "active", type: "boolean" as const, required: true, unique: false },
+      { id: "f5", name: "createdAt", type: "date" as const, required: true, unique: false },
+    ] }];
+    const eps = (["auth_register", "auth_login", "auth_change_password", "auth_me"] as const).map((pattern, i) =>
+      ({ id: `a${i}`, method: "POST" as const, path: `/auth/${pattern}`, summary: pattern, auth: pattern === "auth_change_password" || pattern === "auth_me", pattern }));
+    for (const framework of ["express", "fastify", "hono", "nestjs"]) {
+      const g = gen({ language: "typescript", framework, auth: "none", database: "postgres" }, eps, user);
+      const schema = g.get("prisma/schema.prisma")!;
+      assert.match(schema, /model AuthCredential \{[\s\S]*@relation\(fields: \[user_id\], references: \[id\], onDelete: Cascade\)[\s\S]*@@map\("auth_credentials"\)/, `${framework}: credential row is deleted with its user`);
+      assert.match(schema, /model User \{[^}]*authCredential AuthCredential\?/, `${framework}: Prisma needs the back-relation`);
+      const code = g.get(framework === "nestjs" ? "src/app.controller.ts" : "src/main.ts")!;
+      assert.match(code, /import \{ prisma \} from "\.\/db"/, `${framework}: auth handlers reach the DB`);
+      assert.match(code, /prisma\.\$transaction\(async \(tx\) => \{[\s\S]*tx\.user\.create[\s\S]*tx\.authCredential\.create/, `${framework}: user + credential are written atomically`);
+      assert.match(code, /\["active"\]\.filter\(\(k\) => body\[k\] == null\)/, `${framework}: an omitted required column is a 400 by name`);
+      assert.match(code, /createdAt: new Date\(\)/, `${framework}: required dates are stamped`);
+      assert.match(code, /email_already_registered/);
+      assert.match(code, /include: \{ authCredential: true \}/, `${framework}: login checks the stored hash`);
+      assert.match(code, /prisma\.authCredential\.update/, `${framework}: change_password persists the new hash`);
+      assert.doesNotMatch(code, /passwordHash: string \} \| null|\/\/ await prisma\.user\.update/, `${framework}: no placeholder stubs left`);
+    }
+    // Mongo has no Prisma data layer: an explicit 501 rather than a fake success.
+    assert.match(gen({ language: "typescript", framework: "express", auth: "none", database: "mongodb" }, eps, user).get("src/main.ts")!, /Declare a User entity[\s\S]*res\.status\(501\)/);
+    // With a provider the credential endpoints are 501s: no credentials model.
+    assert.doesNotMatch(gen({ language: "typescript", framework: "express", auth: "clerk", database: "postgres" }, eps, user).get("prisma/schema.prisma")!, /AuthCredential/);
+    // SQL migrations (every dialect) and SQLAlchemy carry the FK; SQLite connections opt into enforcing it.
+    const sql = (g: ReturnType<typeof gen>) => g.files.filter((f) => f.path.endsWith(".sql") || f.path.includes("migrations/versions/")).map((f) => f.content).join("\n");
+    for (const database of ["postgres", "mysql", "sqlite"]) {
+      assert.match(sql(gen({ language: "go", framework: "gin", auth: "none", database }, eps, user)), /FOREIGN KEY \(user_id\) REFERENCES users\(id\) ON DELETE CASCADE/, `${database}: table-level FK (MySQL ignores inline REFERENCES)`);
+    }
+    const py = gen({ language: "python", framework: "fastapi", auth: "none", database: "sqlite" }, eps, user);
+    assert.match(py.get("app/models.py")!, /user_id = Column\(String\(36\), ForeignKey\("users\.id", ondelete="CASCADE"\)/);
+    assert.match(py.get("app/db.py")!, /PRAGMA foreign_keys=ON/, "SQLite ignores ON DELETE CASCADE unless each connection enables it");
+    assert.match(gen({ language: "go", framework: "gin", auth: "none", database: "sqlite" }, eps, user).get("internal/db/gorm.go")!, /_pragma=foreign_keys\(1\)/);
   });
 });

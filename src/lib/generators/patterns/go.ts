@@ -245,36 +245,6 @@ function crudDelete(fw: Fw, table: string): string {
 \t${x.sendNoContent()}`;
 }
 
-// Simplified auth bodies — full version replaced by framework-aware helpers below
-function _authLoginUnused(fw: Fw): string {
-  const x = fwCtx(fw);
-  return `${dbNilCheck(fw)}
-\ttype creds struct {
-\t\tEmail    string \`json:"email"\`
-\t\tPassword string \`json:"password"\`
-\t}
-\tvar req creds
-\n\t// Fetch user record
-\tvar user map[string]any
-\tif err := h.db.Table("users").Where("email = ?", req.Email).First(&user).Error; err != nil {
-\t\t// Constant-time compare prevents user enumeration
-\t\t_ = bcrypt.CompareHashAndPassword([]byte("$2a$12$invalid"), []byte(req.Password))
-\t\t${x.retErr("http.StatusUnauthorized", "invalid_credentials")}
-\t}
-
-\thash, _ := user["password_hash"].(string)
-\tif err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
-\t\t${x.retErr("http.StatusUnauthorized", "invalid_credentials")}
-\t}
-
-\ttoken, err := issueJWT(user["id"], h.jwtSecret())
-\tif err != nil {
-\t\th.log.Error("jwt sign", "err", err)
-\t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
-\t}
-\t${x.retOK(mapLit(fw, ["token", "token"], ["token_type", '"Bearer"']))}`;
-}
-
 // Self-issued auth: bcrypt hashes live in auth_credentials (keyed by the User PK),
 // so these handlers work with whatever columns the user's own User entity has.
 const userTable = (u: SelfAuthUser) => `${toSnake(u.entity.name)}s`;

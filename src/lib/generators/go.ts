@@ -1682,6 +1682,8 @@ function goGormDB(kind: GoDbKind): string {
     return `package db
 
 import (
+\t"strings"
+
 \t"github.com/glebarez/sqlite"
 \t"gorm.io/gorm"
 )
@@ -1690,7 +1692,12 @@ func OpenGorm(dsn string) (*gorm.DB, error) {
 \tif dsn == "" {
 \t\tdsn = "app.db"
 \t}
-\treturn gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+\t// SQLite enforces FOREIGN KEY / ON DELETE CASCADE only when each connection opts in.
+\tsep := "?"
+\tif strings.Contains(dsn, "?") {
+\t\tsep = "&"
+\t}
+\treturn gorm.Open(sqlite.Open(dsn+sep+"_pragma=foreign_keys(1)"), &gorm.Config{})
 }
 `;
   }
