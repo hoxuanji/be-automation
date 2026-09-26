@@ -498,7 +498,7 @@ function quickstart(config: StackConfig): string {
     typescript: `npx prisma migrate dev`,
     go: `go run ./cmd/migrate`,
     python: `alembic upgrade head`,
-    rust: `cargo run --bin migrate`,
+    rust: `# applied automatically when the api starts (sqlx::migrate!)`,
     java: `./mvnw flyway:migrate`,
     kotlin: `./gradlew flywayMigrate`,
   };
