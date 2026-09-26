@@ -56,6 +56,11 @@ function resolveEntity(path: string, entities: Entity[]): Entity | undefined {
   return undefined;
 }
 
+/** Entities served by crud_* pattern routes — those carry the per-endpoint auth, so no second (unguarded) router may exist. */
+export function pyCrudPatternEntityIds(endpoints: Endpoint[], entities: Entity[]): Set<string> {
+  return new Set(endpoints.filter((e) => e.pattern?.startsWith("crud_")).flatMap((e) => resolveEntity(e.path, entities)?.id ?? []));
+}
+
 type PyModel = { name: string; pk: string; created: string; search: string[] };
 
 function pyModel(entity: Entity): PyModel {
@@ -105,8 +110,7 @@ function crudGet(m: PyModel, param: string): string {
 
 function crudCreate(m: PyModel): string {
   return `async def handler(payload: dict, db: Session = Depends(get_db)):
-    # Whitelist real columns so clients cannot set the PK or unknown attributes.
-    item = ${m.name}(**{k: v for k, v in payload.items() if k in ${m.name}.__table__.columns and k != "${m.pk}"})
+    item = ${m.name}(**_fields(${m.name}, payload, "${m.pk}"))
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -118,9 +122,8 @@ function crudUpdate(m: PyModel, param: string): string {
     item = db.query(${m.name}).filter(${m.name}.${m.pk} == ${param}).first()
     if not item:
         raise HTTPException(status_code=404, detail="not found")
-    for key, value in payload.items():
-        if key != "${m.pk}" and key in ${m.name}.__table__.columns:
-            setattr(item, key, value)
+    for key, value in _fields(${m.name}, payload, "${m.pk}").items():
+        setattr(item, key, value)
     db.commit()
     db.refresh(item)
     return _row(item)`;
@@ -597,7 +600,7 @@ function importLines(code: string, fw: "fastapi" | NativeFw, entities: Entity[])
     lines.push("from typing import Any");
     const core = ["Request", "Response"].filter((n) => new RegExp(`\\b${n}\\b`).test(code));
     if (core.length) lines.push(`from litestar import ${core.join(", ")}`);
-    if (uses(/\bHTTPException\(/)) lines.push("from litestar.exceptions import HTTPException");
+    if (uses(/\bHTTPException\(|_fields\(/)) lines.push("from litestar.exceptions import HTTPException");
     const params = ["Body", "Parameter"].filter((n) => code.includes(n + "("));
     if (params.length) lines.push(`from litestar.params import ${params.join(", ")}`);
     if (uses(/\bUploadFile\b/)) lines.push("from litestar.datastructures import UploadFile", "from litestar.enums import RequestEncodingType");
@@ -620,7 +623,8 @@ function importLines(code: string, fw: "fastapi" | NativeFw, entities: Entity[])
   if (uses(/\bhmac_lib\b/)) lines.push("import hmac as hmac_lib", "import hashlib", "import os");
   if (fw === "fastapi" && uses(/\bUploadFile\b/)) lines.push("from fastapi import UploadFile");
   if (uses(/\buuid4\(/)) lines.push("from uuid import uuid4");
-  if (uses(/\bdatetime\.utcnow\(/)) lines.push("from datetime import datetime");
+  if (uses(/\bdatetime\.utcnow\(|_fields\(/)) lines.push("from datetime import datetime");
+  if (uses(/_fields\(/)) lines.push("from sqlalchemy import DateTime");
   if (uses(/\bbcrypt\./)) lines.push("import bcrypt");
   if (uses(/\bjwt\./)) lines.push("import jwt");
   const authNames = ["create_access_token", "verify_token"].filter((n) => code.includes(n + "("));
@@ -634,10 +638,23 @@ function importLines(code: string, fw: "fastapi" | NativeFw, entities: Entity[])
 def _row(item) -> dict:
     """ORM row → JSON-safe dict of its columns (password hashes never leave the service)."""
     return ${fw === "fastapi"
-      ? `jsonable_encoder({c.name: getattr(item, c.name) for c in item.__table__.columns if not c.name.startswith("password")})`
-      : `json.loads(json.dumps({c.name: getattr(item, c.name) for c in item.__table__.columns if not c.name.startswith("password")}, default=str))`}`);
+      ? `jsonable_encoder({c.key: getattr(item, c.key) for c in item.__mapper__.column_attrs if not c.key.startswith("password")})`
+      : `json.loads(json.dumps({c.key: getattr(item, c.key) for c in item.__mapper__.column_attrs if not c.key.startswith("password")}, default=str))`}`);
   if (uses(/\b_DUMMY_HASH\b/)) lines.push(`
 _DUMMY_HASH = bcrypt.hashpw(b"timing-equaliser", bcrypt.gensalt())`);
+  if (uses(/_fields\(/)) lines.push(`
+
+def _fields(model, payload: dict, pk: str) -> dict:
+    """Client-settable attributes: mapped (JSON-named) columns minus the PK; ISO strings parsed for DateTime columns."""
+    attrs = model.__mapper__.column_attrs
+    out = {k: v for k, v in payload.items() if k in attrs and k != pk}
+    for k, v in out.items():
+        if isinstance(v, str) and isinstance(attrs[k].columns[0].type, DateTime):
+            try:
+                out[k] = datetime.fromisoformat(v)
+            except ValueError:
+                raise HTTPException(status_code=422, detail=f"{k} must be an ISO-8601 datetime")
+    return out`);
   if (usesModel("Credentials")) lines.push(`
 
 class Credentials(BaseModel):

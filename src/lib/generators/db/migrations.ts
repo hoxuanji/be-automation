@@ -193,16 +193,19 @@ function pythonMigrationFiles(
   down: string
 ): GeneratedFile[] {
   const rev = "0001_init";
-  // Convert SQL UP/DOWN into op.execute() calls. Alembic version files are
-  // Python, so we quote the SQL as a triple-quoted string.
-  const upLines = up
-    .split("\n")
-    .filter((l) => l.trim() && !l.startsWith("--"))
-    .map((l) => l.trim());
-  const downLines = down
-    .split("\n")
-    .filter((l) => l.trim() && !l.startsWith("--"))
-    .map((l) => l.trim());
+  // One op.execute() per whole statement (split at a line-ending `;`) so
+  // multi-line CREATE TABLEs stay intact; sqlite3 also rejects multi-statement
+  // execute(). Triple-quoted: the generated SQL has no quotes or backslashes.
+  const ops = (sql: string) =>
+    sql
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("--"))
+      .join("\n")
+      .split(/;\s*$/m)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => `    op.execute("""\n${s};\n""")`)
+      .join("\n") || "    pass";
 
   return [
     {
@@ -344,11 +347,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-${upLines.map((l) => `    op.execute(${JSON.stringify(l)})`).join("\n") || "    pass"}
+${ops(up)}
 
 
 def downgrade() -> None:
-${downLines.map((l) => `    op.execute(${JSON.stringify(l)})`).join("\n") || "    pass"}
+${ops(down)}
 `,
     },
   ];

@@ -82,7 +82,7 @@
   {
     "path": "app/models.py",
     "lines": 30,
-    "size": 991
+    "size": 1030
   },
   {
     "path": "app/queue.py",
@@ -101,8 +101,8 @@
   },
   {
     "path": "app/routers/user.py",
-    "lines": 63,
-    "size": 1619
+    "lines": 65,
+    "size": 1655
   },
   {
     "path": "app/tracing.py",
@@ -196,8 +196,8 @@
   },
   {
     "path": "migrations/versions/0001_init.py",
-    "lines": 38,
-    "size": 1311
+    "lines": 50,
+    "size": 1119
   },
   {
     "path": "pyproject.toml",
