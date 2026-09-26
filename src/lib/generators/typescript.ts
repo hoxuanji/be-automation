@@ -72,7 +72,7 @@ export function typescriptFiles(
 
   files.push({ path: "package.json", content: pkgJson(name, config, usesPrisma(config, entities), withAuth, endpoints) });
   files.push({ path: "tsconfig.json", content: tsconfig() });
-  files.push({ path: "Dockerfile", content: tsDockerfile() });
+  files.push({ path: "Dockerfile", content: tsDockerfile(usesPrisma(config, entities)) });
   files.push({ path: "vitest.config.ts", content: vitestConfig() });
 
   if (usesPrisma(config, entities)) {
@@ -691,7 +691,8 @@ function pkgJson(name: string, config: StackConfig, withPrisma: boolean, withAut
   };
   const dep = {
     ...(deps[framework] ?? deps.hono),
-    ...(withPrisma ? { "@prisma/client": "^5.22.0" } : {}),
+    // The prisma CLI runs at container start (see tsDockerfile), so it survives `npm prune --omit=dev`.
+    ...(withPrisma ? { "@prisma/client": "^5.22.0", prisma: "^5.22.0" } : {}),
     // Express always emits src/middleware/auth.ts, which imports jose.
     ...(withAuth || framework === "express" ? { jose: "^5.9.6" } : {}),
     ...(hasProm(config) ? { "prom-client": "^15.1.3" } : {}),
@@ -752,7 +753,6 @@ function pkgJson(name: string, config: StackConfig, withPrisma: boolean, withAut
           ...(needsBcrypt ? { "@types/bcrypt": "^5.0.2" } : {}),
           ...(needsJwt ? { "@types/jsonwebtoken": "^9.0.7" } : {}),
           ...(framework === "nestjs" ? { "@nestjs/testing": "^10.0.0" } : {}),
-          ...(withPrisma ? { prisma: "^5.22.0" } : {}),
         },
       },
       null,
@@ -786,7 +786,22 @@ function tsconfig() {
   ) + "\n";
 }
 
-function tsDockerfile() {
+// With Prisma the api syncs the schema before it listens. Only the image CMD does this:
+// the compose worker overrides the command, so it never races the api on DDL.
+function tsDockerfile(withPrisma: boolean) {
+  const runtime = withPrisma
+    ? `COPY --from=build /app/prisma ./prisma
+USER node
+EXPOSE 8080
+# Creates / updates tables to match prisma/schema.prisma, then starts the api. Idempotent:
+# a no-op when the schema is in sync, and it refuses changes that would drop data (the
+# container exits instead). A replica losing a first-boot race exits and is restarted.
+# Trade-off: no migration history. For reviewed migrations run npm run db:migrate
+# locally, commit prisma/migrations and replace db push --skip-generate with migrate deploy.
+CMD ["sh", "-c", "node_modules/.bin/prisma db push --skip-generate && exec node dist/main.js"]`
+    : `USER node
+EXPOSE 8080
+CMD ["node", "dist/main.js"]`;
   return `# syntax=docker/dockerfile:1
 FROM node:22-alpine AS build
 # Prisma's query engine needs OpenSSL; Alpine ships without it.
@@ -807,9 +822,7 @@ ENV NODE_ENV=production
 COPY package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-USER node
-EXPOSE 8080
-CMD ["node", "dist/main.js"]
+${runtime}
 `;
 }
 

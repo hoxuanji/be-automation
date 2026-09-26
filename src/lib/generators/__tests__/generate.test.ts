@@ -2297,4 +2297,23 @@ describe("Every deployment target gets a real CI deploy job", () => {
     // Without crud_* patterns the router remains the entity's only CRUD surface.
     assert.ok(gen({ language: "python", framework: "fastapi", auth: "none", database: "postgres" }, [], user).get("app/routers/user.py"));
   });
+  // Nothing created the schema at container start, so every TS CRUD route hit a missing
+  // table against a fresh database. The api now runs `prisma db push` before listening;
+  // the worker (compose `command:` override) must not, or two processes race on DDL.
+  it("TS images create the Prisma schema at api start (api only, CLI kept in the runtime)", () => {
+    for (const framework of ["express", "fastify", "hono", "nestjs"]) {
+      const g = gen({ language: "typescript", framework, database: "postgres", queue: "kafka" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const docker = g.get("Dockerfile")!;
+      assert.match(docker, /CMD \["sh", "-c", "node_modules\/\.bin\/prisma db push --skip-generate && exec node dist\/main\.js"\]/, `${framework}: schema synced before the api listens`);
+      assert.doesNotMatch(docker, /--accept-data-loss/, `${framework}: a destructive schema change must stop the boot, not drop data`);
+      assert.match(docker, /COPY --from=build \/app\/prisma \.\/prisma/, `${framework}: db push needs schema.prisma at runtime`);
+      const pkg = JSON.parse(g.get("package.json")!);
+      assert.ok(pkg.dependencies.prisma && !pkg.devDependencies.prisma, `${framework}: prisma CLI survives npm prune --omit=dev`);
+      assert.match(g.get("docker-compose.yml")!, /worker:[\s\S]*?command: \["node", "dist\/worker\.js"\]/, `${framework}: worker overrides CMD, so only the api touches the schema`);
+    }
+    // No Prisma (no entities), no schema step: the image just starts the server.
+    const plain = gen({ language: "typescript", framework: "express", database: "postgres" }, SAMPLE_ENDPOINTS, []).get("Dockerfile")!;
+    assert.match(plain, /CMD \["node", "dist\/main\.js"\]/);
+    assert.doesNotMatch(plain, /prisma db push/);
+  });
 });
