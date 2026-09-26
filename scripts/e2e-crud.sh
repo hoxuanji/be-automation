@@ -22,8 +22,11 @@ token="$jwt_head.$jwt_body.$jwt_sig"
 call() {
   local step=$1 method=$2 path=$3 body=$4; shift 4
   local code; : > /tmp/crud.json
+  # Content-Type only with a body: Fastify rejects an empty body declared as JSON.
+  local data=()
+  [ -n "$body" ] && data=(-H 'Content-Type: application/json' -d "$body")
   code=$(curl -s -o /tmp/crud.json -w '%{http_code}' -X "$method" "$base$path" \
-    -H "Authorization: Bearer $token" -H 'Content-Type: application/json' ${body:+-d "$body"} || true)
+    -H "Authorization: Bearer $token" "${data[@]}" || true)
   echo "$step: $method $path -> $code $(head -c 300 /tmp/crud.json)"
   for want in "$@"; do [ "$code" = "$want" ] && return 0; done
   fail "$step" "$method $path -> HTTP $code (want $*): $(head -c 300 /tmp/crud.json)"

@@ -2429,4 +2429,20 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.match(plain, /CMD \["node", "dist\/main\.js"\]/);
     assert.doesNotMatch(plain, /prisma/);
   });
+  // Fastify (and strict proxies) reject an empty body declared as JSON, so the generated
+  // client must not send Content-Type on bodyless calls — DELETE /users/:id used to 400.
+  it("TS client SDK only declares a JSON body when it sends one", () => {
+    const eps = [
+      { id: "1", method: "GET" as const, path: "/users/:id", summary: "", auth: true },
+      { id: "2", method: "DELETE" as const, path: "/users/:id", summary: "", auth: true },
+      { id: "3", method: "POST" as const, path: "/users", summary: "", auth: true },
+    ];
+    const sdk = gen({ language: "typescript", framework: "fastify" }, eps).files.find((f) => /sdk\/.*\.ts$/.test(f.path))!.content;
+    const blocks = sdk.split(/\n  async /).slice(1);
+    for (const b of blocks) {
+      const sendsBody = b.includes("JSON.stringify(body)");
+      assert.equal(b.includes('"Content-Type": "application/json"'), sendsBody, `Content-Type iff body in: ${b.slice(0, 40)}`);
+    }
+    assert.ok(blocks.some((b) => b.includes("JSON.stringify(body)")), "POST still sends JSON");
+  });
 });
