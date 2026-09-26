@@ -111,8 +111,8 @@
   },
   {
     "path": "pom.xml",
-    "lines": 108,
-    "size": 3435
+    "lines": 114,
+    "size": 3668
   },
   {
     "path": "QUICKSTART.md",
@@ -157,7 +157,7 @@
   {
     "path": "src/main/java/dev/helios/app/messaging/NotificationConsumer.java",
     "lines": 18,
-    "size": 564
+    "size": 645
   },
   {
     "path": "src/main/java/dev/helios/app/messaging/NotificationPublisher.java",
@@ -176,8 +176,8 @@
   },
   {
     "path": "src/main/java/dev/helios/app/PostResource.java",
-    "lines": 68,
-    "size": 1922
+    "lines": 73,
+    "size": 2115
   },
   {
     "path": "src/main/java/dev/helios/app/User.java",
@@ -186,8 +186,8 @@
   },
   {
     "path": "src/main/java/dev/helios/app/UserResource.java",
-    "lines": 68,
-    "size": 1922
+    "lines": 73,
+    "size": 2115
   },
   {
     "path": "src/main/resources/application.properties",
@@ -201,17 +201,17 @@
   },
   {
     "path": "src/test/java/dev/helios/app/ApiContractTest.java",
-    "lines": 213,
-    "size": 6997
+    "lines": 216,
+    "size": 7092
   },
   {
     "path": "src/test/java/dev/helios/app/PostResourceTest.java",
-    "lines": 28,
-    "size": 704
+    "lines": 31,
+    "size": 799
   },
   {
     "path": "src/test/java/dev/helios/app/UserResourceTest.java",
-    "lines": 28,
-    "size": 740
+    "lines": 31,
+    "size": 835
   }
 ]

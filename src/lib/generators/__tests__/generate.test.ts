@@ -1680,6 +1680,48 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.doesNotMatch(gen({ language: "go", framework: "gin", api: "grpc", queue: "kafka" }).get("docker-compose.yml")!, /^  worker:/m);
   });
 
+  // CI's e2e round trip (scripts/e2e-roundtrip.sh) publishes through the app and greps the
+  // logs for a `consumed` line carrying the message id: every consumer must log one with the body.
+  it("every language's consumer logs a greppable `consumed` line with the message body", () => {
+    const cases: [string, string, string, RegExp][] = [
+      ["go", "gin", "cmd/worker/main.go", /log\.Info\("consumed", "topic", topic, "body", string\(msg\[:min\(len\(msg\), 200\)\]\)\)/],
+      ["typescript", "express", "src/worker.ts", /msg: "consumed", topic: TOPICS\.notifications, body: excerpt\(message\)/],
+      ["python", "fastapi", "app/worker.py", /log\.info\("consumed", extra=\{"topic": topic, "body": json\.dumps\(payload\)\[:200\]\}\)/],
+      ["rust", "axum", "src/bin/worker.rs", /tracing::info!\(topic = queue::QUEUE, body = [^;]*"consumed"\)/],
+      ["java", "spring", "src/main/java/dev/helios/app/messaging/NotificationConsumer.java", /log\.info\("consumed topic=\{\} body=\{\}", NotificationPublisher\.DESTINATION, payload/],
+      ["java", "quarkus", "src/main/java/dev/helios/app/messaging/NotificationConsumer.java", /LOG\.infof\("consumed topic=%s body=%s", NotificationPublisher\.DESTINATION, payload/],
+      ["kotlin", "ktor", "src/main/kotlin/Queue.kt", /info\("consumed topic=\{\} body=\{\}", JOBS, message\.take\(200\)\)/],
+    ];
+    for (const [language, framework, path, re] of cases) {
+      for (const queue of ["kafka", "rabbitmq"]) {
+        assert.match(gen({ language, framework, queue }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get(path) ?? "", re, `${language}-${framework}/${queue}: ${path}`);
+      }
+    }
+  });
+
+  // JVM stacks have no send_notification route once entities own the API, so the round trip
+  // goes through entity create — which must publish the id the e2e job then looks for.
+  it("Java entity create publishes <entity>.created with the new id; tests mock the publisher", () => {
+    const spring = gen({ language: "java", framework: "spring", queue: "rabbitmq" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const quarkus = gen({ language: "java", framework: "quarkus", queue: "kafka" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const pascal = SAMPLE_ENTITIES[0].name.replace(/^./, (c) => c.toUpperCase());
+    const springCtl = spring.get(`src/main/java/dev/helios/app/controller/${pascal}Controller.java`)!;
+    assert.match(springCtl, /saved = service\.create\([\s\S]*publisher\.publish\("\{\\"event\\":\\"[a-z-]+\.created\\",\\"id\\":\\"" \+ saved\.get\w+\(\) \+ "\\"\}"\);/);
+    const qRes = quarkus.get(`src/main/java/dev/helios/app/${pascal}Resource.java`)!;
+    assert.match(qRes, /entity\.persist\(\);\s*publisher\.publish\("\{\\"event\\":\\"[a-z-]+\.created\\",\\"id\\":\\"" \+ entity\.\w+ \+ "\\"\}"\);/);
+    // Unit tests run without a broker: every test that creates entities mocks the publisher.
+    for (const f of spring.files.filter((f) => f.path.startsWith("src/test/java/") && f.content.includes("@SpringBootTest"))) {
+      assert.match(f.content, /@MockBean\s+dev\.helios\.app\.messaging\.NotificationPublisher publisher;/, f.path);
+    }
+    for (const f of quarkus.files.filter((f) => f.path.startsWith("src/test/java/") && f.content.includes("@QuarkusTest"))) {
+      assert.match(f.content, /@io\.quarkus\.test\.InjectMock\s+dev\.helios\.app\.messaging\.NotificationPublisher publisher;/, f.path);
+    }
+    assert.match(quarkus.get("pom.xml")!, /quarkus-junit5-mockito/);
+    // No queue: no publisher to call or mock.
+    const none = gen({ language: "java", framework: "spring", queue: "none" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    assert.doesNotMatch(none.files.map((f) => f.content).join("\n"), /NotificationPublisher/);
+  });
+
   // ─── Java parity: tracing / rate limit / audit / monitoring / cache / queues ──
 
   const JAVA = ["spring", "quarkus"] as const;

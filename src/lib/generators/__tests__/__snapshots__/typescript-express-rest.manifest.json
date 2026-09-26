@@ -232,7 +232,7 @@
   {
     "path": "src/worker.ts",
     "lines": 36,
-    "size": 1502
+    "size": 1505
   },
   {
     "path": "tests/api.contract.test.ts",

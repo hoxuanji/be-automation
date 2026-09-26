@@ -157,7 +157,7 @@
   {
     "path": "src/bin/worker.rs",
     "lines": 50,
-    "size": 1570
+    "size": 1589
   },
   {
     "path": "src/cache.rs",

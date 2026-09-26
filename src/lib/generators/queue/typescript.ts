@@ -412,16 +412,16 @@ const WORKER = `import { closeQueue, subscribe, TOPICS } from "./queue";
 
 // Consumer process — \`npm run worker\` locally, \`node dist/worker.js\` in the image.
 // Throwing from a handler hands the message back to the broker for redelivery.
+const excerpt = (message: unknown) => String(JSON.stringify(message)).slice(0, 200);
+
 async function main() {
   await subscribe(TOPICS.notifications, async (message) => {
     // Deliver through your email / SMS / push provider here.
-    const { channel } = (message ?? {}) as { channel?: string };
-    console.log(JSON.stringify({ level: "info", msg: "notification received", channel }));
+    console.log(JSON.stringify({ level: "info", msg: "consumed", topic: TOPICS.notifications, body: excerpt(message) }));
   });
   await subscribe(TOPICS.webhooks, async (message) => {
     // Process the verified webhook event here.
-    const { receivedAt } = (message ?? {}) as { receivedAt?: string };
-    console.log(JSON.stringify({ level: "info", msg: "webhook event received", receivedAt }));
+    console.log(JSON.stringify({ level: "info", msg: "consumed", topic: TOPICS.webhooks, body: excerpt(message) }));
   });
   console.log(JSON.stringify({ level: "info", msg: "worker started", topics: Object.values(TOPICS) }));
 }

@@ -572,7 +572,7 @@ async fn main() {
 /// Replace with the real work (send the email, push notification, …).
 /// Panicking crashes the worker; the message is redelivered where the broker supports it.
 fn handle(payload: &[u8]) {
-    tracing::info!(bytes = payload.len(), body = %String::from_utf8_lossy(payload), "worker: message");
+    tracing::info!(topic = queue::QUEUE, body = %String::from_utf8_lossy(&payload[..payload.len().min(200)]), "consumed");
 }
 
 async fn shutdown_signal() {
