@@ -1043,6 +1043,51 @@ const otelShutdown = `    if let Some(provider) = otel {
     }
 `;
 
+// Readiness shared by both frameworks: every dependency is pinged concurrently
+// (each ping is bounded ≤ 2 s) and reported by name; any failure means 503.
+// The in-memory store has nothing to ping, so it adds no "db" key.
+function rustReadiness(feat: RustFeatures, sql: RustSql | null): string {
+  const deps: [string, string][] = [
+    ...(sql ? [["db", "db_ping(pool)"] as [string, string]] : []),
+    ...(feat.cache ? [["cache", "cache::ping()"] as [string, string]] : []),
+    ...(feat.queue ? [["queue", "queue::ping()"] as [string, string]] : []),
+  ];
+  const convert = (n: string) =>
+    n === "cache" ? `("cache", if cache { Ok(()) } else { Err("PING failed".to_string()) })` : `("${n}", ${n})`;
+  const dbPing = sql
+    ? `
+async fn db_ping(pool: &sqlx::${sql.pool}) -> Result<(), String> {
+    match tokio::time::timeout(std::time::Duration::from_secs(2), sqlx::query("SELECT 1").execute(pool)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("db timeout".to_string()),
+    }
+}
+`
+    : "";
+  return `
+// Liveness: GET /health. Readiness: GET /health?ready=1 also pings ${deps.map(([n]) => n).join(", ")};
+// the body names each dependency ("ok" or the error) and any failure is a 503.
+async fn readiness(${sql ? `pool: &sqlx::${sql.pool}` : ""}) -> (bool, serde_json::Value) {
+    let (${deps.map(([n]) => n).join(", ")},) = tokio::join!(${deps.map(([, e]) => e).join(", ")});
+    let mut ok = true;
+    let mut body = serde_json::Map::new();
+    for (name, res) in [${deps.map(([n]) => convert(n)).join(", ")}] {
+        let status = match res {
+            Ok(()) => "ok".to_string(),
+            Err(e) => {
+                ok = false;
+                e
+            }
+        };
+        body.insert(name.to_string(), status.into());
+    }
+    body.insert("ok".to_string(), ok.into());
+    (ok, body.into())
+}
+${dbPing}`;
+}
+
 function axumMain(entities: Entity[], endpoints: Endpoint[], sql: RustSql | null, withAuth: boolean, metrics: boolean, feat: RustFeatures): string {
   const entityRoutes = entities.map((e) => `        .merge(handlers::${toSnake(e.name)}::router())`);
 
@@ -1113,15 +1158,16 @@ ${protectedRoutes.join("\n")}
   const connectInfo = feat.rateLimit || feat.audit;
   const service = connectInfo ? "app.into_make_service_with_connect_info::<std::net::SocketAddr>()" : "app";
 
-  const health = feat.cache
-    ? `
-// Liveness: GET /health. Readiness: GET /health?ready=1 also requires Redis to answer PING.
-async fn health(uri: axum::http::Uri) -> (axum::http::StatusCode, &'static str) {
-    let ready = uri.query().is_some_and(|q| q.split('&').any(|p| p == "ready=1"));
-    if ready && !cache::ping().await {
-        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "cache unavailable");
+  const readyChecks = sql !== null || feat.cache || feat.queue !== null;
+  const health = readyChecks
+    ? `${rustReadiness(feat, sql)}
+async fn health(${sql ? `axum::extract::State(pool): axum::extract::State<sqlx::${sql.pool}>, ` : ""}uri: axum::http::Uri) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    if !uri.query().is_some_and(|q| q.split('&').any(|p| p == "ready=1")) {
+        return (axum::http::StatusCode::OK, axum::Json(serde_json::json!({"ok": true})));
     }
-    (axum::http::StatusCode::OK, "ok")
+    let (ok, body) = readiness(${sql ? "&pool" : ""}).await;
+    let code = if ok { axum::http::StatusCode::OK } else { axum::http::StatusCode::SERVICE_UNAVAILABLE };
+    (code, axum::Json(body))
 }
 `
     : "";
@@ -1177,7 +1223,7 @@ ${poolSetup}${metrics ? `    // Prometheus: per-route request counters + latency
     let (prometheus_layer, metric_handle) = axum_prometheus::PrometheusMetricLayer::pair();
 ` : ""}${rateLimit}${protectedBlock}
     let app = Router::new()
-        .route("/health", axum::routing::get(${feat.cache ? "health" : `|| async { "ok" }`}))
+        .route("/health", axum::routing::get(${readyChecks ? "health" : `|| async { "ok" }`}))
 ${tail}
 
     let addr = format!("0.0.0.0:{}", cfg.port);
@@ -1256,6 +1302,7 @@ ${protectedRoutes.map((r) => `                    ${r}`).join("\n")},
 `
     : "";
 
+  const readyChecks = sql !== null || feat.cache || feat.queue !== null;
   // App::wrap: the last middleware registered runs first.
   const body = [
     ...(metrics ? [`            .wrap(prometheus.clone())`] : []),
@@ -1264,22 +1311,23 @@ ${protectedRoutes.map((r) => `                    ${r}`).join("\n")},
     ...(feat.tracing ? [`            .wrap(tracing_actix_web::TracingLogger::default())`] : []),
     ...(feat.sentry ? [`            .wrap(sentry_actix::Sentry::new())`] : []),
     appData,
-    feat.cache
+    readyChecks
       ? `            .route("/health", web::get().to(health))`
       : `            .route("/health", web::get().to(|| async { actix_web::HttpResponse::Ok().body("ok") }))`,
     ...mainRoutes.map((r) => `            ${r}`),
     ...protectedScope,
   ].join("\n");
 
-  const health = feat.cache
-    ? `
-// Liveness: GET /health. Readiness: GET /health?ready=1 also requires Redis to answer PING.
-async fn health(req: actix_web::HttpRequest) -> actix_web::HttpResponse {
-    let ready = req.query_string().split('&').any(|p| p == "ready=1");
-    if ready && !cache::ping().await {
-        return actix_web::HttpResponse::ServiceUnavailable().body("cache unavailable");
+  const health = readyChecks
+    ? `${rustReadiness(feat, sql)}
+async fn health(${sql ? `pool: actix_web::web::Data<sqlx::${sql.pool}>, ` : ""}req: actix_web::HttpRequest) -> actix_web::HttpResponse {
+    if !req.query_string().split('&').any(|p| p == "ready=1") {
+        return actix_web::HttpResponse::Ok().json(serde_json::json!({"ok": true}));
     }
-    actix_web::HttpResponse::Ok().body("ok")
+    match readiness(${sql ? "&pool" : ""}).await {
+        (true, body) => actix_web::HttpResponse::Ok().json(body),
+        (false, body) => actix_web::HttpResponse::ServiceUnavailable().json(body),
+    }
 }
 `
     : "";

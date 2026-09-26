@@ -186,8 +186,8 @@
   },
   {
     "path": "src/main.rs",
-    "lines": 87,
-    "size": 3512
+    "lines": 116,
+    "size": 4679
   },
   {
     "path": "src/models/mod.rs",
@@ -206,8 +206,8 @@
   },
   {
     "path": "src/queue.rs",
-    "lines": 98,
-    "size": 3287
+    "lines": 126,
+    "size": 4371
   },
   {
     "path": "src/telemetry.rs",

@@ -1968,4 +1968,39 @@ describe("Every deployment target gets a real CI deploy job", () => {
       assert.match(g.files.find((f) => f.path.endsWith(".sql"))!.content, /score DOUBLE PRECISION/);
     }
   });
+  // K8s must stop routing traffic to a pod whose broker is gone, or send_notification
+  // 503s while the pod still looks ready. Rust used to ping only Redis.
+  it("Rust /health?ready=1 pings the queue broker with a bounded timeout", () => {
+    const brokerCall: Record<string, RegExp> = {
+      rabbitmq: /_conn\.status\(\)\.connected\(\)/,
+      kafka: /get_offset\(OffsetAt::Latest\)/,
+      nats: /get_stream\(STREAM\)/,
+      sqs: /get_queue_url\(\)/,
+      bullmq: /cmd\("PING"\)/,
+    };
+    for (const framework of ["axum", "actix"]) {
+      for (const queue of Object.keys(brokerCall)) {
+        // mongodb = in-memory store in Rust: the broker alone must still gate readiness.
+        const g = gen({ language: "rust", framework, queue, cache: "none", database: "mongodb" });
+        const q = g.get("src/queue.rs")!;
+        const check = q.slice(q.indexOf("async fn check"));
+        assert.match(check.slice(0, check.indexOf("\n}\n")), brokerCall[queue], `${framework}/${queue}: check() talks to the broker`);
+        assert.match(q, /pub async fn ping\(\)[\s\S]*from_secs\(2\)[\s\S]*timeout\(LIMIT, probe\)/, `${framework}/${queue}: ping is bounded`);
+        const main = g.get("src/main.rs")!;
+        assert.match(main, /ready=1[\s\S]*readiness\(\)/, `${framework}/${queue}: /health serves readiness without a cache`);
+        assert.match(main, /tokio::join!\(queue::ping\(\)\)/);
+        assert.doesNotMatch(main, /db_ping/, "the in-memory store has nothing to ping");
+        assert.match(main, /SERVICE_UNAVAILABLE|ServiceUnavailable\(\)/, "a down broker is a 503");
+      }
+      // A DB that is down must make the pod unready even with no cache or queue.
+      for (const [database, pool] of [["postgres", "PgPool"], ["mysql", "MySqlPool"]]) {
+        const main = gen({ language: "rust", framework, database, cache: "none", queue: "none" }).get("src/main.rs")!;
+        assert.match(main, /tokio::join!\(db_ping\(pool\)\)/, `${framework}/${database}: readiness pings the db`);
+        assert.match(main, new RegExp(`async fn db_ping\\(pool: &sqlx::${pool}\\)[\\s\\S]*from_secs\\(2\\), sqlx::query\\("SELECT 1"\\)`), `${framework}/${database}: bounded SELECT 1`);
+        assert.match(main, /"\/health", (axum::routing::get|web::get\(\)\.to)\(health\)/);
+      }
+    }
+    // Everything configured: all three are pinged together and reported by name.
+    assert.match(gen({ language: "rust", framework: "axum", queue: "nats", cache: "redis", database: "postgres" }).get("src/main.rs")!, /tokio::join!\(db_ping\(pool\), cache::ping\(\), queue::ping\(\)\)/);
+  });
 });
