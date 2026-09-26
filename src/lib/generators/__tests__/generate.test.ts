@@ -2215,4 +2215,52 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.match(py.get("app/db.py")!, /PRAGMA foreign_keys=ON/, "SQLite ignores ON DELETE CASCADE unless each connection enables it");
     assert.match(gen({ language: "go", framework: "gin", auth: "none", database: "sqlite" }, eps, user).get("internal/db/gorm.go")!, /_pragma=foreign_keys\(1\)/);
   });
+  // Python repos couldn't run against a migrated DB: Alembic executed each SQL *line*
+  // on its own (a CREATE TABLE split mid-statement), and SQLAlchemy mapped camelCase
+  // column names while db/sql.ts creates snake_case ones. JSON keeps the entity names.
+  it("python: alembic runs whole statements; models map onto the migration's snake_case columns", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+      { id: "f3", name: "lastLoginAt", type: "date" as const, required: false, unique: false },
+      { id: "f5", name: "createdAt", type: "date" as const, required: true, unique: false },
+    ] }];
+    const eps = [{ id: "a", method: "POST" as const, path: "/auth/register", summary: "r", auth: false, pattern: "auth_register" as const }];
+    for (const database of ["postgres", "mysql", "sqlite"]) {
+      const g = gen({ language: "python", framework: "fastapi", auth: "none", database }, eps, user);
+      const mig = g.get("migrations/versions/0001_init.py")!;
+      const stmts = [...mig.matchAll(/op\.execute\("""\n([\s\S]*?)\n"""\)/g)].map((m) => m[1]);
+      assert.equal(stmts.length, (mig.match(/op\.execute\(/g) ?? []).length, `${database}: every execute is one triple-quoted statement`);
+      for (const s of stmts) {
+        assert.match(s, /^(CREATE|DROP) /, `${database}: each execute starts a statement, not a column line`);
+        assert.equal((s.match(/\(/g) ?? []).length, (s.match(/\)/g) ?? []).length, `${database}: statement is whole: ${s}`);
+      }
+      const ddl = mig.match(/CREATE TABLE IF NOT EXISTS users \(([\s\S]*?)\n\)/)![1];
+      const dbCols = new Set([...ddl.matchAll(/^ {2}(\w+) /gm)].map((m) => m[1]));
+      const model = g.get("app/models.py")!.split("class AuthCredential")[0].split("class User(Base):")[1];
+      const mapped = [...model.matchAll(/^ {4}(\w+) = Column\((?:"(\w+)", )?/gm)].map((m) => m[2] ?? m[1]);
+      assert.deepEqual(new Set(mapped), dbCols, `${database}: SQLAlchemy columns are exactly the migrated ones`);
+      assert.match(model, /createdAt = Column\("created_at", DateTime, default=datetime\.utcnow\)/, "attribute (JSON) stays camelCase; the managed column gets a default");
+    }
+  });
+  // FastAPI mounted app/routers/<entity>.py (no auth, raw ORM objects) before main.py's
+  // pattern handlers, so GET/PUT/DELETE /users/{id} marked auth:true were served unauthenticated.
+  it("python: an auth:true entity route is never also served by an unguarded router", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+    ] }];
+    const crud = ([["GET", "/users", "crud_list", false], ["GET", "/users/:id", "crud_get", true], ["POST", "/users", "crud_create", true],
+      ["PUT", "/users/:id", "crud_update", true], ["DELETE", "/users/:id", "crud_delete", true], ["POST", "/auth/login", "auth_login", false]] as const)
+      .map(([method, path, pattern, auth], i) => ({ id: `c${i}`, method, path, summary: pattern, auth, pattern }));
+    const g = gen({ language: "python", framework: "fastapi", auth: "none", database: "postgres" }, crud, user);
+    const main = g.get("app/main.py")!;
+    assert.equal(g.get("app/routers/user.py"), undefined, "no second CRUD implementation for a pattern-served entity");
+    assert.doesNotMatch(main, /include_router/);
+    for (const route of ['get("/users/{id}"', 'post("/users"', 'put("/users/{id}"', 'delete("/users/{id}"'])
+      assert.match(main, new RegExp(`@app\\.${route.replace(/[(){}]/g, "\\$&")}[^\\n]*dependencies=\\[Depends\\(auth_required\\)\\]`), `${route} is guarded`);
+    assert.match(main, /__mapper__\.column_attrs/, "responses serialize by attribute (JSON) name, not ORM objects or DB column names");
+    // Without crud_* patterns the router remains the entity's only CRUD surface.
+    assert.ok(gen({ language: "python", framework: "fastapi", auth: "none", database: "postgres" }, [], user).get("app/routers/user.py"));
+  });
 });
