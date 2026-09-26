@@ -1968,4 +1968,30 @@ describe("Every deployment target gets a real CI deploy job", () => {
       assert.match(g.files.find((f) => f.path.endsWith(".sql"))!.content, /score DOUBLE PRECISION/);
     }
   });
+  // K8s must stop routing traffic to a pod whose broker is gone, or send_notification
+  // 503s while the pod still looks ready. Rust used to ping only Redis.
+  it("Rust /health?ready=1 pings the queue broker with a bounded timeout", () => {
+    const brokerCall: Record<string, RegExp> = {
+      rabbitmq: /_conn\.status\(\)\.connected\(\)/,
+      kafka: /get_offset\(OffsetAt::Latest\)/,
+      nats: /get_stream\(STREAM\)/,
+      sqs: /get_queue_url\(\)/,
+      bullmq: /cmd\("PING"\)/,
+    };
+    for (const framework of ["axum", "actix"]) {
+      for (const queue of Object.keys(brokerCall)) {
+        const g = gen({ language: "rust", framework, queue, cache: "none" });
+        const q = g.get("src/queue.rs")!;
+        const check = q.slice(q.indexOf("async fn check"));
+        assert.match(check.slice(0, check.indexOf("\n}\n")), brokerCall[queue], `${framework}/${queue}: check() talks to the broker`);
+        assert.match(q, /pub async fn ping\(\)[\s\S]*from_secs\(2\)[\s\S]*timeout\(LIMIT, probe\)/, `${framework}/${queue}: ping is bounded`);
+        const main = g.get("src/main.rs")!;
+        assert.match(main, /ready=1[\s\S]*readiness\(\)/, `${framework}/${queue}: /health serves readiness without a cache`);
+        assert.match(main, /tokio::join!\(queue::ping\(\)\)/);
+        assert.match(main, /SERVICE_UNAVAILABLE|ServiceUnavailable\(\)/, "a down broker is a 503");
+      }
+    }
+    // With a cache too, both are reported by name in the same body.
+    assert.match(gen({ language: "rust", framework: "axum", queue: "nats", cache: "redis" }).get("src/main.rs")!, /tokio::join!\(cache::ping\(\), queue::ping\(\)\)/);
+  });
 });
