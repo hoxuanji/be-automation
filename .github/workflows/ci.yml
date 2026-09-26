@@ -307,11 +307,13 @@ jobs:
         # build, the api must report ready (DB + cache + broker reachable), the worker must stay up,
         # and a message the app publishes must be consumed. `publish` picks the trigger
         # (scripts/e2e-roundtrip.sh): "notification" = POST /notifications, "user" = POST /users.
+        # Then User CRUD against the real DB (scripts/e2e-crud.sh): `crud_case` is the JSON field
+        # casing the routes bind (default camel); `crud_send_id` sends a client id on create.
         combo:
-          - { label: "go-gin-rabbitmq", language: "go", framework: "gin", queue: "rabbitmq", publish: "notification" }
+          - { label: "go-gin-rabbitmq", language: "go", framework: "gin", queue: "rabbitmq", publish: "notification", crud_case: "snake", crud_send_id: "1" }
           - { label: "ts-express-kafka", language: "typescript", framework: "express", queue: "kafka", publish: "notification" }
           - { label: "python-fastapi-nats", language: "python", framework: "fastapi", queue: "nats", publish: "notification" }
-          - { label: "rust-axum-sqs", language: "rust", framework: "axum", queue: "sqs", publish: "notification" }
+          - { label: "rust-axum-sqs", language: "rust", framework: "axum", queue: "sqs", publish: "notification", crud_case: "snake" }
           - { label: "java-spring-rabbitmq", language: "java", framework: "spring", queue: "rabbitmq", publish: "user" }
           - { label: "java-quarkus-kafka", language: "java", framework: "quarkus", queue: "kafka", publish: "user" }
           - { label: "kotlin-ktor-bullmq", language: "kotlin", framework: "ktor", queue: "bullmq", publish: "user" }
@@ -340,6 +342,7 @@ jobs:
           cp .env.example .env
           docker compose up -d --build 2>&1 | tee /tmp/compose.log
       - name: API becomes ready and the worker stays up
+        id: ready
         working-directory: /tmp/smoke-repo
         run: |
           for i in $(seq 1 90); do
@@ -356,6 +359,14 @@ jobs:
       - name: Message round trip (app publishes, consumer logs it)
         working-directory: /tmp/smoke-repo
         run: bash "$GITHUB_WORKSPACE/scripts/e2e-roundtrip.sh" "${{ matrix.combo.publish }}"
+      # Runs even if the round trip failed, so one run reports both.
+      - name: Entity CRUD against the database
+        if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        working-directory: /tmp/smoke-repo
+        env:
+          CRUD_CASE: ${{ matrix.combo.crud_case }}
+          CRUD_SEND_ID: ${{ matrix.combo.crud_send_id }}
+        run: bash "$GITHUB_WORKSPACE/scripts/e2e-crud.sh"
       # GitHub keeps at most 10 error annotations per step, so each source gets its own step.
       - name: "Report e2e: container states"
         if: failure()
