@@ -152,7 +152,7 @@
   {
     "path": "src/main/java/dev/helios/app/messaging/NotificationConsumer.java",
     "lines": 18,
-    "size": 645
+    "size": 627
   },
   {
     "path": "src/main/java/dev/helios/app/messaging/NotificationPublisher.java",
