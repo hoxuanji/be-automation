@@ -312,6 +312,7 @@ jobs:
         combo:
           - { label: "go-gin-rabbitmq", language: "go", framework: "gin", queue: "rabbitmq", publish: "notification", crud_case: "camel" }
           - { label: "ts-express-kafka", language: "typescript", framework: "express", queue: "kafka", publish: "notification" }
+          - { label: "ts-fastify-nats", language: "typescript", framework: "fastify", queue: "nats", publish: "notification" }
           - { label: "python-fastapi-nats", language: "python", framework: "fastapi", queue: "nats", publish: "notification" }
           - { label: "rust-axum-sqs", language: "rust", framework: "axum", queue: "sqs", publish: "notification", crud_case: "snake" }
           - { label: "java-spring-rabbitmq", language: "java", framework: "spring", queue: "rabbitmq", publish: "user" }

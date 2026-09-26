@@ -111,8 +111,8 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 23,
-    "size": 507
+    "lines": 29,
+    "size": 1044
   },
   {
     "path": "Makefile",

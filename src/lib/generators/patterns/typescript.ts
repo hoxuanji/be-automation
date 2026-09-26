@@ -117,10 +117,22 @@ type PrismaModel = {
 // Map the route's resource segment ("users", "blog-posts") to a declared
 // entity. Returns null when there is no matching entity or no Prisma, in which
 // case the handler stays an explicit stub.
+function entityForTable(table: string, entities: Entity[]): Entity | undefined {
+  const singular = table.replace(/s$/, "").replace(/[-_]/g, "").toLowerCase();
+  return entities.find((e) => e.name.toLowerCase() === singular);
+}
+
+/** Entities served by crud_* pattern routes. Those carry the per-endpoint auth, so the
+ *  generic (unguarded) entity router must not exist beside them: Fastify refuses the
+ *  duplicate routes at boot, Express/Hono/Nest would serve whichever registered first. */
+export function tsCrudPatternEntityIds(endpoints: Endpoint[], entities: Entity[]): Set<string> {
+  return new Set(endpoints.filter((e) => e.pattern?.startsWith("crud_"))
+    .flatMap((e) => entityForTable(inferTableName(e.path), entities)?.id ?? []));
+}
+
 function resolveModel(table: string, config: StackConfig, entities: Entity[]): PrismaModel | null {
   if (!usesPrisma(config, entities)) return null;
-  const singular = table.replace(/s$/, "").replace(/[-_]/g, "").toLowerCase();
-  const entity = entities.find((e) => e.name.toLowerCase() === singular);
+  const entity = entityForTable(table, entities);
   if (!entity) return null;
   const pk = entity.fields.find((f) => f.primaryKey);
   if (!pk) return null;
