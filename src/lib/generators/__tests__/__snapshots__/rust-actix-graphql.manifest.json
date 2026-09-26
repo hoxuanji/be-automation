@@ -151,8 +151,8 @@
   },
   {
     "path": "src/auth.rs",
-    "lines": 84,
-    "size": 3438
+    "lines": 95,
+    "size": 3894
   },
   {
     "path": "src/bin/worker.rs",

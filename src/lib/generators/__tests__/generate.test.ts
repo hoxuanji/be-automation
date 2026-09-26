@@ -2045,4 +2045,71 @@ describe("Every deployment target gets a real CI deploy job", () => {
     // Everything configured: all three are pinged together and reported by name.
     assert.match(gen({ language: "rust", framework: "axum", queue: "nats", cache: "redis", database: "postgres" }).get("src/main.rs")!, /tokio::join!\(db_ping\(pool\), cache::ping\(\), queue::ping\(\)\)/);
   });
+  // An auth:true route outside the auth layer is callable by anyone. Rust used to skip
+  // the layer entirely for auth "none", leaving POST /notifications (send_notification) open.
+  it("Rust: every auth:true route (stub and pattern) sits behind require_auth; auth:false routes don't", () => {
+    const ep = (id: string, method: string, path: string, auth: boolean, pattern?: string) =>
+      ({ id, method, path, summary: path, auth, ...(pattern ? { pattern } : {}) }) as (typeof SAMPLE_ENDPOINTS)[number];
+    const endpoints = [
+      ep("1", "GET", "/health", false),
+      ep("2", "GET", "/reports/:id", true),
+      ep("3", "GET", "/public", false),
+      ep("4", "POST", "/notifications", true, "send_notification"),
+      ep("5", "POST", "/auth/login", false, "auth_login"),
+      ep("6", "GET", "/auth/me", true, "auth_me"),
+    ];
+    // Protected routes live between the layer's router and its wrap (axum) / inside the scope (actix).
+    const protectedBlock = (main: string, fw: string) =>
+      fw === "axum"
+        ? main.slice(main.indexOf("let protected = Router::new()"), main.indexOf(".route_layer(axum::middleware::from_fn(auth::require_auth))"))
+        : main.slice(main.indexOf(".wrap(actix_web::middleware::from_fn(auth::require_auth))"), main.indexOf("\n            )", main.indexOf('web::scope("")')));
+    const routeOf = (path: string, fw: string) => `.route("${fw === "axum" ? path : path.replace(/:(\w+)/g, "{$1}")}"`;
+    for (const framework of ["axum", "actix"]) {
+      for (const auth of ["clerk", "none"]) {
+        const g = gen({ language: "rust", framework, auth, queue: "sqs" }, endpoints);
+        const main = g.get("src/main.rs")!;
+        const block = protectedBlock(main, framework);
+        assert.ok(block.length > 0, `${framework}/${auth}: an auth layer exists`);
+        for (const e of endpoints.filter((e) => e.path !== "/health")) {
+          const r = routeOf(e.path, framework);
+          assert.ok(main.includes(r), `${framework}/${auth}: ${e.path} is routed`);
+          assert.equal(block.includes(r), e.auth, `${framework}/${auth}: ${e.path} protected iff auth:true`);
+        }
+        assert.ok(g.get("src/auth.rs"), `${framework}/${auth}: src/auth.rs is emitted`);
+      }
+      // With entities, only the publish route stays a stub — it and the entity CRUD are protected.
+      const main = gen({ language: "rust", framework, auth: "none", queue: "sqs" }, endpoints, SAMPLE_ENTITIES).get("src/main.rs")!;
+      const block = protectedBlock(main, framework);
+      assert.ok(block.includes(routeOf("/notifications", framework)), `${framework}: /notifications protected alongside entities`);
+      assert.match(block, /handlers::user::(router|config)/, `${framework}: entity CRUD protected`);
+    }
+  });
+  // auth "none" + auth_* patterns = self-issued HS256 tokens (JWT_SECRET), exactly like Go/TS/Python;
+  // e2e-roundtrip.sh signs its token that way. A missing secret/JWKS config must be a 500, not a pass.
+  it("Rust auth.rs verifies the right tokens and fails closed when unconfigured", () => {
+    const ep = (id: string, method: string, path: string, auth: boolean, pattern?: string) =>
+      ({ id, method, path, summary: path, auth, ...(pattern ? { pattern } : {}) }) as (typeof SAMPLE_ENDPOINTS)[number];
+    const selfIssued = [ep("1", "POST", "/auth/login", false, "auth_login"), ep("2", "POST", "/notifications", true, "send_notification")];
+    for (const framework of ["axum", "actix"]) {
+      const hs = gen({ language: "rust", framework, auth: "none", queue: "sqs" }, selfIssued);
+      const hsAuth = hs.get("src/auth.rs")!;
+      assert.match(hsAuth, /Validation::new\(Algorithm::HS256\)/);
+      assert.match(hsAuth, /DecodingKey::from_secret\(secret\.as_bytes\(\)\)/);
+      assert.match(hsAuth, /\["JWT_SECRET"\]/, "missing JWT_SECRET fails closed");
+      assert.doesNotMatch(hs.get("Cargo.toml")!, /^reqwest = /m, "no JWKS fetch for self-issued tokens");
+      assert.match(hs.get(".env.example")!, /^JWT_SECRET=/m);
+
+      const jw = gen({ language: "rust", framework, auth: "clerk", queue: "sqs" }, selfIssued).get("src/auth.rs")!;
+      assert.match(jw, /\["AUTH_JWKS_URL", "AUTH_ISSUER"\]/);
+      assert.doesNotMatch(jw, /Algorithm::HS256/, "a provider's tokens are never accepted as HS256");
+
+      for (const a of [hsAuth, jw]) {
+        const mw = a.slice(a.indexOf("pub async fn require_auth"));
+        const fail = mw.search(/INTERNAL_SERVER_ERROR|ErrorInternalServerError/);
+        assert.ok(fail > 0 && fail < mw.search(/UNAUTHORIZED|ErrorUnauthorized/), `${framework}: unconfigured → 500 before any token check`);
+      }
+      // Nothing protected and nothing issued: no verifier, same as the other languages.
+      assert.equal(gen({ language: "rust", framework, auth: "none" }, [ep("1", "GET", "/public", false)]).get("src/auth.rs"), undefined);
+    }
+  });
 });
