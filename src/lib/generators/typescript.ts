@@ -4,7 +4,7 @@ import { tsGrpcFiles } from "./grpc/typescript";
 import { tsGraphqlFiles } from "./graphql/typescript";
 import { mountTrpcOnTsRest } from "./trpc/typescript";
 import { isGraphqlSupported } from "./types";
-import { tsPatternRoute, tsPatternImports, tsSelfAuthUser, SELF_AUTH_PATTERNS, usesPrisma, hasRedisCache, tsAuthMode, tsGuarded, type TsAuthMode } from "./patterns/typescript";
+import { tsPatternRoute, tsPatternImports, tsSelfAuthUser, SELF_AUTH_PATTERNS, usesPrisma, hasRedisCache, tsAuthMode, tsGuarded, tsCrudPatternEntityIds, type TsAuthMode } from "./patterns/typescript";
 import { authCredentialEntities, selfAuthUser } from "./patterns/index";
 import { tsQueueDeps, tsQueueFiles, tsQueueImport, tsQueueKind, tsQueueScripts } from "./queue/typescript";
 
@@ -79,9 +79,7 @@ export function typescriptFiles(
     files.push(...prismaFiles(config, entities, authCredentialEntities(config, endpoints, entities).length > 0));
     files.push({ path: "src/db.ts", content: `import { PrismaClient } from "@prisma/client";\n\nexport const prisma = new PrismaClient();\n` });
   }
-  if (entities.length > 0) {
-    files.push(...entityCrudFiles(config, entities));
-  }
+  files.push(...entityCrudFiles(config, routerEntities(endpoints, entities)));
   if (config.tracing) files.push({ path: "src/tracing.ts", content: tracingFile(name) });
   if (hasRedis(config)) files.push({ path: "src/cache.ts", content: cacheFile() });
   files.push(...tsQueueFiles(config));
@@ -152,6 +150,13 @@ function tsPatternClientImports(config: StackConfig, endpoints: Endpoint[], enti
   const needsCache = hasRedis(config) && patterns.some((p) => p === "cache_read" || p === "health_check");
   const { needsBcrypt, needsJwt, needsCrypto } = tsPatternImports(config, endpoints);
   return `${needsBcrypt ? 'import bcrypt from "bcrypt";\n' : ""}${needsJwt ? 'import jwt from "jsonwebtoken";\n' : ""}${needsCrypto ? 'import crypto from "node:crypto";\n' : ""}${needsDb ? `import { prisma } from "./db";\n` : ""}${needsCache ? `import { redis } from "./cache";\n` : ""}${tsQueueImport(config)}`;
+}
+
+// Generic entity routers (no auth) only for entities no crud_* pattern serves — the
+// pattern handlers own those routes and their per-endpoint auth.
+function routerEntities(endpoints: Endpoint[], entities: Entity[]): Entity[] {
+  const served = tsCrudPatternEntityIds(endpoints, entities);
+  return entities.filter((e) => !served.has(e.id));
 }
 
 function entityCrudFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
@@ -1185,10 +1190,10 @@ ${guardLine(e)}  ${handlerName(e)}() {
     .join("\n\n");
   const nestCommon = ["Controller", "Get", "Post", "Put", "Patch", "Delete", ...(hasProm(config) ? ["Header"] : []), ...(hasPatterns ? ["Req", "Res"] : []), ...(endpoints.some(guarded) ? ["UseGuards"] : []), ...(tsQueueKind(config) ? ["Query", "ServiceUnavailableException", "OnApplicationShutdown"] : [])];
 
-  const entityModuleImports = entities
+  const entityModuleImports = routerEntities(endpoints, entities)
     .map((e) => `import { ${e.name}Module } from "./modules/${toKebab(e.name)}/${toKebab(e.name)}.module";`)
     .join("\n");
-  const entityModuleList = entities.map((e) => `${e.name}Module`).join(", ");
+  const entityModuleList = routerEntities(endpoints, entities).map((e) => `${e.name}Module`).join(", ");
 
   return [
     {
@@ -1349,10 +1354,10 @@ function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
     )
     .join("\n");
 
-  const entityImports = entities
+  const entityImports = routerEntities(endpoints, entities)
     .map((e) => `import { create${e.name}Router } from "./routes/${toKebab(e.name)}.router";`)
     .join("\n");
-  const entityMounts = entities
+  const entityMounts = routerEntities(endpoints, entities)
     .map((e) => `app.use("/${toKebab(e.name)}s", create${e.name}Router());`)
     .join("\n");
 
@@ -1523,10 +1528,10 @@ function fastifyFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
     )
     .join("\n");
 
-  const entityImports = entities
+  const entityImports = routerEntities(endpoints, entities)
     .map((e) => `import { ${toCamel(e.name)}Routes } from "./routes/${toKebab(e.name)}.route";`)
     .join("\n");
-  const entityRegistrations = entities
+  const entityRegistrations = routerEntities(endpoints, entities)
     .map((e) => `await app.register(${toCamel(e.name)}Routes, { prefix: "/${toKebab(e.name)}s" });`)
     .join("\n");
 
@@ -1637,10 +1642,10 @@ function honoFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[
     )
     .join("\n");
 
-  const entityImports = entities
+  const entityImports = routerEntities(endpoints, entities)
     .map((e) => `import { ${toCamel(e.name)}Routes } from "./routes/${toKebab(e.name)}.route";`)
     .join("\n");
-  const entityMounts = entities
+  const entityMounts = routerEntities(endpoints, entities)
     .map((e) => `app.route("/${toKebab(e.name)}s", ${toCamel(e.name)}Routes);`)
     .join("\n");
 

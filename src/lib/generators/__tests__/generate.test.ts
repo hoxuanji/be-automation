@@ -2336,4 +2336,50 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.match(g.get("src/main/resources/application.properties")!, /physical-naming-strategy=org\.hibernate\.boot\.model\.naming\.CamelCaseToUnderscoresNamingStrategy/);
     assert.match(g.get("src/test/java/dev/helios/app/UserResourceTest.java")!, /void updateUser_appliesBody\(\)[\s\S]*put\("\/users\/" \+ id\)[\s\S]*equalTo\(changed\)[\s\S]*get\("\/users\/" \+ id\)/, "mvn test proves the change sticks");
   });
+  // Fastify refused to boot: the crud_* pattern handlers in main.ts and the generic
+  // /users route plugin both registered GET/POST /users and GET/DELETE /users/:id.
+  // Express/Hono/Nest booted but served whichever came first, and the plugin has no auth.
+  it("typescript: each entity CRUD route is registered exactly once, auth:true ones behind auth", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+    ] }];
+    const crud = ([["GET", "/users", "crud_list", false], ["GET", "/users/:id", "crud_get", true], ["POST", "/users", "crud_create", true],
+      ["PUT", "/users/:id", "crud_update", true], ["DELETE", "/users/:id", "crud_delete", true]] as const)
+      .map(([method, path, pattern, auth], i) => ({ id: `c${i}`, method, path, summary: pattern, auth, pattern }));
+    // auth_login makes the service issue (and so verify) its own tokens, like the e2e fixture.
+    const eps = [...crud, { id: "l", method: "POST" as const, path: "/auth/login", summary: "login", auth: false, pattern: "auth_login" as const }];
+    for (const framework of ["express", "fastify", "hono", "nestjs"]) {
+      const g = gen({ language: "typescript", framework, auth: "none", database: "postgres" }, eps, user);
+      assert.ok(!g.files.some((f) => /routes\/user\.route|modules\/user\//.test(f.path)), `${framework}: no second (unguarded) User router`);
+      const src = g.files.filter((f) => f.path.startsWith("src/") && !/\.(test|spec)\.ts$/.test(f.path)).map((f) => f.content).join("\n");
+      assert.doesNotMatch(src, /app\.(use|route)\("\/users"|register\(userRoutes|UserModule/, `${framework}: nothing mounts one`);
+      for (const { method, path, auth } of crud) {
+        const reg = framework === "nestjs"
+          ? new RegExp(`@${method[0] + method.slice(1).toLowerCase()}\\("${path}"\\)\\n(.*)`, "g")
+          : new RegExp(`app\\.${method.toLowerCase()}\\("${path}", (.*)`, "g");
+        const hits = [...src.matchAll(reg)];
+        assert.equal(hits.length, 1, `${framework}: ${method} ${path} registered once`);
+        assert.equal(/authRequired|JwtAuthGuard/.test(hits[0][1]), auth, `${framework}: ${method} ${path} guarded iff auth:true`);
+      }
+    }
+    // Without crud_* patterns the entity router stays the entity's only CRUD surface.
+    const plain = gen({ language: "typescript", framework: "fastify", auth: "none", database: "postgres" }, [], user);
+    assert.ok(plain.get("src/routes/user.route.ts"));
+    assert.match(plain.get("src/main.ts")!, /register\(userRoutes, \{ prefix: "\/users" \}\)/);
+  });
+  // The gRPC image had the gap the REST one just closed: no tables unless someone ran
+  // prisma by hand (the CLI was a devDependency, missing from the runtime image).
+  it("typescript gRPC: the api pushes the Prisma schema at start; the CLI and prisma/ ship in the image", () => {
+    const g = gen({ language: "typescript", framework: "fastify", api: "grpc", auth: "none", database: "postgres" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+    const runtime = g.get("Dockerfile")!.split(/^FROM node:22-alpine$/m)[1];
+    assert.match(runtime, /COPY --from=build \/app\/prisma \.\/prisma/);
+    assert.match(runtime, /COPY --from=build \/app\/node_modules \.\/node_modules/, "generated client + CLI come from the build stage");
+    assert.match(runtime, /CMD \["sh", "-c", "node_modules\/\.bin\/prisma db push --skip-generate && exec node dist\/main\.js"\]/);
+    const pkg = JSON.parse(g.get("package.json")!);
+    assert.ok(pkg.dependencies.prisma && !pkg.devDependencies.prisma, "prisma CLI survives npm prune --omit=dev");
+    const plain = gen({ language: "typescript", framework: "fastify", api: "grpc", database: "postgres" }, SAMPLE_ENDPOINTS, []).get("Dockerfile")!;
+    assert.match(plain, /CMD \["node", "dist\/main\.js"\]/);
+    assert.doesNotMatch(plain, /prisma/);
+  });
 });
