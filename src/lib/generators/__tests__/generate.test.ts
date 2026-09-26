@@ -2445,4 +2445,46 @@ describe("Every deployment target gets a real CI deploy job", () => {
     }
     assert.ok(blocks.some((b) => b.includes("JSON.stringify(body)")), "POST still sends JSON");
   });
+  // The Go handler tests ran PATCH with {"createdAt": "updated"}: a non-RFC-3339 time
+  // is a 400, and Updates(map) sends "createdAt" as a column name (no such column).
+  it("go: entity Update overlays the JSON on the stored row and Saves it; test bodies send RFC 3339 dates", () => {
+    for (const framework of ["gin", "fiber", "echo", "chi"]) {
+      const g = gen({ framework, auth: "none" }, [], [{ id: "e1", name: "User", fields: [
+        SAMPLE_ENTITIES[0].fields[0], SAMPLE_ENTITIES[0].fields[2], SAMPLE_ENTITIES[0].fields[4],
+      ] }]);
+      const update = g.get("internal/handlers/user.go")!.split("Update(")[1].split("\nfunc ")[0];
+      assert.match(update, /pk := item\.Id\n[\s\S]*\(&item\)[\s\S]*item\.Id = pk\n\tif err := h\.db\.Save\(&item\)/, `${framework}: json tags map camelCase keys; the key can't change`);
+      assert.doesNotMatch(update, /map\[string\]any\n|Updates\(/, `${framework}: raw map keys are not column names`);
+      const test = g.get("internal/handlers/user_test.go")!;
+      assert.match(test, /"createdAt": "2024-01-01T00:00:00Z"/, `${framework}: time.Time only decodes RFC 3339`);
+      assert.doesNotMatch(test, /"createdAt": "(test|updated)"/);
+    }
+  });
+  // go test ./... must pass with no services: the in-process server exits when its
+  // database or broker is down, so those are probed and the tests skip with the reason;
+  // expectations are only what's knowable without data (401 / stub 200 / route mounted).
+  it("go: contract tests skip without their database/broker and never assert data-dependent statuses", () => {
+    const contract = (o: Record<string, unknown>, entities: typeof SAMPLE_ENTITIES = SAMPLE_ENTITIES) =>
+      gen(o, SAMPLE_ENDPOINTS, entities).get("internal/api/contract/contract_test.go")!;
+    const pg = contract({});
+    assert.match(pg, /if cfg\.DatabaseURL == "" \{\n\t\tskipReason = "DATABASE_URL is not set/, "no 30s ping retry against an unset URL");
+    assert.match(pg, /if skipReason == "" \{\n\t\tif q, err := queue\.Open\(context\.Background\(\), cfg\); err != nil \{\n\t\t\tskipReason = "message broker unavailable: "/);
+    assert.match(pg, /if skipReason == "" \{\n\t\tsrv := server\.New/, "server.New only runs once every dependency answered");
+    assert.equal(pg.match(/func Test(?!Main)/g)!.length, pg.match(/\trequireServer\(t\)\n/g)!.length, "every test skips when the server couldn't start");
+    // clerk: protected routes are rejected by authRequired before any handler runs.
+    assert.match(pg, /call\(t, "POST", "\/users", "\{\}"\)\n\tif resp\.StatusCode != http\.StatusUnauthorized/);
+    assert.match(pg, /call\(t, "GET", "\/health", ""\)\n\tif resp\.StatusCode != http\.StatusOK/);
+    // auth off: GET /users is the entity handler (stub yields to CRUD), so only "mounted" is knowable.
+    const open = contract({ auth: "none", queue: "none", database: "dynamodb" });
+    assert.match(open, /call\(t, "GET", "\/users", ""\)\n\tif !served\(resp\)/);
+    assert.doesNotMatch(open, /skipReason = |queue\.Open|internal\/db"/, "in-memory store + no broker: nothing to probe, the tests run");
+    assert.doesNotMatch(open + pg, /StatusCreated|StatusNoContent|!= 201|!= 204/, "stubs answer 200; CRUD statuses depend on data");
+    // A stub endpoint with no entity to yield to answers the stub's 200.
+    assert.match(contract({ auth: "none" }, []), /call\(t, "POST", "\/users", "\{\}"\)\n\tif resp\.StatusCode != http\.StatusOK/);
+  });
+  it("ci: the Go smoke step runs the generated repo's own go test after build/vet/gofmt", () => {
+    const ci = readFileSync(new URL("../../../../.github/workflows/ci.yml", import.meta.url), "utf8");
+    const step = ci.split("- name: Smoke build (Go)")[1].split("\n      - name:")[0];
+    assert.match(step, /go build \.\/\.\.\. && go vet \.\/\.\.\.[\s\S]*gofmt -l[\s\S]*go test \.\/\.\.\. -race -cover 2>&1 \| tee -a \/tmp\/smoke\.log/);
+  });
 });
