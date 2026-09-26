@@ -896,7 +896,7 @@ public class NotificationConsumer {
 
     @Incoming("notifications-in")
     public void onMessage(String payload) {
-        LOG.infof("consumed topic=%s body=%s", NotificationPublisher.DESTINATION, payload.substring(0, Math.min(payload.length(), 200)));
+        LOG.infof("consumed topic=%s body=%s", "notifications", payload.substring(0, Math.min(payload.length(), 200)));
     }
 }
 `),
