@@ -3,6 +3,7 @@ import { toPascal, toSnake, toKebab } from "./types";
 import { pyGrpcFiles } from "./grpc/python";
 import { pythonGraphqlFiles } from "./graphql/python";
 import { isGraphqlSupported } from "./types";
+import { authCredentialEntities } from "./patterns/index";
 import { pyPatternRoute, pyPatternImports, pyNativeRoutes, pyNativeImports, pyHasRedis, pyAuthMode, type PyAuthMode, type NativeRoute } from "./patterns/python";
 import { pyQueue, pyQueueDeps, pyQueueModule, pyWorkerModule } from "./queue/python";
 
@@ -57,7 +58,7 @@ settings = Settings()
 
   if (hasEntities && !isMongo && config.framework === "fastapi") {
     files.push({ path: "app/db.py", content: dbFile(config) });
-    files.push({ path: "app/models.py", content: sqlalchemyModels(config, entities) });
+    files.push({ path: "app/models.py", content: sqlalchemyModels(config, isMongo ? entities : [...entities, ...authCredentialEntities(config, endpoints, entities)]) });
     files.push({ path: "app/routers/__init__.py", content: "" });
     for (const entity of entities) {
       const snake = toSnake(entity.name);
@@ -83,7 +84,7 @@ settings = Settings()
   } else if (hasEntities) {
     // Litestar / Django pattern handlers use the same SQLAlchemy session helper.
     if (!isMongo) files.push({ path: "app/db.py", content: dbFile(config) });
-    files.push({ path: "app/models.py", content: sqlalchemyModels(config, entities) });
+    files.push({ path: "app/models.py", content: sqlalchemyModels(config, isMongo ? entities : [...entities, ...authCredentialEntities(config, endpoints, entities)]) });
   }
 
   files.push({

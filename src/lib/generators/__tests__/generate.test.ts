@@ -2140,4 +2140,37 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.match(q, /jetstreamManager\(c\)/); // v3 API: free functions over the connection
     assert.match(q, /process\.env\.NATS_URL/);
   });
+  // Self-issued auth used to INSERT password_hash/name into the user's own `users`
+  // table and skip its required columns, so register failed for any User entity that
+  // didn't happen to declare them. Hashes now live in a generated auth_credentials
+  // table keyed by the User PK; register fills the entity's real columns.
+  it("self-issued auth (go/python) stores hashes in auth_credentials, never on the user's entity", () => {
+    const user = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+      { id: "f3", name: "score", type: "number" as const, required: false, unique: false },
+      { id: "f4", name: "active", type: "boolean" as const, required: true, unique: false },
+      { id: "f5", name: "createdAt", type: "date" as const, required: true, unique: false },
+    ] }];
+    const eps = (["auth_register", "auth_login", "auth_change_password", "auth_me"] as const).map((pattern, i) =>
+      ({ id: `a${i}`, method: "POST" as const, path: `/auth/${pattern}`, summary: pattern, auth: pattern === "auth_change_password" || pattern === "auth_me", pattern }));
+    const sql = (g: ReturnType<typeof gen>) => g.files.filter((f) => f.path.endsWith(".sql") || f.path.includes("migrations/versions/")).map((f) => f.content).join("\n");
+    for (const [language, framework] of [["go", "gin"], ["go", "chi"], ["python", "fastapi"], ["python", "litestar"], ["python", "django"]]) {
+      const g = gen({ language, framework, auth: "none", database: "postgres" }, eps, user);
+      const usersDdl = sql(g).match(/CREATE TABLE IF NOT EXISTS users \(([\s\S]*?)\);/)![1];
+      assert.doesNotMatch(usersDdl, /password/, `${framework}: the user's table keeps exactly its declared columns`);
+      assert.match(sql(g), /CREATE TABLE IF NOT EXISTS auth_credentials \([\s\S]{0,30}user_id UUID PRIMARY KEY[\s\S]*password_hash VARCHAR\(255\) NOT NULL/, `${framework}: hashes get their own table, typed like the User PK`);
+      const code = language === "go" ? g.get("internal/handlers/api.go")! : g.get("app/main.py")!;
+      assert.match(code, /missing required fields/, `${framework}: an omitted required column is a 400, not a NOT NULL failure`);
+      assert.match(code, language === "go" ? /\[\]string\{"active"\}/ : /\["active"\] if payload\.get\(f\) is None/, `${framework}: 'active' is required; optional 'score' and stamped 'createdAt' are not`);
+      assert.match(code, language === "go" ? /"created_at": time\.Now\(\)/ : /createdAt=datetime\.utcnow\(\)/, `${framework}: required dates are stamped`);
+      assert.doesNotMatch(code, /"name":|\bname=/, `${framework}: register no longer writes an undeclared name column`);
+      assert.ok(code.match(/auth_credentials|AuthCredential\b/g)!.length >= 3, `${framework}: register, login and change_password all use the credentials table`);
+      if (language === "python") assert.match(g.get("app/models.py")!, /class AuthCredential\(Base\):\n    __tablename__ = "auth_credentials"/);
+    }
+    // With a provider the credential endpoints are 501s, so there is nothing to store.
+    assert.doesNotMatch(sql(gen({ language: "python", framework: "fastapi", auth: "clerk", database: "postgres" }, eps, user)), /auth_credentials/);
+    // No usable User entity: an explicit 501 instead of queries against a table that doesn't exist.
+    assert.match(gen({ language: "go", framework: "gin", auth: "none" }, eps, []).get("internal/handlers/api.go")!, /Declare a User entity[\s\S]*StatusNotImplemented/);
+  });
 });

@@ -1,5 +1,5 @@
 import type { Endpoint, Entity, StackConfig } from "../types";
-import type { PatternId } from "./index";
+import { selfAuthUser, type PatternId, type SelfAuthUser } from "./index";
 import { authProviderSpec } from "../auth/providers";
 import { pyQueue } from "../queue/python";
 
@@ -69,21 +69,11 @@ function pyModel(entity: Entity): PyModel {
   };
 }
 
-// The self-issued auth flow needs a User entity with email + password hash columns.
-type PyUser = { name: string; pk: string; email: string; hash: string };
-function userEntity(entities: Entity[]): PyUser | undefined {
-  const u = entities.find((e) => e.name.toLowerCase() === "user");
-  const email = u?.fields.find((f) => f.name === "email");
-  const hash = u?.fields.find((f) => /^password_?hash$/i.test(f.name));
-  if (!u || !email || !hash) return undefined;
-  return { name: u.name, pk: u.fields.find((f) => f.primaryKey)?.name ?? "id", email: email.name, hash: hash.name };
-}
-
 const stub = (why: string) => `async def handler():
     # ${why}
     raise HTTPException(status_code=501, detail="not_implemented")`;
 const NO_ENTITY = stub("No entity matches this route — declare one (or wire this handler to your data layer).");
-const NO_USER = stub("Declare a User entity with `email` and `password_hash` fields to enable self-managed auth.");
+const NO_USER = stub("Declare a User entity with an `email` field and a uuid/string primary key to enable self-managed auth.");
 
 const searchFilter = (m: PyModel) =>
   m.search.length ? `or_(${m.search.map((f) => `${m.name}.${f}.ilike(f"%{q}%")`).join(", ")})` : "";
@@ -146,30 +136,50 @@ function crudDelete(m: PyModel, param: string): string {
     return Response(status_code=204)`;
 }
 
-function authLogin(u: PyUser): string {
+function authLogin(u: SelfAuthUser): string {
+  const U = u.entity.name;
   return `async def handler(credentials: Credentials, db: Session = Depends(get_db)):
-    user = db.query(${u.name}).filter(${u.name}.${u.email} == credentials.email).first()
-    if not user or not user.${u.hash}:
+    user = db.query(${U}).filter(${U}.${u.email.name} == credentials.email).first()
+    cred = db.get(AuthCredential, user.${u.pk.name}) if user else None
+    if not cred:
         # Burn a bcrypt check anyway so response timing doesn't reveal which emails exist.
         bcrypt.checkpw(credentials.password.encode(), _DUMMY_HASH)
         raise HTTPException(status_code=401, detail="invalid_credentials")
-    if not bcrypt.checkpw(credentials.password.encode(), user.${u.hash}.encode()):
+    if not bcrypt.checkpw(credentials.password.encode(), cred.password_hash.encode()):
         raise HTTPException(status_code=401, detail="invalid_credentials")
-    return {"token": create_access_token(str(user.${u.pk})), "token_type": "Bearer"}`;
+    return {"token": create_access_token(str(user.${u.pk.name})), "token_type": "Bearer"}`;
 }
 
-function authRegister(u: PyUser): string {
-  return `async def handler(payload: Credentials, db: Session = Depends(get_db)):
-    if len(payload.password) < 8:
+// The body carries email + password plus the User's own columns; required ones
+// the client omits answer 400 by name, required dates are stamped with "now".
+function authRegister(u: SelfAuthUser): string {
+  const U = u.entity.name;
+  const list = (fs: { name: string }[]) => `[${fs.map((f) => JSON.stringify(f.name)).join(", ")}]`;
+  const cols = [
+    `${u.email.name}=email`,
+    // uuid PKs get a model default; string PKs are minted here.
+    ...(u.pk.type === "uuid" ? [] : [`${u.pk.name}=str(uuid4())`]),
+    ...u.dates.map((f) => `${f.name}=datetime.utcnow()`),
+    ...(u.settable.length ? [`**{k: payload[k] for k in ${list(u.settable)} if k in payload}`] : []),
+  ];
+  return `async def handler(payload: dict, db: Session = Depends(get_db)):
+    email, password = payload.get("email"), payload.get("password")
+    if not isinstance(email, str) or not email or not isinstance(password, str):
+        raise HTTPException(status_code=400, detail="email and password required")
+    if len(password) < 8:
         raise HTTPException(status_code=400, detail="password must be at least 8 characters")
-    if db.query(${u.name}).filter(${u.name}.${u.email} == payload.email).first():
+${u.required.length ? `    missing = [f for f in ${list(u.required)} if payload.get(f) is None]
+    if missing:
+        raise HTTPException(status_code=400, detail="missing required fields: " + ", ".join(missing))
+` : ""}    if db.query(${U}).filter(${U}.${u.email.name} == email).first():
         raise HTTPException(status_code=409, detail="email_already_registered")
-    user = ${u.name}(${u.email}=payload.email, ${u.hash}=bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode())
+    user = ${U}(${cols.join(", ")})
     db.add(user)
+    db.flush()  # assigns the PK before the credential row references it
+    db.add(AuthCredential(user_id=user.${u.pk.name}, password_hash=bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()))
     db.commit()
-    db.refresh(user)
-    token = create_access_token(str(user.${u.pk}))
-    return JSONResponse(status_code=201, content={"token": token, "token_type": "Bearer", "user": {"id": str(user.${u.pk}), "email": user.${u.email}}})`;
+    token = create_access_token(str(user.${u.pk.name}))
+    return JSONResponse(status_code=201, content={"token": token, "token_type": "Bearer", "user": {"id": str(user.${u.pk.name}), "email": user.${u.email.name}}})`;
 }
 
 // auth_required returns the verified claims — provider-issued (jwks) or self-issued (hs256).
@@ -195,7 +205,7 @@ function authRefresh(): string {
     return {"token": create_access_token(sub), "token_type": "Bearer"}`;
 }
 
-function authChangePassword(u: PyUser): string {
+function authChangePassword(): string {
   return `async def handler(
     payload: ChangePasswordRequest,
     claims: dict = Depends(auth_required),
@@ -203,12 +213,10 @@ function authChangePassword(u: PyUser): string {
 ):
     if len(payload.new_password) < 8:
         raise HTTPException(status_code=400, detail="new password must be at least 8 characters")
-    user = db.query(${u.name}).filter(${u.name}.${u.pk} == claims["sub"]).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="user not found")
-    if not user.${u.hash} or not bcrypt.checkpw(payload.current_password.encode(), user.${u.hash}.encode()):
+    cred = db.query(AuthCredential).filter(AuthCredential.user_id == claims["sub"]).first()
+    if not cred or not bcrypt.checkpw(payload.current_password.encode(), cred.password_hash.encode()):
         raise HTTPException(status_code=401, detail="invalid_current_password")
-    user.${u.hash} = bcrypt.hashpw(payload.new_password.encode(), bcrypt.gensalt()).decode()
+    cred.password_hash = bcrypt.hashpw(payload.new_password.encode(), bcrypt.gensalt()).decode()
     db.commit()
     return Response(status_code=204)`;
 }
@@ -402,7 +410,7 @@ function patternBody(e: Endpoint, config: StackConfig, entities: Entity[], mode:
   }
   if (pattern === "aggregate_stats" && !hasDb) return NO_ENTITY;
   if (DB_PATTERNS.has(pattern ?? "") && pattern !== "aggregate_stats" && !m) return NO_ENTITY;
-  const user = userEntity(entities);
+  const user = selfAuthUser(entities);
   if ((pattern === "auth_login" || pattern === "auth_register" || pattern === "auth_change_password") && !user) return NO_USER;
 
   switch (pattern) {
@@ -416,7 +424,7 @@ function patternBody(e: Endpoint, config: StackConfig, entities: Entity[], mode:
     case "auth_me":      return authMe();
     case "auth_logout":  return authLogout();
     case "auth_refresh": return authRefresh();
-    case "auth_change_password": return authChangePassword(user!);
+    case "auth_change_password": return authChangePassword();
     case "health_check": return healthCheck(config, hasDb);
     case "webhook_receive": return webhookReceive(config);
     case "file_upload":  return fileUpload();
@@ -601,6 +609,7 @@ function importLines(code: string, fw: "fastapi" | NativeFw, entities: Entity[])
   // NotificationRequest declares an Optional field.
   if (fw !== "fastapi" && (uses(/\bOptional\b/) || usesModel("NotificationRequest"))) lines.push("from typing import Optional");
   const models = entities.filter((en) => new RegExp(`\\b${en.name}\\b`).test(code)).map((en) => en.name);
+  if (uses(/\bAuthCredential\b/)) models.push("AuthCredential");
   if (models.length) lines.push(`from .models import ${[...new Set(models)].join(", ")}`);
   if (uses(/\b_row\(/)) lines.push(fw === "fastapi" ? "from fastapi.encoders import jsonable_encoder" : "import json");
   if (uses(/\bredis_client\b/)) lines.push("from .cache import redis_client");
@@ -611,6 +620,7 @@ function importLines(code: string, fw: "fastapi" | NativeFw, entities: Entity[])
   if (uses(/\bhmac_lib\b/)) lines.push("import hmac as hmac_lib", "import hashlib", "import os");
   if (fw === "fastapi" && uses(/\bUploadFile\b/)) lines.push("from fastapi import UploadFile");
   if (uses(/\buuid4\(/)) lines.push("from uuid import uuid4");
+  if (uses(/\bdatetime\.utcnow\(/)) lines.push("from datetime import datetime");
   if (uses(/\bbcrypt\./)) lines.push("import bcrypt");
   if (uses(/\bjwt\./)) lines.push("import jwt");
   const authNames = ["create_access_token", "verify_token"].filter((n) => code.includes(n + "("));
