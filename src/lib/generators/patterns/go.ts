@@ -1,7 +1,7 @@
 import type { Endpoint, Entity, StackConfig } from "../types";
 import { selfAuthUser, type PatternId, type SelfAuthUser } from "./index";
 import type { GeneratedFile } from "../types";
-import { safeName, toSnake } from "../types";
+import { safeName, toPascal, toSnake } from "../types";
 
 const CRED_TABLE = "auth_credentials"; // see authCredentialEntities
 import { authProviderSpec } from "../auth/providers";
@@ -37,6 +37,7 @@ interface FwCtx {
   pathParam: (name: string) => string;
   getBody: () => string;          // lines that bind body into `var body map[string]any`
   getBodyTyped: (typ: string) => string; // bind into typed struct
+  bindInto: (v: string) => string; // bind onto an existing variable (overlays the sent fields)
   sendJSON: (status: string, expr: string) => string;
   sendNoContent: () => string;
   retErr: (code: string, msg: string, indent?: string) => string; // return error response; indent = depth of the call site
@@ -53,6 +54,7 @@ function fwCtx(fw: Fw): FwCtx {
     pathParam: (n) => `c.Param(${JSON.stringify(n)})`,
     getBody: () => `\tvar body map[string]any\n\tif err := c.ShouldBindJSON(&body); err != nil {\n\t\tc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})\n\t\treturn\n\t}`,
     getBodyTyped: (t) => `\tvar body ${t}\n\tif err := c.ShouldBindJSON(&body); err != nil {\n\t\tc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})\n\t\treturn\n\t}`,
+    bindInto: (v) => `\tif err := c.ShouldBindJSON(&${v}); err != nil {\n\t\tc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})\n\t\treturn\n\t}`,
     sendJSON: (s, e) => `c.JSON(${s}, ${e})`,
     sendNoContent: () => `c.Status(http.StatusNoContent)`,
     retErr: (code, msg, ind = "\t\t") => `c.JSON(${code}, gin.H{"error": ${JSON.stringify(msg)}})\n${ind}return`,
@@ -68,6 +70,7 @@ function fwCtx(fw: Fw): FwCtx {
     pathParam: (n) => `c.Params(${JSON.stringify(n)})`,
     getBody: () => `\tvar body map[string]any\n\tif err := c.BodyParser(&body); err != nil {\n\t\treturn c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})\n\t}`,
     getBodyTyped: (t) => `\tvar body ${t}\n\tif err := c.BodyParser(&body); err != nil {\n\t\treturn c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})\n\t}`,
+    bindInto: (v) => `\tif err := c.BodyParser(&${v}); err != nil {\n\t\treturn c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})\n\t}`,
     sendJSON: (s, e) => `return c.Status(${s}).JSON(${e})`,
     sendNoContent: () => `return c.SendStatus(http.StatusNoContent)`,
     retErr: (code, msg) => `return c.Status(${code}).JSON(fiber.Map{"error": ${JSON.stringify(msg)}})`,
@@ -83,6 +86,7 @@ function fwCtx(fw: Fw): FwCtx {
     pathParam: (n) => `c.Param(${JSON.stringify(n)})`,
     getBody: () => `\tvar body map[string]any\n\tif err := c.Bind(&body); err != nil {\n\t\treturn c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t}`,
     getBodyTyped: (t) => `\tvar body ${t}\n\tif err := c.Bind(&body); err != nil {\n\t\treturn c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t}`,
+    bindInto: (v) => `\tif err := c.Bind(&${v}); err != nil {\n\t\treturn c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t}`,
     sendJSON: (s, e) => `return c.JSON(${s}, ${e})`,
     sendNoContent: () => `return c.NoContent(http.StatusNoContent)`,
     retErr: (code, msg) => `return c.JSON(${code}, map[string]any{"error": ${JSON.stringify(msg)}})`,
@@ -99,6 +103,7 @@ function fwCtx(fw: Fw): FwCtx {
     pathParam: (n) => `chi.URLParam(r, ${JSON.stringify(n)})`,
     getBody: () => `\tvar body map[string]any\n\tif err := json.NewDecoder(r.Body).Decode(&body); err != nil {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t\treturn\n\t}`,
     getBodyTyped: (t) => `\tvar body ${t}\n\tif err := json.NewDecoder(r.Body).Decode(&body); err != nil {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t\treturn\n\t}`,
+    bindInto: (v) => `\tif err := json.NewDecoder(r.Body).Decode(&${v}); err != nil {\n\t\twriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})\n\t\treturn\n\t}`,
     sendJSON: (s, e) => `writeJSON(w, ${s}, ${e})`,
     sendNoContent: () => `w.WriteHeader(http.StatusNoContent)`,
     retErr: (code, msg, ind = "\t\t") => `writeJSON(w, ${code}, map[string]any{"error": ${JSON.stringify(msg)}})\n${ind}return`,
@@ -143,7 +148,12 @@ function mqNilCheck(fw: Fw): string {
 
 const reqCtx: Record<Fw, string> = { gin: "c.Request.Context()", fiber: "c.UserContext()", echo: "c.Request().Context()", chi: "r.Context()" };
 
-function crudList(fw: Fw, table: string): string {
+// The GORM model (internal/models) for a CRUD route's table, when there is one.
+// Typed rows let GORM run the model's hooks and return what the DB assigned
+// (id, timestamps); raw maps only echo back what the client sent.
+type GoModel = { type: string; pk: string };
+
+function crudList(fw: Fw, table: string, m?: GoModel): string {
   const x = fwCtx(fw);
   const meta = mapLit(fw, ["page", "page"], ["limit", "limit"], ["total", "total"], ["pages", "pages"]);
   return `${dbNilCheck(fw)}
@@ -164,7 +174,7 @@ function crudList(fw: Fw, table: string): string {
 \tvar total int64
 \tq.Count(&total)
 
-\tvar rows []map[string]any
+\tvar rows []${m ? m.type : "map[string]any"}
 \tif err := q.Order("created_at DESC").Offset((page - 1) * limit).Limit(limit).Scan(&rows).Error; err != nil {
 \t\th.log.Error("list", "table", ${JSON.stringify(table)}, "err", err)
 \t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
@@ -177,26 +187,27 @@ function crudList(fw: Fw, table: string): string {
 \t${x.retOK(mapLit(fw, ["data", "rows"], ["meta", meta]))}`;
 }
 
-function crudGet(fw: Fw, table: string): string {
+function crudGet(fw: Fw, table: string, m?: GoModel): string {
   const x = fwCtx(fw);
   return `${dbNilCheck(fw)}
 \tid := ${x.pathParam("id")}
 
-\tvar row map[string]any
+\tvar row ${m ? m.type : "map[string]any"}
 \tif err := h.db.Table(${JSON.stringify(table)}).Where("id = ?", id).First(&row).Error; err != nil {
 \t\t${x.retErr("http.StatusNotFound", "not found")}
 \t}
 \t${x.retOK("row")}`;
 }
 
-function crudCreate(fw: Fw, table: string): string {
+function crudCreate(fw: Fw, table: string, m?: GoModel): string {
   const x = fwCtx(fw);
-  return `${dbNilCheck(fw)}
-${x.getBody()}
+  const bind = m ? x.getBodyTyped(m.type) : `${x.getBody()}
 
 \tif len(body) == 0 {
 \t\t${x.retErr("http.StatusBadRequest", "empty request body")}
-\t}
+\t}`;
+  return `${dbNilCheck(fw)}
+${bind}
 
 \tif err := h.db.Table(${JSON.stringify(table)}).Create(&body).Error; err != nil {
 \t\th.log.Error("create", "table", ${JSON.stringify(table)}, "err", err)
@@ -205,8 +216,27 @@ ${x.getBody()}
 \t${x.retCreated("body")}`;
 }
 
-function crudUpdate(fw: Fw, table: string): string {
+function crudUpdate(fw: Fw, table: string, m?: GoModel): string {
   const x = fwCtx(fw);
+  // Typed: overlay the sent fields on the stored row and Save every column, so
+  // zero values (active=false, score=0) are written too; the key can't change.
+  if (m) return `${dbNilCheck(fw)}
+\tid := ${x.pathParam("id")}
+
+\tvar existing ${m.type}
+\tif err := h.db.Table(${JSON.stringify(table)}).Where("id = ?", id).First(&existing).Error; err != nil {
+\t\t${x.retErr("http.StatusNotFound", "not found")}
+\t}
+
+\tpk := existing.${m.pk}
+${x.bindInto("existing")}
+\texisting.${m.pk} = pk
+
+\tif err := h.db.Table(${JSON.stringify(table)}).Save(&existing).Error; err != nil {
+\t\th.log.Error("update", "table", ${JSON.stringify(table)}, "err", err)
+\t\t${x.retErr("http.StatusInternalServerError", "internal server error")}
+\t}
+\t${x.retOK("existing")}`;
   return `${dbNilCheck(fw)}
 \tid := ${x.pathParam("id")}
 
@@ -700,8 +730,11 @@ function customHandler(fw: Fw, e: Endpoint): string {
 \t${x.retOK(mapLit(fw, ["ok", "true"], ["op", JSON.stringify(e.method + " " + e.path)]))}`;
 }
 
-function patternBody(pattern: string | undefined, fw: Fw, e: Endpoint, config: StackConfig, entities: Entity[]): string {
+function patternBody(pattern: string | undefined, fw: Fw, e: Endpoint, config: StackConfig, entities: Entity[], sqlModels: boolean): string {
   const table = inferTableName(e.path);
+  const entity = sqlModels ? entities.find((en) => `${toSnake(en.name)}s` === table) : undefined;
+  const pk = entity?.fields.find((f) => f.primaryKey);
+  const model = entity && pk ? { type: `models.${entity.name}`, pk: toPascal(pk.name) } : undefined;
   // Token design: with an external provider (Clerk, Auth0, ...) authRequired
   // verifies provider-issued tokens via JWKS, so this service must not mint its
   // own — credential endpoints answer 501 and auth_me reads the provider's
@@ -717,10 +750,10 @@ function patternBody(pattern: string | undefined, fw: Fw, e: Endpoint, config: S
 \t${fwCtx(fw).retErr("http.StatusNotImplemented", "not_implemented", "\t")}`;
   }
   switch (pattern as PatternId) {
-    case "crud_list":    return crudList(fw, table);
-    case "crud_get":     return crudGet(fw, table);
-    case "crud_create":  return crudCreate(fw, table);
-    case "crud_update":  return crudUpdate(fw, table);
+    case "crud_list":    return crudList(fw, table, model);
+    case "crud_get":     return crudGet(fw, table, model);
+    case "crud_create":  return crudCreate(fw, table, model);
+    case "crud_update":  return crudUpdate(fw, table, model);
     case "crud_delete":  return crudDelete(fw, table);
     case "auth_login":   return authLoginFw(fw, user!);
     case "auth_register":return authRegisterFw(fw, user!);
@@ -764,7 +797,7 @@ function buildImports(code: string, module: string): string {
       .map(([, path]) => `\t"${path}"`)
       .sort()
       .join("\n");
-  const groups = [pick(GO_STD), pick([...GO_EXT, ["auth", `${module}/internal/auth`], ["queue", `${module}/internal/queue`]])];
+  const groups = [pick(GO_STD), pick([...GO_EXT, ["auth", `${module}/internal/auth`], ["models", `${module}/internal/models`], ["queue", `${module}/internal/queue`]])];
   return `import (\n${groups.filter(Boolean).join("\n\n")}\n)`;
 }
 
@@ -860,14 +893,15 @@ export function goApiHandlersFile(
   fw: string,
   config: StackConfig,
   endpoints: Endpoint[],
-  entities: Entity[]
+  entities: Entity[],
+  sqlModels = false // internal/models exists (SQL stack with entities)
 ): { file: GeneratedFile; usesDb: boolean; usesRdb: boolean; usesMq: boolean } {
   const framework = (["gin", "fiber", "echo", "chi"].includes(fw) ? fw : "gin") as Fw;
 
   const methods = endpoints
     .map((e) => {
       const name = handlerMethodName(e);
-      const body = patternBody(e.pattern, framework, e, config, entities);
+      const body = patternBody(e.pattern, framework, e, config, entities, sqlModels);
       const sig = fwCtx(framework).sig(name);
       return `${sig} {\n${body}\n}`;
     })

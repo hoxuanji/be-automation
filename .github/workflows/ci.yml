@@ -310,7 +310,7 @@ jobs:
         # Then User CRUD against the real DB (scripts/e2e-crud.sh): `crud_case` is the JSON field
         # casing the routes bind (default camel); `crud_send_id` sends a client id on create.
         combo:
-          - { label: "go-gin-rabbitmq", language: "go", framework: "gin", queue: "rabbitmq", publish: "notification", crud_case: "snake", crud_send_id: "1" }
+          - { label: "go-gin-rabbitmq", language: "go", framework: "gin", queue: "rabbitmq", publish: "notification", crud_case: "camel" }
           - { label: "ts-express-kafka", language: "typescript", framework: "express", queue: "kafka", publish: "notification" }
           - { label: "python-fastapi-nats", language: "python", framework: "fastapi", queue: "nats", publish: "notification" }
           - { label: "rust-axum-sqs", language: "rust", framework: "axum", queue: "sqs", publish: "notification", crud_case: "snake" }
