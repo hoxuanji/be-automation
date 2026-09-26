@@ -671,10 +671,13 @@ describe("Stack-option wiring", () => {
 
   it("Go migrate command matches the database driver and handles config errors", () => {
     const main = (database: string) => gen({ database }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("cmd/migrate/main.go")!;
-    assert.match(main("postgres"), /migrate\/v4\/database\/postgres"/);
-    assert.match(main("cockroach"), /migrate\/v4\/database\/cockroachdb"/);
-    assert.match(main("mysql"), /migrate\/v4\/database\/mysql"/);
-    assert.match(main("sqlite"), /migrate\/v4\/database\/sqlite"/);
+    const runner = (database: string) => gen({ database }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("internal/db/migrate.go")!;
+    // pgx (not lib/pq): lib/pq defaults to sslmode=require and a local Postgres has no TLS.
+    assert.match(runner("postgres"), /migrate\/v4\/database\/pgx\/v5"/);
+    assert.match(runner("cockroach"), /migrate\/v4\/database\/cockroachdb"/);
+    assert.match(runner("mysql"), /migrate\/v4\/database\/mysql"/);
+    // golang-migrate's sqlite driver registers "sqlite" like glebarez does -> init panic.
+    assert.doesNotMatch(runner("sqlite"), /golang-migrate/);
     assert.match(main("postgres"), /cfg, err := config\.Load\(\)/);
     // Pure-Go sqlite so CGO_ENABLED=0 Docker builds work.
     assert.ok(gen({ database: "sqlite" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("internal/db/gorm.go")!.includes("github.com/glebarez/sqlite"));
@@ -2214,5 +2217,48 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.match(py.get("app/models.py")!, /user_id = Column\(String\(36\), ForeignKey\("users\.id", ondelete="CASCADE"\)/);
     assert.match(py.get("app/db.py")!, /PRAGMA foreign_keys=ON/, "SQLite ignores ON DELETE CASCADE unless each connection enables it");
     assert.match(gen({ language: "go", framework: "gin", auth: "none", database: "sqlite" }, eps, user).get("internal/db/gorm.go")!, /_pragma=foreign_keys\(1\)/);
+  });
+  // e2e CRUD against compose Postgres: nothing created the tables (cmd/migrate was never run),
+  // so every /users call 500'd. The api now migrates itself from embedded SQL before serving.
+  it("Go api applies embedded migrations at startup, before opening GORM, on every SQL dialect", () => {
+    for (const database of ["postgres", "mysql", "sqlite"]) {
+      const g = gen({ database, auth: "none" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      assert.match(g.get("migrations/migrations.go")!, /\/\/go:embed \*\.sql\nvar FS embed\.FS/, `${database}: SQL ships inside the binary`);
+      assert.match(g.get("internal/db/migrate.go")!, /migrations\.FS/, `${database}: runner reads the embedded files, not ./migrations on disk`);
+      const server = g.get("internal/server/server.go")!;
+      assert.ok(server.indexOf("db.Migrate(cfg.DatabaseURL)") > 0 && server.indexOf("db.Migrate(") < server.indexOf("db.OpenGorm("), `${database}: schema exists before serving`);
+      assert.match(server, /db\.Migrate\(cfg\.DatabaseURL\); err != nil \{\n\t\tlog\.Error\("migrate", "err", err\)\n\t\tos\.Exit\(1\)/, `${database}: a failed migration stops the pod instead of serving 500s`);
+    }
+    // Replicas race at startup: golang-migrate's DB lock + ErrNoChange make that safe.
+    assert.match(gen({ auth: "none" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES).get("internal/db/migrate.go")!, /errors\.Is\(err, migrate\.ErrNoChange\)/);
+    // No entities -> no migrations -> no Migrate call (it would not compile).
+    assert.doesNotMatch(gen({ auth: "none" }, SAMPLE_ENDPOINTS, []).get("internal/server/server.go")!, /db\.Migrate/);
+  });
+  // POST /users inserted a map, so the response only echoed the client's fields: no id
+  // unless the client invented one. The model's hooks and DB defaults need a typed row.
+  it("Go CRUD pattern handlers use the entity's GORM model so ids/timestamps come back and updates write zero values", () => {
+    const eps = ([["GET", "/users", "crud_list"], ["GET", "/users/:id", "crud_get"], ["POST", "/users", "crud_create"],
+      ["PUT", "/users/:id", "crud_update"], ["DELETE", "/users/:id", "crud_delete"], ["GET", "/reports/:id", "crud_get"]] as const)
+      .map(([method, path, pattern], i) => ({ id: `c${i}`, method, path, summary: pattern, auth: false, pattern }));
+    for (const framework of ["gin", "fiber", "echo", "chi"]) {
+      const g = gen({ framework, auth: "none" }, eps as never, SAMPLE_ENTITIES);
+      const api = g.get("internal/handlers/api.go")!;
+      const fn = (name: string) => api.match(new RegExp(`\\) ${name}\\([\\s\\S]*?\\n}\\n`))![0];
+      assert.match(api, /"github\.com\/your-username\/[\w-]+\/internal\/models"/, `${framework}: imports the models`);
+      assert.match(fn("HandlePostUsers"), /var body models\.User[\s\S]*\.Create\(&body\)/, `${framework}: create returns the typed row (BeforeCreate id, CreatedAt)`);
+      assert.doesNotMatch(fn("HandlePostUsers"), /var body map\[string\]any/);
+      assert.match(fn("HandleGetUsersById"), /var row models\.User/);
+      assert.match(fn("HandleGetUsers"), /var rows \[\]models\.User/);
+      const put = fn("HandlePutUsersById");
+      assert.match(put, /pk := existing\.Id[\s\S]*&existing\)[\s\S]*existing\.Id = pk[\s\S]*\.Save\(&existing\)/, `${framework}: overlay + Save writes active=false; the key can't be changed by the body`);
+      assert.doesNotMatch(put, /Updates\(/, `${framework}: Updates(struct) would silently skip zero values`);
+      assert.match(fn("HandleDeleteUsersById"), /RowsAffected == 0/, `${framework}: deleting a missing row is a 404`);
+      // A table with no entity keeps the untyped fallback.
+      assert.match(fn("HandleGetReportsById"), /var row map\[string\]any/);
+    }
+    // Non-SQL stacks have no internal/models package.
+    assert.doesNotMatch(gen({ database: "mongodb", auth: "none" }, eps as never, SAMPLE_ENTITIES).get("internal/handlers/api.go") ?? "", /models\./);
+    // Soft delete would keep "deleted" rows visible (and needs a deleted_at column the migration lacks).
+    assert.doesNotMatch(gen({ auth: "none" }, eps as never, SAMPLE_ENTITIES).get("internal/models/models.go")!, /DeletedAt/);
   });
 });

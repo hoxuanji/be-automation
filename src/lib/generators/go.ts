@@ -16,8 +16,9 @@ export function goFiles(
   // Keep the Dockerfile + shared helpers; replace the cmd / internal/server
   // output with the gRPC tree.
   const module = `github.com/your-username/${safeName(config.name)}`;
-  // grpc/graphql trees also get cmd/migrate from db/migrations.ts (SQL + entities).
-  const migrate = entities.length > 0 && !/mongo|dynamo|redis/i.test(config.database) ? ["github.com/golang-migrate/migrate/v4"] : [];
+  // grpc/graphql trees also get cmd/migrate from db/migrations.ts (SQL + entities);
+  // SQLite's runner there is golang-migrate-free.
+  const migrate = entities.length > 0 && !/mongo|dynamo|redis|sqlite/i.test(config.database) ? ["github.com/golang-migrate/migrate/v4"] : [];
 
   if (config.api === "grpc") {
     const files: GeneratedFile[] = [];
@@ -46,10 +47,10 @@ export function goFiles(
   const authMode = goAuthMode(config, endpoints);
   const withAuth = authMode !== "off";
   const hasPatterns = endpoints.some((e) => e.pattern);
-  const api = hasPatterns ? goApiHandlersFile(fw, config, endpoints, entities) : null;
-
   const kind = goDbKind(config.database);
   const isSQL = kind === "postgres" || kind === "mysql" || kind === "sqlite";
+  const api = hasPatterns ? goApiHandlersFile(fw, config, endpoints, entities, isSQL) : null;
+
   const needsGorm = isSQL && (entities.length > 0 || !!api?.usesDb);
   const docStore = !isSQL && entities.length > 0;
   const withRedis = /redis|upstash|dragonfly/.test(config.cache);
@@ -131,9 +132,10 @@ export function goFiles(
 
   // go.mod is derived from what the emitted code actually imports, so it can
   // never drift from the source (missing or unused requirements).
-  // cmd/migrate is emitted later by db/migrations.ts (SQL stacks with entities)
-  // and imports golang-migrate, so require it here too.
-  const migrations = entities.length > 0 && !/mongo|dynamo|redis/i.test(config.database);
+  // cmd/migrate + internal/db/migrate.go are emitted later by db/migrations.ts
+  // (SQL stacks with entities) and import golang-migrate (not on SQLite), so
+  // require it here too.
+  const migrations = entities.length > 0 && !/mongo|dynamo|redis|sqlite/i.test(config.database);
   files.push({ path: "go.mod", content: goMod(module, files, migrations ? ["github.com/golang-migrate/migrate/v4"] : []) });
 
   return files;
@@ -1803,20 +1805,16 @@ ${lines.join("\n")}
 `;
 }
 function goModels(module: string, entities: Entity[]): string {
-  const needsTime = entities.some((e) =>
-    e.fields.some((f) => f.type === "date" || f.name === "createdAt" || f.name === "updatedAt")
-  );
   const needsJSON = entities.some((e) => e.fields.some((f) => f.type === "json"));
 
+  // gorm is only referenced by the uuid BeforeCreate hook; time by CreatedAt/UpdatedAt (always present).
   const needsUUID = entities.some((e) => e.fields.some((f) => f.primaryKey && f.type === "uuid"));
-  const imports = [
-    needsTime ? `\t"time"\n` : "",
+  const ext = [
     needsUUID ? `\t"github.com/google/uuid"` : "",
     needsJSON ? `\t"gorm.io/datatypes"` : "",
-    `\t"gorm.io/gorm"`,
-  ]
-    .filter(Boolean)
-    .join("\n");
+    needsUUID ? `\t"gorm.io/gorm"` : "",
+  ].filter(Boolean);
+  const imports = [`\t"time"`, ext.join("\n")].filter(Boolean).join("\n\n");
 
   const structs = entities
     .map((e) => {
@@ -1824,7 +1822,8 @@ function goModels(module: string, entities: Entity[]): string {
         [toPascal(f.name), goFieldType(f.type), `\`${buildGORMTags(f)} json:"${f.name}"\``]);
       if (!e.fields.some((f) => f.name === "createdAt")) rows.push(["CreatedAt", "time.Time"]);
       if (!e.fields.some((f) => f.name === "updatedAt")) rows.push(["UpdatedAt", "time.Time"]);
-      if (!e.fields.some((f) => f.name === "deletedAt")) rows.push(["DeletedAt", "gorm.DeletedAt", '`gorm:"index"`']);
+      // No gorm.DeletedAt: the migrations have no deleted_at column, and a soft
+      // delete would leave rows visible to the table-based pattern handlers.
       const fields = goAlignFields(rows);
       const uuidPk = e.fields.find((f) => f.primaryKey && f.type === "uuid");
       // UUIDs are assigned in Go so inserts behave the same on Postgres,
@@ -2085,6 +2084,12 @@ function goServerDeps(config: StackConfig, entities: Entity[], d: GoDeps): strin
   if (d.monitoring === "datadog") out.push(`\ts.closers = append(s.closers, monitoring.InitDatadog(cfg.AppName, log))`);
 
   if (d.needsGorm) {
+    // Schema first (internal/db/migrate.go, embedded migrations/*.sql): every
+    // replica runs it, golang-migrate's DB lock lets exactly one apply it.
+    if (entities.length > 0) out.push(`\tif err := db.Migrate(cfg.DatabaseURL); err != nil {
+\t\tlog.Error("migrate", "err", err)
+\t\tos.Exit(1)
+\t}`);
     out.push(`\tgormDB, err := db.OpenGorm(cfg.DatabaseURL)
 \tif err != nil {
 \t\tlog.Error("database", "err", err)
