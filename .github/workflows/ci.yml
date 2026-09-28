@@ -241,7 +241,10 @@ jobs:
             pip install -q pyflakes &&
             # Only undefined names fail the build: they are runtime NameErrors. Other pyflakes output is style.
             { python -m pyflakes . > /tmp/pyflakes.txt || true; } &&
-            ! grep "undefined name" /tmp/pyflakes.txt
+            ! grep "undefined name" /tmp/pyflakes.txt &&
+            # The generated suite must pass with no services: tests/conftest.py swaps in SQLite,
+            # in-memory cache / queue fakes and test-signed tokens. gRPC / GraphQL trees have no tests/.
+            if [ -d tests ]; then python -m pytest -q -p no:cacheprovider; fi
           } 2>&1 | tee -a /tmp/smoke.log
 
       - name: Setup Java

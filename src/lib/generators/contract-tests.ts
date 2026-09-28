@@ -3,6 +3,7 @@ import { isGraphqlSupported, safeName, toPascal } from "./types";
 import { goAuthMode, goDbKind } from "./go";
 import { kotlinContractTestFiles } from "./kotlin";
 import { javaContractTestFiles } from "./java";
+import { pythonContractTestFiles } from "./python";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -198,49 +199,6 @@ ${tests}
 `;
 }
 
-// ─── Python (pytest + httpx/TestClient) ──────────────────────────────────────
-
-function pythonContractTests(config: StackConfig, endpoints: Endpoint[]): string {
-  const isFastAPI = config.framework === "fastapi";
-
-  const header = isFastAPI
-    ? `from fastapi.testclient import TestClient
-from app.main import app
-
-client = TestClient(app)`
-    : `import httpx
-import pytest
-
-BASE_URL = "http://localhost:8000"`;
-
-  const tests = endpoints.map((ep) => {
-    const method = ep.method.toLowerCase();
-    const testPath = pathToParam(ep.path);
-    const status = expectedStatus(ep.method, ep.auth);
-    const auth = ep.auth ? ', headers={"Authorization": "Bearer test-token"}' : "";
-    const body = ["post", "put", "patch"].includes(method) ? ", json={}" : "";
-    const clientCall = isFastAPI
-      ? `client.${method}("${testPath}"${auth}${body})`
-      : `httpx.${method}(f"{BASE_URL}${testPath}"${auth}${body})`;
-
-    return `
-def test_${method}_${ep.path.replace(/[/:]/g, "_").replace(/^_/, "").replace(/_+/g, "_")}():
-    """${ep.summary}"""
-    response = ${clientCall}
-    assert response.status_code == ${status}
-    assert "application/json" in response.headers.get("content-type", "")
-`;
-  }).join("\n");
-
-  return `"""API contract tests for ${safeName(config.name)}.
-
-Run with: pytest tests/test_contracts.py -v
-"""
-${header}
-
-${tests}`;
-}
-
 // ─── Rust (axum test helpers) ─────────────────────────────────────────────────
 
 function rustContractTests(config: StackConfig, endpoints: Endpoint[]): string {
@@ -281,6 +239,8 @@ export function contractTestFiles(
   // Kotlin covers entity CRUD routes too, so it doesn't need user endpoints.
   if (config.language === "kotlin") return kotlinContractTestFiles(config, endpoints, entities);
   if (config.language === "java") return javaContractTestFiles(config, endpoints, entities);
+  // Python's tests run against conftest.py's fakes and seed entities themselves.
+  if (config.language === "python") return pythonContractTestFiles(config, endpoints, entities);
   if (endpoints.length === 0) return [];
 
   switch (config.language) {
@@ -290,8 +250,6 @@ export function contractTestFiles(
       // gRPC / GraphQL stacks have no internal/server HTTP router to test.
       if (config.api === "grpc" || (config.api === "graphql" && isGraphqlSupported("go"))) return [];
       return [{ path: "internal/api/contract/contract_test.go", content: goContractTests(config, endpoints) }];
-    case "python":
-      return [{ path: "tests/test_contracts.py", content: pythonContractTests(config, endpoints) }];
     case "rust":
       return [{ path: "tests/contract_tests.rs", content: rustContractTests(config, endpoints) }];
     default:

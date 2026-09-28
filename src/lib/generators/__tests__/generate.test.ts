@@ -1861,7 +1861,7 @@ describe("Every deployment target gets a real CI deploy job", () => {
     // Every `import dev.helios.app.…` points at a generated class — a missing file only shows up at `mvn compile`.
     for (const framework of JAVA) {
       for (const queue of queues.map((o) => o.id)) {
-        const g = javaGen(framework, { queue }, [...SAMPLE_ENDPOINTS, ...eps]);
+        const g = javaGen(framework, { queue }, [...eps, ...SAMPLE_ENDPOINTS]);
         for (const f of g.files.filter((x) => x.path.endsWith(".java"))) {
           for (const [, cls] of f.content.matchAll(/^import (dev\.helios\.app\.[\w.]+);$/gm)) {
             assert.ok(g.get(`src/main/java/${cls.replace(/\./g, "/")}.java`), `${framework}/${queue}: ${f.path} imports missing ${cls}`);
@@ -2296,5 +2296,67 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.match(main, /__mapper__\.column_attrs/, "responses serialize by attribute (JSON) name, not ORM objects or DB column names");
     // Without crud_* patterns the router remains the entity's only CRUD surface.
     assert.ok(gen({ language: "python", framework: "fastapi", auth: "none", database: "postgres" }, [], user).get("app/routers/user.py"));
+  });
+  // The migrations create DOUBLE PRECISION / DOUBLE / REAL for number fields, but the
+  // models said Integer (and the routers int), silently truncating 1.5 → 1.
+  it("python: number fields are Float columns / float bodies, matching the migration", () => {
+    const post = [{ id: "e1", name: "Post", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "score", type: "number" as const, required: true, unique: false },
+    ] }];
+    for (const database of ["postgres", "mysql", "sqlite"]) {
+      const g = gen({ language: "python", framework: "fastapi", database }, [], post);
+      assert.match(g.get("app/models.py")!, /score = Column\(Float\)/, database);
+      assert.doesNotMatch(g.get("app/models.py")!, /Integer/, `${database}: no integer column for a number field`);
+      assert.match(g.get("app/routers/post.py")!, /score: float$/m, database);
+    }
+  });
+  // The generated suite failed ~18 tests without Redis / a broker / an IdP, and Litestar /
+  // Django tests called http://localhost:8000. It must run hermetically and still check behaviour.
+  it("python: generated pytest suite is hermetic yet exercises the real auth, DB and queue paths", () => {
+    const smokeUser = [{ id: "e1", name: "User", fields: [
+      { id: "f1", name: "id", type: "uuid" as const, required: true, unique: true, primaryKey: true },
+      { id: "f2", name: "email", type: "string" as const, required: true, unique: true },
+    ] }];
+    const eps = ([["GET", "/users/:id", "crud_get", true], ["GET", "/users/search", "paginated_search", false],
+      ["POST", "/notifications", "send_notification", true], ["GET", "/auth/me", "auth_me", true], ["POST", "/auth/login", "auth_login", false]] as const)
+      .map(([method, path, pattern, auth], i) => ({ id: `p${i}`, method, path, summary: pattern, auth, pattern }));
+    for (const framework of ["fastapi", "litestar", "django"]) {
+      for (const auth of ["clerk", "none"]) {
+        const g = gen({ language: "python", framework, auth, queue: "kafka", cache: "redis" }, [...eps, ...SAMPLE_ENDPOINTS], smokeUser);
+        const conf = g.get("tests/conftest.py")!;
+        const tests = g.get("tests/test_contracts.py")!;
+        const at = (s: string) => conf.indexOf(s);
+        const appImport = Math.max(at("from app.main import"), at("import app.main"));
+        assert.ok(at('os.environ["DATABASE_URL"] = "sqlite:///"') >= 0 && at('os.environ["DATABASE_URL"]') < appImport, `${framework}: SQLite env is set before the app is imported`);
+        // Fakes go in through the app's module-level seams, before main.py binds the names.
+        assert.ok(at("cache.redis_client = FakeRedis()") > 0 && at("cache.redis_client = FakeRedis()") < appImport);
+        assert.match(conf, /broker\.connect, broker\.close, broker\.ping, broker\.publish = /);
+        if (auth === "clerk") {
+          // Verification stays on: only the key lookup is swapped, jwt.decode still checks signature + issuer.
+          assert.match(conf, /auth\._jwks_client = lambda: _TestJWKS\(\)/);
+          assert.match(conf, /algorithm="RS256"/);
+          assert.doesNotMatch(conf + g.get("app/auth.py")!, /verify_signature.*False/);
+          assert.match(tests, /status_code == 501/, "credential routes are the provider's");
+        } else {
+          assert.match(conf, /os\.environ\["JWT_SECRET"\] = /);
+          assert.match(conf, /auth\.create_access_token\(sub\)/);
+          assert.match(tests, /auth\.verify_token\(res\.json\(\)\["token"\]\)\["sub"\] == user_id/, "login issues a token for that user");
+        }
+        assert.match(tests, /def test_get_users_id_requires_token\(client\):\n.*status_code == 401\n.*Bearer not-a-valid-token.*status_code == 401/);
+        assert.match(tests, /assert published_messages == \[\("notifications", body\)\]/, "the publisher really hands off");
+        assert.match(tests, /assert res\.json\(\)\["id"\] == user_id/, "GET round-trips a seeded row");
+        assert.doesNotMatch(tests, /localhost|Bearer test-token/, "no live server, no fake-accepted token");
+      }
+    }
+    // FastAPI: "/users/search" must be registered before "/users/{id}" or the guarded id route swallows it.
+    const main = gen({ language: "python", framework: "fastapi", auth: "none" }, eps, smokeUser).get("app/main.py")!;
+    assert.ok(main.indexOf('@app.get("/users/search"') < main.indexOf('@app.get("/users/{id}"'));
+    // FastAPI plain routes marked auth:true were served with no guard (Litestar / Django guard them).
+    const plain = gen({ language: "python", framework: "fastapi", auth: "clerk" }).get("app/main.py")!;
+    assert.match(plain, /@app\.get\("\/users", dependencies=\[Depends\(auth_required\)\]\)/);
+    // gRPC / GraphQL trees serve no REST routes, so they ship no REST tests (CI runs pytest only when tests/ exists).
+    for (const api of ["grpc", "graphql"])
+      assert.ok(!gen({ language: "python", framework: "fastapi", api }, [...eps, ...SAMPLE_ENDPOINTS], smokeUser).files.some((f) => f.path.startsWith("tests/")), api);
   });
 });

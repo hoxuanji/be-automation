@@ -304,27 +304,34 @@ ${filter ? `    if q:\n        query = query.filter(${filter})\n` : ""}    if cu
     return {"data": [_row(i) for i in items], "next_cursor": next_cursor, "has_more": has_more}`;
 }
 
-function aggregateStats(table: string): string {
+// Row counts per period over the entity's created timestamp. Portable across
+// Postgres / MySQL / SQLite because the bucketing happens in Python.
+function aggregateStats(m: PyModel): string {
+  const col = `${m.name}.${m.created}`;
   return `async def handler(
     group_by: str = Query("day"),
     from_date: Optional[str] = Query(None, alias="from"),
     to_date: Optional[str] = Query(None, alias="to"),
     db: Session = Depends(get_db),
 ):
-    # Raw SQL for flexible aggregation — adapt to your schema
-    sql = text("""
-        SELECT DATE_TRUNC(:period, created_at) AS period,
-               COUNT(*) AS count,
-               COALESCE(SUM(amount), 0) AS total
-        FROM ${table}
-        WHERE (:from_date IS NULL OR created_at >= :from_date::timestamptz)
-          AND (:to_date IS NULL OR created_at <= :to_date::timestamptz)
-        GROUP BY period
-        ORDER BY period DESC
-    """)
-    result = db.execute(sql, {"period": group_by, "from_date": from_date, "to_date": to_date})
-    rows = [dict(r._mapping) for r in result]
-    return {"data": rows}`;
+    formats = {"hour": "%Y-%m-%dT%H:00", "day": "%Y-%m-%d", "month": "%Y-%m", "year": "%Y"}
+    if group_by not in formats:
+        raise HTTPException(status_code=422, detail="group_by must be one of: " + ", ".join(formats))
+    query = db.query(${col})
+    try:
+        if from_date:
+            query = query.filter(${col} >= datetime.fromisoformat(from_date))
+        if to_date:
+            query = query.filter(${col} <= datetime.fromisoformat(to_date))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="from / to must be ISO-8601 datetimes")
+    # ponytail: buckets in Python (one pass over the timestamps); push the GROUP BY into SQL when tables get large.
+    counts: dict = {}
+    for (ts,) in query.yield_per(1000):
+        if ts is not None:
+            key = ts.strftime(formats[group_by])
+            counts[key] = counts.get(key, 0) + 1
+    return {"data": [{"period": k, "count": v} for k, v in sorted(counts.items(), reverse=True)]}`;
 }
 
 function sendNotification(config: StackConfig): string {
@@ -393,30 +400,38 @@ function customHandler(e: Endpoint): string {
 
 const DB_PATTERNS = new Set(["crud_list", "crud_get", "crud_create", "crud_update", "crud_delete", "paginated_search", "aggregate_stats"]);
 const CREDENTIAL_PATTERNS = new Set(["auth_login", "auth_register", "auth_refresh", "auth_change_password"]);
+const KNOWN_PATTERNS = new Set([...DB_PATTERNS, ...CREDENTIAL_PATTERNS, "auth_me", "auth_logout", "health_check", "webhook_receive", "file_upload", "send_notification", "cache_read"]);
 
-function patternBody(e: Endpoint, config: StackConfig, entities: Entity[], mode: PyAuthMode): string {
+/** What a pattern route does once generated — patternBody and the Python contract tests both read this. */
+export type PyPatternKind = PatternId | "provider_managed" | "no_entity" | "no_user" | "custom";
+
+export function pyPatternPlan(e: Endpoint, entities: Entity[], mode: PyAuthMode): { kind: PyPatternKind; entity?: Entity } {
   const pattern = e.pattern as PatternId | undefined;
-  const table = inferTableName(e.path);
-  const params = pathParams(e.path);
-  const param = params[params.length - 1] ?? "id";
   const entity = resolveEntity(e.path, entities);
-  const m = entity && pyModel(entity);
-  const hasDb = entities.length > 0;
-
   // Token design (mirrors Go): with an external provider auth_required verifies
   // provider-issued tokens via JWKS, so this service must not mint its own —
   // credential endpoints answer 501 and auth_me reads the provider's claims.
-  if (mode === "jwks" && CREDENTIAL_PATTERNS.has(pattern ?? "")) {
-    return `async def handler():
+  if (mode === "jwks" && CREDENTIAL_PATTERNS.has(pattern ?? "")) return { kind: "provider_managed" };
+  if (DB_PATTERNS.has(pattern ?? "") && !entity) return { kind: "no_entity" };
+  if ((pattern === "auth_login" || pattern === "auth_register" || pattern === "auth_change_password") && !selfAuthUser(entities)) return { kind: "no_user" };
+  if (!pattern || !KNOWN_PATTERNS.has(pattern)) return { kind: "custom" };
+  return { kind: pattern, entity };
+}
+
+function patternBody(e: Endpoint, config: StackConfig, entities: Entity[], mode: PyAuthMode): string {
+  const table = inferTableName(e.path);
+  const params = pathParams(e.path);
+  const param = params[params.length - 1] ?? "id";
+  const { kind, entity } = pyPatternPlan(e, entities, mode);
+  const m = entity && pyModel(entity);
+  const user = selfAuthUser(entities);
+
+  switch (kind) {
+    case "provider_managed": return `async def handler():
     # Credentials are managed by ${config.auth}; tokens minted here would fail JWKS verification.
     raise HTTPException(status_code=501, detail="handled_by_${config.auth}")`;
-  }
-  if (pattern === "aggregate_stats" && !hasDb) return NO_ENTITY;
-  if (DB_PATTERNS.has(pattern ?? "") && pattern !== "aggregate_stats" && !m) return NO_ENTITY;
-  const user = selfAuthUser(entities);
-  if ((pattern === "auth_login" || pattern === "auth_register" || pattern === "auth_change_password") && !user) return NO_USER;
-
-  switch (pattern) {
+    case "no_entity":    return NO_ENTITY;
+    case "no_user":      return NO_USER;
     case "crud_list":    return crudList(m!);
     case "crud_get":     return crudGet(m!, param);
     case "crud_create":  return crudCreate(m!);
@@ -428,11 +443,11 @@ function patternBody(e: Endpoint, config: StackConfig, entities: Entity[], mode:
     case "auth_logout":  return authLogout();
     case "auth_refresh": return authRefresh();
     case "auth_change_password": return authChangePassword();
-    case "health_check": return healthCheck(config, hasDb);
+    case "health_check": return healthCheck(config, entities.length > 0);
     case "webhook_receive": return webhookReceive(config);
     case "file_upload":  return fileUpload();
     case "paginated_search": return paginatedSearch(m!);
-    case "aggregate_stats":  return aggregateStats(table);
+    case "aggregate_stats":  return aggregateStats(m!);
     case "send_notification": return sendNotification(config);
     case "cache_read":   return cacheRead(table, param, entity, pyHasRedis(config));
     default:             return customHandler(e);
@@ -623,7 +638,7 @@ function importLines(code: string, fw: "fastapi" | NativeFw, entities: Entity[])
   if (uses(/\bhmac_lib\b/)) lines.push("import hmac as hmac_lib", "import hashlib", "import os");
   if (fw === "fastapi" && uses(/\bUploadFile\b/)) lines.push("from fastapi import UploadFile");
   if (uses(/\buuid4\(/)) lines.push("from uuid import uuid4");
-  if (uses(/\bdatetime\.utcnow\(|_fields\(/)) lines.push("from datetime import datetime");
+  if (uses(/\bdatetime\.(utcnow|fromisoformat)\(|_fields\(/)) lines.push("from datetime import datetime");
   if (uses(/_fields\(/)) lines.push("from sqlalchemy import DateTime");
   if (uses(/\bbcrypt\./)) lines.push("import bcrypt");
   if (uses(/\bjwt\./)) lines.push("import jwt");
