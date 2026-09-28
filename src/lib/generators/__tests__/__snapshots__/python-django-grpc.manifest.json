@@ -56,8 +56,8 @@
   },
   {
     "path": "app/db.py",
-    "lines": 80,
-    "size": 2561
+    "lines": 81,
+    "size": 2903
   },
   {
     "path": "app/interceptors.py",
@@ -72,7 +72,7 @@
   {
     "path": "app/models.py",
     "lines": 30,
-    "size": 1030
+    "size": 1066
   },
   {
     "path": "app/services/__init__.py",
@@ -87,12 +87,12 @@
   {
     "path": "app/services/post.py",
     "lines": 105,
-    "size": 3298
+    "size": 3356
   },
   {
     "path": "app/services/user.py",
     "lines": 107,
-    "size": 3500
+    "size": 3558
   },
   {
     "path": "app/tracing.py",
@@ -228,10 +228,5 @@
     "path": "sdk/test-app-client.ts",
     "lines": 76,
     "size": 2035
-  },
-  {
-    "path": "tests/test_contracts.py",
-    "lines": 44,
-    "size": 1417
   }
 ]
