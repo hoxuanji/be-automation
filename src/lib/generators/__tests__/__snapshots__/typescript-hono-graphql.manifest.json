@@ -145,14 +145,19 @@
     "size": 2035
   },
   {
+    "path": "src/app.ts",
+    "lines": 53,
+    "size": 1927
+  },
+  {
     "path": "src/cache.ts",
     "lines": 7,
     "size": 220
   },
   {
     "path": "src/main.ts",
-    "lines": 77,
-    "size": 3013
+    "lines": 32,
+    "size": 1326
   },
   {
     "path": "src/queue.ts",
@@ -215,18 +220,13 @@
     "size": 1505
   },
   {
-    "path": "tests/api.contract.test.ts",
-    "lines": 61,
-    "size": 1623
-  },
-  {
     "path": "tsconfig.json",
     "lines": 27,
     "size": 490
   },
   {
     "path": "vitest.config.ts",
-    "lines": 8,
-    "size": 139
+    "lines": 10,
+    "size": 250
   }
 ]

@@ -205,11 +205,6 @@
     "size": 650
   },
   {
-    "path": "tests/api.contract.test.ts",
-    "lines": 64,
-    "size": 1777
-  },
-  {
     "path": "tsconfig.json",
     "lines": 18,
     "size": 327

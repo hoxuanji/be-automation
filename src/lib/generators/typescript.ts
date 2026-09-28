@@ -20,7 +20,7 @@ function tsMockField(name: string, type: FieldType): string {
   }
 }
 
-function tsSendBody(nonPkFields: EntityField[]): string {
+export function tsSendBody(nonPkFields: EntityField[]): string {
   const required = nonPkFields.filter((f) => f.required).slice(0, 4);
   const fields = required.length ? required : nonPkFields.slice(0, 2);
   return `{ ${fields.map((f) => tsMockField(f.name, f.type)).join(", ")} }`;
@@ -79,7 +79,7 @@ export function typescriptFiles(
     files.push(...prismaFiles(config, entities, authCredentialEntities(config, endpoints, entities).length > 0));
     files.push({ path: "src/db.ts", content: `import { PrismaClient } from "@prisma/client";\n\nexport const prisma = new PrismaClient();\n` });
   }
-  files.push(...entityCrudFiles(config, routerEntities(endpoints, entities)));
+  files.push(...entityCrudFiles(config, endpoints, entities));
   if (config.tracing) files.push({ path: "src/tracing.ts", content: tracingFile(name) });
   if (hasRedis(config)) files.push({ path: "src/cache.ts", content: cacheFile() });
   files.push(...tsQueueFiles(config));
@@ -129,6 +129,12 @@ export const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379"
 `;
 }
 
+const indent = (code: string) => code.replace(/^(?=.)/gm, "  ");
+
+// Handles src/app.ts uses; main.ts's preamble initializes them before app.ts loads.
+const tsAppObsImports = (c: StackConfig) =>
+  `${hasSentry(c) ? `import * as Sentry from "@sentry/node";\n` : ""}${hasProm(c) ? `import { register } from "prom-client";\n` : ""}`;
+
 // Lines that must run before anything else in main.ts: tracing first, then
 // APM / error-tracking agents, then the metrics registry.
 function tsInstrumentPreamble(c: StackConfig): string {
@@ -159,12 +165,53 @@ function routerEntities(endpoints: Endpoint[], entities: Entity[]): Entity[] {
   return entities.filter((e) => !served.has(e.id));
 }
 
-function entityCrudFiles(config: StackConfig, entities: Entity[]): GeneratedFile[] {
+// Routes each generic entity router serves under /<kebab>s.
+const ENTITY_ROUTES = { list: ["GET", ""], get: ["GET", "/:id"], create: ["POST", ""], update: ["PATCH", "/:id"], remove: ["DELETE", "/:id"] } as const;
+export type EntityOp = keyof typeof ENTITY_ROUTES;
+const routeShape = (method: string, path: string) => `${method} ${path.replace(/:[^/]+/g, ":").replace(/(.)\/$/, "$1")}`;
+
+/** The entity-router route a plain (non-pattern) endpoint duplicates. The entity route
+ *  implements the real behavior, so it owns the method+path and the stub is not
+ *  registered (Fastify refuses duplicates at boot; the others would shadow one). */
+export function tsEntityRouteFor(e: Endpoint, endpoints: Endpoint[], entities: Entity[]): { entity: Entity; op: EntityOp } | undefined {
+  if (e.pattern) return undefined;
+  for (const entity of routerEntities(endpoints, entities)) {
+    for (const [op, [method, suffix]] of Object.entries(ENTITY_ROUTES)) {
+      if (routeShape(e.method, e.path) === routeShape(method, `/${toKebab(entity.name)}s${suffix}`)) return { entity, op: op as EntityOp };
+    }
+  }
+  return undefined;
+}
+
+// Entity routes that inherit auth from the stub they replace — the stricter auth wins.
+// Express guards e.auth even with auth "off" (fail closed), like its stubs.
+function entityGuardedOps(config: StackConfig, endpoints: Endpoint[], entities: Entity[], entity: Entity): Set<EntityOp> {
+  const mode = tsAuthMode(config, endpoints);
+  return new Set(endpoints.flatMap((e) => {
+    const owner = tsEntityRouteFor(e, endpoints, entities);
+    return owner?.entity === entity && (tsGuarded(e, mode) || (config.framework === "express" && e.auth)) ? [owner.op] : [];
+  }));
+}
+
+/** Endpoints each framework registers itself: entity-owned stubs dropped, then static
+ *  segments before params (GET /users/search before GET /users/:id) — Express, Hono and
+ *  Nest match in registration order. Stable, so otherwise the user's order is kept. */
+function routedEndpoints(endpoints: Endpoint[], entities: Entity[]): Endpoint[] {
+  const shape = (e: Endpoint) => e.path.split("/").filter(Boolean).map((s) => (s.startsWith(":") ? 1 : 0));
+  const cmp = (a: number[], b: number[]): number => {
+    for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i];
+    return a.length - b.length;
+  };
+  return endpoints.filter((e) => !tsEntityRouteFor(e, endpoints, entities)).sort((a, b) => cmp(shape(a), shape(b)));
+}
+
+function entityCrudFiles(config: StackConfig, endpoints: Endpoint[], allEntities: Entity[]): GeneratedFile[] {
   const files: GeneratedFile[] = [];
   // No Prisma → in-memory repository so the app still builds and runs.
-  const isMongo = !usesPrisma(config, entities);
+  const isMongo = !usesPrisma(config, allEntities);
 
-  for (const entity of entities) {
+  for (const entity of routerEntities(endpoints, allEntities)) {
+    const guarded = entityGuardedOps(config, endpoints, allEntities, entity);
     const pascal = entity.name;
     const kebab = toKebab(entity.name);
     const camel = toCamel(entity.name);
@@ -188,7 +235,7 @@ function entityCrudFiles(config: StackConfig, entities: Entity[]): GeneratedFile
     if (config.framework === "nestjs") {
       files.push({
         path: `src/modules/${kebab}/${kebab}.controller.ts`,
-        content: nestControllerFile(pascal, camel, kebab),
+        content: nestControllerFile(pascal, camel, kebab, guarded),
       });
       files.push({
         path: `src/modules/${kebab}/${kebab}.service.ts`,
@@ -201,17 +248,17 @@ function entityCrudFiles(config: StackConfig, entities: Entity[]): GeneratedFile
     } else if (config.framework === "express") {
       files.push({
         path: `src/routes/${kebab}.router.ts`,
-        content: expressRouterFile(pascal, camel, kebab),
+        content: expressRouterFile(pascal, camel, kebab, guarded),
       });
     } else if (config.framework === "fastify") {
       files.push({
         path: `src/routes/${kebab}.route.ts`,
-        content: fastifyRouteFile(pascal, camel, kebab),
+        content: fastifyRouteFile(pascal, camel, kebab, guarded),
       });
     } else {
       files.push({
         path: `src/routes/${kebab}.route.ts`,
-        content: honoRouteFile(pascal, camel, kebab),
+        content: honoRouteFile(pascal, camel, kebab, guarded),
       });
     }
 
@@ -219,7 +266,7 @@ function entityCrudFiles(config: StackConfig, entities: Entity[]): GeneratedFile
       path: config.framework === "nestjs"
         ? `src/modules/${kebab}/${kebab}.controller.spec.ts`
         : `src/routes/${kebab}.${config.framework === "express" ? "router" : "route"}.test.ts`,
-      content: testFile(config.framework, pascal, camel, kebab, nonPkFields),
+      content: testFile(config.framework, pascal, camel, kebab, nonPkFields, guarded.size > 0),
     });
   }
 
@@ -378,15 +425,16 @@ export async function delete${pascal}(id: string): Promise<void> {
 `;
 }
 
-function expressRouterFile(pascal: string, camel: string, kebab: string): string {
+function expressRouterFile(pascal: string, camel: string, kebab: string, guarded: Set<EntityOp>): string {
+  const g = (op: EntityOp) => (guarded.has(op) ? "authRequired, " : "");
   return `import { Router } from "express";
 import { validate${pascal}Body, validate${pascal}Query } from "../validators/${kebab}.validator";
 import * as service from "../services/${kebab}.service";
-
+${guarded.size ? `import { authRequired } from "../middleware/auth";\n` : ""}
 export function create${pascal}Router(): Router {
   const router = Router();
 
-  router.get("/", async (req, res) => {
+  router.get("/", ${g("list")}async (req, res) => {
     try {
       const q = validate${pascal}Query(req.query);
       const result = await service.list${pascal}(q);
@@ -396,13 +444,13 @@ export function create${pascal}Router(): Router {
     }
   });
 
-  router.get("/:id", async (req, res) => {
+  router.get("/:id", ${g("get")}async (req, res) => {
     const item = await service.get${pascal}ById(req.params.id);
     if (!item) return res.status(404).json({ error: "not found" });
     res.json(item);
   });
 
-  router.post("/", async (req, res) => {
+  router.post("/", ${g("create")}async (req, res) => {
     try {
       const data = validate${pascal}Body(req.body);
       const item = await service.create${pascal}(data);
@@ -412,7 +460,7 @@ export function create${pascal}Router(): Router {
     }
   });
 
-  router.patch("/:id", async (req, res) => {
+  router.patch("/:id", ${g("update")}async (req, res) => {
     try {
       const data = validate${pascal}Body(req.body);
       const item = await service.update${pascal}(req.params.id, data);
@@ -423,7 +471,7 @@ export function create${pascal}Router(): Router {
     }
   });
 
-  router.delete("/:id", async (req, res) => {
+  router.delete("/:id", ${g("remove")}async (req, res) => {
     await service.delete${pascal}(req.params.id);
     res.status(204).end();
   });
@@ -433,24 +481,25 @@ export function create${pascal}Router(): Router {
 `;
 }
 
-function fastifyRouteFile(pascal: string, _camel: string, kebab: string): string {
+function fastifyRouteFile(pascal: string, _camel: string, kebab: string, guarded: Set<EntityOp>): string {
+  const g = (op: EntityOp) => (guarded.has(op) ? "{ preHandler: authRequired }, " : "");
   return `import type { FastifyInstance } from "fastify";
 import { validate${pascal}Body, validate${pascal}Query } from "../validators/${kebab}.validator";
 import * as service from "../services/${kebab}.service";
-
+${guarded.size ? `import { authRequired } from "../middleware/auth";\n` : ""}
 export async function ${toCamel(pascal)}Routes(app: FastifyInstance) {
-  app.get("/", async (req, reply) => {
+  app.get("/", ${g("list")}async (req, reply) => {
     const q = validate${pascal}Query(req.query);
     return service.list${pascal}(q);
   });
 
-  app.get<{ Params: { id: string } }>("/:id", async (req, reply) => {
+  app.get<{ Params: { id: string } }>("/:id", ${g("get")}async (req, reply) => {
     const item = await service.get${pascal}ById(req.params.id);
     if (!item) return reply.status(404).send({ error: "not found" });
     return item;
   });
 
-  app.post("/", async (req, reply) => {
+  app.post("/", ${g("create")}async (req, reply) => {
     try {
       const data = validate${pascal}Body(req.body);
       const item = await service.create${pascal}(data);
@@ -460,7 +509,7 @@ export async function ${toCamel(pascal)}Routes(app: FastifyInstance) {
     }
   });
 
-  app.patch<{ Params: { id: string } }>("/:id", async (req, reply) => {
+  app.patch<{ Params: { id: string } }>("/:id", ${g("update")}async (req, reply) => {
     try {
       const data = validate${pascal}Body(req.body);
       const item = await service.update${pascal}(req.params.id, data);
@@ -471,7 +520,7 @@ export async function ${toCamel(pascal)}Routes(app: FastifyInstance) {
     }
   });
 
-  app.delete<{ Params: { id: string } }>("/:id", async (req, reply) => {
+  app.delete<{ Params: { id: string } }>("/:id", ${g("remove")}async (req, reply) => {
     await service.delete${pascal}(req.params.id);
     return reply.status(204).send();
   });
@@ -479,25 +528,26 @@ export async function ${toCamel(pascal)}Routes(app: FastifyInstance) {
 `;
 }
 
-function honoRouteFile(pascal: string, _camel: string, kebab: string): string {
+function honoRouteFile(pascal: string, _camel: string, kebab: string, guarded: Set<EntityOp>): string {
+  const g = (op: EntityOp) => (guarded.has(op) ? "authRequired, " : "");
   return `import { Hono } from "hono";
 import { validate${pascal}Body, validate${pascal}Query } from "../validators/${kebab}.validator";
 import * as service from "../services/${kebab}.service";
-
+${guarded.size ? `import { authRequired } from "../middleware/auth";\n` : ""}
 export const ${toCamel(pascal)}Routes = new Hono();
 
-${toCamel(pascal)}Routes.get("/", async (c) => {
+${toCamel(pascal)}Routes.get("/", ${g("list")}async (c) => {
   const q = validate${pascal}Query(c.req.query());
   return c.json(await service.list${pascal}(q));
 });
 
-${toCamel(pascal)}Routes.get("/:id", async (c) => {
+${toCamel(pascal)}Routes.get("/:id", ${g("get")}async (c) => {
   const item = await service.get${pascal}ById(c.req.param("id"));
   if (!item) return c.json({ error: "not found" }, 404);
   return c.json(item);
 });
 
-${toCamel(pascal)}Routes.post("/", async (c) => {
+${toCamel(pascal)}Routes.post("/", ${g("create")}async (c) => {
   try {
     const data = validate${pascal}Body(await c.req.json());
     const item = await service.create${pascal}(data);
@@ -507,7 +557,7 @@ ${toCamel(pascal)}Routes.post("/", async (c) => {
   }
 });
 
-${toCamel(pascal)}Routes.patch("/:id", async (c) => {
+${toCamel(pascal)}Routes.patch("/:id", ${g("update")}async (c) => {
   try {
     const data = validate${pascal}Body(await c.req.json());
     const item = await service.update${pascal}(c.req.param("id"), data);
@@ -518,45 +568,51 @@ ${toCamel(pascal)}Routes.patch("/:id", async (c) => {
   }
 });
 
-${toCamel(pascal)}Routes.delete("/:id", async (c) => {
+${toCamel(pascal)}Routes.delete("/:id", ${g("remove")}async (c) => {
   await service.delete${pascal}(c.req.param("id"));
   return c.body(null, 204);
 });
 `;
 }
 
-function nestControllerFile(pascal: string, _camel: string, kebab: string): string {
-  return `import { Controller, Get, Post, Patch, Delete, Param, Body, Query, HttpCode } from "@nestjs/common";
+function nestControllerFile(pascal: string, _camel: string, kebab: string, guarded: Set<EntityOp>): string {
+  const g = (op: EntityOp) => (guarded.has(op) ? "  @UseGuards(JwtAuthGuard)\n" : "");
+  return `import { Controller, Get, Post, Patch, Delete, Param, Body, Query, HttpCode, Inject, NotFoundException${guarded.size ? ", UseGuards" : ""} } from "@nestjs/common";
 import { ${pascal}NestService } from "./${kebab}.service";
 import { validate${pascal}Body, validate${pascal}Query } from "../../validators/${kebab}.validator";
-
+${guarded.size ? `import { JwtAuthGuard } from "../../auth/jwt.guard";\n` : ""}
 @Controller("${kebab}s")
 export class ${pascal}Controller {
-  constructor(private readonly svc: ${pascal}NestService) {}
+  // Explicit token: DI must not depend on emitDecoratorMetadata (esbuild/vitest don't emit it).
+  constructor(@Inject(${pascal}NestService) private readonly svc: ${pascal}NestService) {}
 
   @Get()
-  list(@Query() q: unknown) {
+${g("list")}  list(@Query() q: unknown) {
     return this.svc.list(validate${pascal}Query(q));
   }
 
   @Get(":id")
-  getById(@Param("id") id: string) {
-    return this.svc.getById(id);
+${g("get")}  async getById(@Param("id") id: string) {
+    const item = await this.svc.getById(id);
+    if (!item) throw new NotFoundException();
+    return item;
   }
 
   @Post()
-  create(@Body() body: unknown) {
+${g("create")}  create(@Body() body: unknown) {
     return this.svc.create(validate${pascal}Body(body));
   }
 
   @Patch(":id")
-  update(@Param("id") id: string, @Body() body: unknown) {
-    return this.svc.update(id, validate${pascal}Body(body));
+${g("update")}  async update(@Param("id") id: string, @Body() body: unknown) {
+    const item = await this.svc.update(id, validate${pascal}Body(body));
+    if (!item) throw new NotFoundException();
+    return item;
   }
 
   @Delete(":id")
   @HttpCode(204)
-  remove(@Param("id") id: string) {
+${g("remove")}  remove(@Param("id") id: string) {
     return this.svc.remove(id);
   }
 }
@@ -837,6 +893,8 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
+    // Repos without REST endpoints or entities (e.g. tRPC-only) have no tests yet.
+    passWithNoTests: true,
   },
 });
 `;
@@ -847,13 +905,21 @@ function testFile(
   pascal: string,
   camel: string,
   kebab: string,
-  nonPkFields: EntityField[]
+  nonPkFields: EntityField[],
+  guarded = false
 ): string {
   const mockFieldEntries = nonPkFields
     .slice(0, 4)
     .map((f) => tsMockField(f.name, f.type))
     .join(", ");
   const sendBody = tsSendBody(nonPkFields);
+  // vi.mock factories are hoisted above imports, so the fixture they close over must be too.
+  const mockItemDecl = `const { mockItem } = vi.hoisted(() => ({
+  mockItem: { id: "test-id-1", ${mockFieldEntries}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+}));`;
+  const passAuth = (impl: string) => guarded
+    ? `\n// Token checks are covered by tests/api.contract.test.ts; these tests exercise the routes.\nvi.mock("../middleware/auth", () => ({ authRequired: ${impl} }));\n`
+    : "";
 
   if (framework === "express") {
     return `import { describe, it, expect, vi } from "vitest";
@@ -861,8 +927,8 @@ import request from "supertest";
 import express from "express";
 import { create${pascal}Router } from "./${kebab}.router";
 
-const mockItem = { id: "test-id-1", ${mockFieldEntries}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-
+${mockItemDecl}
+${passAuth(`(_req: unknown, _res: unknown, next: () => void) => next()`)}
 vi.mock("../services/${kebab}.service", () => ({
   list${pascal}: vi.fn().mockResolvedValue({ items: [mockItem], total: 1, page: 1, pageSize: 20 }),
   get${pascal}ById: vi.fn().mockImplementation((id: string) =>
@@ -932,8 +998,8 @@ describe("${pascal} routes", () => {
 import Fastify from "fastify";
 import { ${camel}Routes } from "./${kebab}.route";
 
-const mockItem = { id: "test-id-1", ${mockFieldEntries}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-
+${mockItemDecl}
+${passAuth(`async () => {}`)}
 vi.mock("../services/${kebab}.service", () => ({
   list${pascal}: vi.fn().mockResolvedValue({ items: [mockItem], total: 1, page: 1, pageSize: 20 }),
   get${pascal}ById: vi.fn().mockImplementation((id: string) =>
@@ -1007,6 +1073,9 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { ${pascal}Controller } from "./${kebab}.controller";
 import { ${pascal}NestService } from "./${kebab}.service";
 
+// The Nest service is replaced below; keep its data layer (Prisma) out of the test.
+vi.mock("../../services/${kebab}.service", () => ({}));
+
 const mockItem = { id: "test-id-1", ${mockFieldEntries}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
 
 describe("${pascal}Controller", () => {
@@ -1062,8 +1131,8 @@ describe("${pascal}Controller", () => {
     return `import { describe, it, expect, vi } from "vitest";
 import { ${camel}Routes } from "./${kebab}.route";
 
-const mockItem = { id: "test-id-1", ${mockFieldEntries}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-
+${mockItemDecl}
+${passAuth(`async (_c: unknown, next: () => Promise<void>) => { await next(); }`)}
 vi.mock("../services/${kebab}.service", () => ({
   list${pascal}: vi.fn().mockResolvedValue({ items: [mockItem], total: 1, page: 1, pageSize: 20 }),
   get${pascal}ById: vi.fn().mockImplementation((id: string) =>
@@ -1175,7 +1244,7 @@ function nestjsFiles(config: StackConfig, endpoints: Endpoint[], entities: Entit
   // (Nest runs on platform-express), so both frameworks behave identically.
   const guarded = (e: Endpoint) => tsGuarded(e, mode);
   const guardLine = (e: Endpoint) => (guarded(e) ? "  @UseGuards(JwtAuthGuard)\n" : "");
-  const routes = endpoints
+  const routes = routedEndpoints(endpoints, entities)
     .map((e) =>
       e.pattern
         ? `  @${capMethod(e.method)}(${JSON.stringify(nestPath(e.path))})
@@ -1346,7 +1415,7 @@ export class JwtAuthGuard implements CanActivate {
 
 function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
   const mode = tsAuthMode(config, endpoints);
-  const routes = endpoints
+  const routes = routedEndpoints(endpoints, entities)
     .map((e) =>
       e.pattern
         ? tsPatternRoute(e, "express", config, entities, mode)
@@ -1364,44 +1433,10 @@ function expressFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
   return [
     {
       path: "src/main.ts",
-      content: `${tsInstrumentPreamble(config)}import express from "express";
-import helmet from "helmet";
-import cors from "cors";
-import pinoHttp from "pino-http";
-${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}${config.audit ? `import { auditLogger } from "./middleware/audit";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}import { authRequired } from "./middleware/auth";
-${entityImports ? entityImports + "\n" : ""}
-// Comma-separated list of origins in ALLOWED_ORIGINS, e.g.
-// "https://app.example.com,https://admin.example.com". Omit to keep CORS
-// locked to same-origin only.
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ?.split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-const app = express();
-app.disable("x-powered-by");
-app.use(helmet());
-if (allowedOrigins && allowedOrigins.length > 0) {
-  app.use(cors({ origin: allowedOrigins, credentials: true }));
-}
-// Explicit JSON size limit protects against resource-exhaustion payloads.
-app.use(express.json({ limit: "1mb" }));
-app.use(pinoHttp({
-  // JSON output (pino's default) is parseable by Loki / Datadog / CloudWatch
-  // without a text-to-JSON transform.
-  redact: ["req.headers.authorization", "req.headers.cookie"],
-}));
-${config.rateLimit ? "app.use(rateLimit);\n" : ""}${config.audit ? "app.use(auditLogger);\n" : ""}
-${tsQueueKind(config) ? `// Liveness: /health. Readiness (?ready=1) also pings the message queue.
-app.get("/health", async (req, res) => {
-  if (req.query.ready === undefined) { res.json({ ok: true }); return; }
-  try { await queuePing(); res.json({ ok: true, queue: "ok" }); }
-  catch { res.status(503).json({ ok: false, queue: "down" }); }
-});
-` : `app.get("/health", (_, res) => res.json({ ok: true }));
-`}${hasProm(config) ? `app.get("/metrics", async (_, res) => { res.set("Content-Type", register.contentType); res.end(await register.metrics()); });\n` : ""}${routes}
-${entityMounts}
-${hasSentry(config) ? "Sentry.setupExpressErrorHandler(app);\n" : ""}const port = Number(process.env.PORT ?? 8080);
+      content: `${tsInstrumentPreamble(config)}import { createApp } from "./app";
+${tsQueueKind(config) ? `import { closeQueue } from "./queue";\n` : ""}
+const app = createApp();
+const port = Number(process.env.PORT ?? 8080);
 const server = app.listen(port, () => console.log(JSON.stringify({ level: "info", msg: "listening", port })));
 
 // Graceful shutdown on SIGTERM — Kubernetes sends this before killing the pod.
@@ -1426,6 +1461,51 @@ ${tsQueueKind(config) ? "    await closeQueue().catch((e) => console.error(JSON.
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+`,
+    },
+    {
+      // The app without a listener: main.ts serves it, tests drive it in-process.
+      path: "src/app.ts",
+      content: `import express from "express";
+import helmet from "helmet";
+import cors from "cors";
+import pinoHttp from "pino-http";
+${tsAppObsImports(config)}${config.rateLimit ? `import { rateLimit } from "./middleware/rate-limit";\n` : ""}${config.audit ? `import { auditLogger } from "./middleware/audit";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}import { authRequired } from "./middleware/auth";
+${entityImports ? entityImports + "\n" : ""}
+// Comma-separated list of origins in ALLOWED_ORIGINS, e.g.
+// "https://app.example.com,https://admin.example.com". Omit to keep CORS
+// locked to same-origin only.
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ?.split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+export function createApp() {
+${indent(`const app = express();
+app.disable("x-powered-by");
+app.use(helmet());
+if (allowedOrigins && allowedOrigins.length > 0) {
+  app.use(cors({ origin: allowedOrigins, credentials: true }));
+}
+// Explicit JSON size limit protects against resource-exhaustion payloads.
+app.use(express.json({ limit: "1mb" }));
+app.use(pinoHttp({
+  // JSON output (pino's default) is parseable by Loki / Datadog / CloudWatch
+  // without a text-to-JSON transform.
+  redact: ["req.headers.authorization", "req.headers.cookie"],
+}));
+${config.rateLimit ? "app.use(rateLimit);\n" : ""}${config.audit ? "app.use(auditLogger);\n" : ""}
+${tsQueueKind(config) ? `// Liveness: /health. Readiness (?ready=1) also pings the message queue.
+app.get("/health", async (req, res) => {
+  if (req.query.ready === undefined) { res.json({ ok: true }); return; }
+  try { await queuePing(); res.json({ ok: true, queue: "ok" }); }
+  catch { res.status(503).json({ ok: false, queue: "down" }); }
+});
+` : `app.get("/health", (_, res) => res.json({ ok: true }));
+`}${hasProm(config) ? `app.get("/metrics", async (_, res) => { res.set("Content-Type", register.contentType); res.end(await register.metrics()); });\n` : ""}${routes}
+${entityMounts}
+${hasSentry(config) ? "Sentry.setupExpressErrorHandler(app);\n" : ""}return app;`)}
+}
 `,
     },
     {
@@ -1520,7 +1600,7 @@ export function rateLimit(req: Request, res: Response, next: NextFunction) {
 
 function fastifyFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
   const mode = tsAuthMode(config, endpoints);
-  const routes = endpoints
+  const routes = routedEndpoints(endpoints, entities)
     .map((e) =>
       e.pattern
         ? tsPatternRoute(e, "fastify", config, entities, mode)
@@ -1538,12 +1618,53 @@ function fastifyFiles(config: StackConfig, endpoints: Endpoint[], entities: Enti
   return [
     {
       path: "src/main.ts",
-      content: `${tsInstrumentPreamble(config)}import Fastify from "fastify";
-import helmet from "@fastify/helmet";
-${config.rateLimit ? `import rateLimit from "@fastify/rate-limit";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}${endpoints.some((e) => tsGuarded(e, mode)) ? `import { authRequired } from "./middleware/auth";\n` : ""}${entityImports ? entityImports + "\n" : ""}
+      content: `${tsInstrumentPreamble(config)}import { createApp } from "./app";
+
 async function main() {
+  const app = await createApp();
+  const port = Number(process.env.PORT ?? 8080);
+  await app.listen({ port, host: "0.0.0.0" });
+
+  // Graceful shutdown — Fastify's close() awaits in-flight requests and
+  // triggers all registered onClose hooks.
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.once(signal, async () => {
+      app.log.info({ signal }, "shutdown");
+      try {
+        await app.close();
+        process.exit(0);
+      } catch (err) {
+        app.log.error({ err }, "shutdown failed");
+        process.exit(1);
+      }
+    });
+  }
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+`,
+    },
+    {
+      // The app without a listener: main.ts serves it, tests drive it in-process.
+      path: "src/app.ts",
+      content: `import Fastify from "fastify";
+import helmet from "@fastify/helmet";
+${tsAppObsImports(config)}${config.rateLimit ? `import rateLimit from "@fastify/rate-limit";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}${endpoints.some((e) => tsGuarded(e, mode)) ? `import { authRequired } from "./middleware/auth";\n` : ""}${entityImports ? entityImports + "\n" : ""}
+export async function createApp() {
   // Fastify's built-in logger (pino) already emits JSON, so no extra config needed.
   const app = Fastify({ logger: true });
+  // Clients often send Content-Type: application/json on bodyless requests (DELETE);
+  // the stock parser rejects that with a 400. An empty body parses to undefined;
+  // invalid JSON (and prototype poisoning) still get the stock parser's 400.
+  const parseJson = app.getDefaultJsonParser("error", "error");
+  app.removeContentTypeParser("application/json");
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (request, body, done) => {
+    if (body === "") return done(null, undefined);
+    parseJson(request, body as string, done);
+  });
   await app.register(helmet);
 ${config.rateLimit ? `  // 60 requests / minute / IP, in-memory. Pass \`redis\` to share limits across replicas.
   await app.register(rateLimit, { max: 60, timeWindow: "1 minute" });
@@ -1572,29 +1693,8 @@ ${tsQueueKind(config) ? `  // Liveness: /health. Readiness (?ready=1) also pings
   });
 ` : ""}${routes}
 ${entityRegistrations}
-  const port = Number(process.env.PORT ?? 8080);
-  await app.listen({ port, host: "0.0.0.0" });
-
-  // Graceful shutdown — Fastify's close() awaits in-flight requests and
-  // triggers all registered onClose hooks.
-  for (const signal of ["SIGTERM", "SIGINT"] as const) {
-    process.once(signal, async () => {
-      app.log.info({ signal }, "shutdown");
-      try {
-        await app.close();
-        process.exit(0);
-      } catch (err) {
-        app.log.error({ err }, "shutdown failed");
-        process.exit(1);
-      }
-    });
-  }
+  return app;
 }
-
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
 `,
     },
     ...(mode !== "off"
@@ -1634,7 +1734,7 @@ export async function authRequired(request: FastifyRequest, reply: FastifyReply)
 
 function honoFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): GeneratedFile[] {
   const mode = tsAuthMode(config, endpoints);
-  const routes = endpoints
+  const routes = routedEndpoints(endpoints, entities)
     .map((e) =>
       e.pattern
         ? tsPatternRoute(e, "hono", config, entities, mode)
@@ -1652,10 +1752,41 @@ function honoFiles(config: StackConfig, endpoints: Endpoint[], entities: Entity[
   return [
     {
       path: "src/main.ts",
-      content: `${tsInstrumentPreamble(config)}import { Hono } from "hono";
-import { serve } from "@hono/node-server";
-${config.rateLimit || config.audit ? `import { getConnInfo } from "@hono/node-server/conninfo";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}${endpoints.some((e) => tsGuarded(e, mode)) ? `import { authRequired } from "./middleware/auth";\n` : ""}${entityImports ? entityImports + "\n" : ""}
-const app = new Hono();
+      content: `${tsInstrumentPreamble(config)}import { serve } from "@hono/node-server";
+import { createApp } from "./app";
+${tsQueueKind(config) ? `import { closeQueue } from "./queue";\n` : ""}
+const port = Number(process.env.PORT ?? 8080);
+const server = serve({ fetch: createApp().fetch, port });
+console.log(JSON.stringify({ level: "info", msg: "listening", port }));
+
+// Graceful shutdown. @hono/node-server exposes the underlying Node server
+// via the returned object — we call close() to stop accepting connections,
+// then force-exit if in-flight requests overrun the grace window.
+function shutdown(signal: string) {
+  console.log(JSON.stringify({ level: "info", msg: "shutdown", signal }));
+  server.close(${tsQueueKind(config) ? "async " : ""}(err) => {
+    if (err) {
+      console.error(JSON.stringify({ level: "error", msg: "shutdown failed", err: String(err) }));
+      process.exit(1);
+    }
+${tsQueueKind(config) ? "    await closeQueue().catch((e) => console.error(JSON.stringify({ level: \"error\", msg: \"queue close failed\", err: String(e) })));\n" : ""}    process.exit(0);
+  });
+  setTimeout(() => {
+    console.error(JSON.stringify({ level: "error", msg: "shutdown timed out — forcing exit" }));
+    process.exit(1);
+  }, 25_000).unref();
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+`,
+    },
+    {
+      // The app without a listener: main.ts serves it, tests drive it in-process.
+      path: "src/app.ts",
+      content: `import { Hono } from "hono";
+${tsAppObsImports(config)}${config.rateLimit || config.audit ? `import { getConnInfo } from "@hono/node-server/conninfo";\n` : ""}${tsPatternClientImports(config, endpoints, entities)}${endpoints.some((e) => tsGuarded(e, mode)) ? `import { authRequired } from "./middleware/auth";\n` : ""}${entityImports ? entityImports + "\n" : ""}
+export function createApp() {
+${indent(`const app = new Hono();
 ${config.rateLimit ? `
 // ponytail: in-memory fixed window (60 req / min / IP), per replica. Move the
 // counter to Redis if limits must hold across replicas.
@@ -1699,29 +1830,8 @@ app.get("/health", async (c) => {
 ` : `app.get("/health", (c) => c.json({ ok: true }));
 `}${hasProm(config) ? `app.get("/metrics", async (c) => c.body(await register.metrics(), 200, { "Content-Type": register.contentType }));\n` : ""}${routes}
 ${entityMounts}
-const port = Number(process.env.PORT ?? 8080);
-const server = serve({ fetch: app.fetch, port });
-console.log(JSON.stringify({ level: "info", msg: "listening", port }));
-
-// Graceful shutdown. @hono/node-server exposes the underlying Node server
-// via the returned object — we call close() to stop accepting connections,
-// then force-exit if in-flight requests overrun the grace window.
-function shutdown(signal: string) {
-  console.log(JSON.stringify({ level: "info", msg: "shutdown", signal }));
-  server.close(${tsQueueKind(config) ? "async " : ""}(err) => {
-    if (err) {
-      console.error(JSON.stringify({ level: "error", msg: "shutdown failed", err: String(err) }));
-      process.exit(1);
-    }
-${tsQueueKind(config) ? "    await closeQueue().catch((e) => console.error(JSON.stringify({ level: \"error\", msg: \"queue close failed\", err: String(e) })));\n" : ""}    process.exit(0);
-  });
-  setTimeout(() => {
-    console.error(JSON.stringify({ level: "error", msg: "shutdown timed out — forcing exit" }));
-    process.exit(1);
-  }, 25_000).unref();
+return app;`)}
 }
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
 `,
     },
     ...(mode !== "off"

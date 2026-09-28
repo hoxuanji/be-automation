@@ -659,7 +659,7 @@ describe("Stack-option wiring", () => {
     const eps = [{ id: "1", method: "GET" as const, path: "/users/:id", summary: "Get", auth: true, pattern: "crud_get" }];
     const users = [SAMPLE_ENTITIES.find((e) => e.name === "User")!];
     const ctrl = gen({ language: "typescript", framework: "nestjs" }, eps, users).get("src/app.controller.ts")!;
-    const express = gen({ language: "typescript", framework: "express" }, eps, users).get("src/main.ts")!;
+    const express = gen({ language: "typescript", framework: "express" }, eps, users).get("src/app.ts")!;
     // A pattern must not degrade to the { ok: true } stub on Nest.
     assert.ok(!ctrl.includes('op: "GET /users/:id"'));
     assert.match(ctrl, /async getUsersById\(@Req\(\) req: Request, @Res\(\) res: Response\)/);
@@ -748,7 +748,7 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     ];
     for (const [api, framework, mount] of cases) {
       const g = gen({ language: "typescript", framework, api });
-      const main = g.get("src/main.ts")!;
+      const main = g.get("src/main.ts")! + (g.get("src/app.ts") ?? ""); // routes live in app.ts (not Nest)
       const at = main.indexOf(mount);
       assert.ok(main.startsWith(`import "./tracing";`), `${api}/${framework}: tracing must load before the framework`);
       assert.ok(g.get("src/tracing.ts"));
@@ -831,7 +831,7 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
     ];
     for (const [framework, fwModule, mount, limiter] of cases) {
       const g = gen({ language: "typescript", framework, api: "trpc" });
-      const main = g.get("src/main.ts")!;
+      const main = g.get("src/main.ts")! + (g.get("src/app.ts") ?? ""); // routes live in app.ts (not Nest)
       const at = main.indexOf(mount);
       assert.ok(main.includes(`from "${fwModule}"`), `${framework}: must bootstrap ${framework}, not Express`);
       assert.ok(!/from "express"/.test(main), `${framework}: must not fall back to an Express server`);
@@ -860,7 +860,7 @@ describe("Non-REST APIs honor rateLimit / audit / tracing / monitoring", () => {
       { id: "2", method: "GET" as const, path: "/auth/me", summary: "Me", auth: false, pattern: "auth_me" },
     ];
     const verifierPath = (fw: string) => (fw === "nestjs" ? "src/auth/jwt.guard.ts" : "src/middleware/auth.ts");
-    const code = (g: ReturnType<typeof gen>) => (g.get("src/app.controller.ts") ?? "") + g.get("src/main.ts");
+    const code = (g: ReturnType<typeof gen>) => (g.get("src/app.controller.ts") ?? "") + (g.get("src/app.ts") ?? g.get("src/main.ts"));
     for (const fw of ["express", "fastify", "hono", "nestjs"]) {
       const ts = (auth: string) => gen({ language: "typescript", framework: fw, auth }, eps, [{ id: "e1", name: "User", fields: [{ id: "f1", name: "id", type: "uuid", required: true, unique: true, primaryKey: true }, { id: "f2", name: "email", type: "string", required: true, unique: true }] }]);
       // Self-managed: login mints HS256 tokens with JWT_SECRET, so authRequired must verify exactly those.
@@ -1258,7 +1258,7 @@ describe("Every deployment target gets a real CI deploy job", () => {
     { id: "h", method: "GET" as const, path: "/healthz", summary: "", auth: false, pattern: "health_check" },
   ];
   const TS_FRAMEWORKS = ["express", "fastify", "hono", "nestjs"];
-  const tsRouteFile = (fw: string) => (fw === "nestjs" ? "src/app.controller.ts" : "src/main.ts");
+  const tsRouteFile = (fw: string) => (fw === "nestjs" ? "src/app.controller.ts" : "src/app.ts");
 
   it("TS queue: each queue id ships its real client, a worker entrypoint, and reads the env var the repo documents", () => {
     assert.deepEqual(Object.keys(TS_QUEUE_CLIENT).sort(), queues.map((q) => q.id).sort(), "every catalog queue is covered");
@@ -1294,7 +1294,7 @@ describe("Every deployment target gets a real CI deploy job", () => {
       assert.match(routes, /queue_unavailable/, framework);
       assert.match(routes, /checks\.queue = "ok"/, `${framework}: health_check pattern includes the queue`);
       assert.match(routes, /await queuePing\(\)/, `${framework}: /health?ready=1 pings the queue`);
-      const shutdownFile = framework === "nestjs" ? routes : r.get("src/main.ts")!;
+      const shutdownFile = framework === "nestjs" ? routes : r.get("src/main.ts")! + routes; // Fastify closes it in an onClose hook
       assert.match(shutdownFile, /closeQueue\(\)/, `${framework}: queue closed on shutdown`);
     }
   });
@@ -2124,7 +2124,7 @@ describe("Every deployment target gets a real CI deploy job", () => {
       for (const framework of ["express", "fastify", "hono", "nestjs"]) {
         for (const queue of ["none", "nats"]) {
           const g = gen({ language: "typescript", framework, queue }, eps as never);
-          const main = g.get(framework === "nestjs" ? "src/app.controller.ts" : "src/main.ts")!;
+          const main = g.get(framework === "nestjs" ? "src/app.controller.ts" : "src/app.ts")!;
           const n = main.match(/\b(get|Get)\("\/health"/g)?.length ?? 0;
           assert.equal(n, 1, `${framework} queue=${queue} pattern=${pattern}: /health registered ${n} times`);
         }
@@ -2194,7 +2194,7 @@ describe("Every deployment target gets a real CI deploy job", () => {
       const schema = g.get("prisma/schema.prisma")!;
       assert.match(schema, /model AuthCredential \{[\s\S]*@relation\(fields: \[user_id\], references: \[id\], onDelete: Cascade\)[\s\S]*@@map\("auth_credentials"\)/, `${framework}: credential row is deleted with its user`);
       assert.match(schema, /model User \{[^}]*authCredential AuthCredential\?/, `${framework}: Prisma needs the back-relation`);
-      const code = g.get(framework === "nestjs" ? "src/app.controller.ts" : "src/main.ts")!;
+      const code = g.get(framework === "nestjs" ? "src/app.controller.ts" : "src/app.ts")!;
       assert.match(code, /import \{ prisma \} from "\.\/db"/, `${framework}: auth handlers reach the DB`);
       assert.match(code, /prisma\.\$transaction\(async \(tx\) => \{[\s\S]*tx\.user\.create[\s\S]*tx\.authCredential\.create/, `${framework}: user + credential are written atomically`);
       assert.match(code, /\["active"\]\.filter\(\(k\) => body\[k\] == null\)/, `${framework}: an omitted required column is a 400 by name`);
@@ -2205,7 +2205,7 @@ describe("Every deployment target gets a real CI deploy job", () => {
       assert.doesNotMatch(code, /passwordHash: string \} \| null|\/\/ await prisma\.user\.update/, `${framework}: no placeholder stubs left`);
     }
     // Mongo has no Prisma data layer: an explicit 501 rather than a fake success.
-    assert.match(gen({ language: "typescript", framework: "express", auth: "none", database: "mongodb" }, eps, user).get("src/main.ts")!, /Declare a User entity[\s\S]*res\.status\(501\)/);
+    assert.match(gen({ language: "typescript", framework: "express", auth: "none", database: "mongodb" }, eps, user).get("src/app.ts")!, /Declare a User entity[\s\S]*res\.status\(501\)/);
     // With a provider the credential endpoints are 501s: no credentials model.
     assert.doesNotMatch(gen({ language: "typescript", framework: "express", auth: "clerk", database: "postgres" }, eps, user).get("prisma/schema.prisma")!, /AuthCredential/);
     // SQL migrations (every dialect) and SQLAlchemy carry the FK; SQLite connections opt into enforcing it.
@@ -2413,7 +2413,7 @@ describe("Every deployment target gets a real CI deploy job", () => {
     // Without crud_* patterns the entity router stays the entity's only CRUD surface.
     const plain = gen({ language: "typescript", framework: "fastify", auth: "none", database: "postgres" }, [], user);
     assert.ok(plain.get("src/routes/user.route.ts"));
-    assert.match(plain.get("src/main.ts")!, /register\(userRoutes, \{ prefix: "\/users" \}\)/);
+    assert.match(plain.get("src/app.ts")!, /register\(userRoutes, \{ prefix: "\/users" \}\)/);
   });
   // The gRPC image had the gap the REST one just closed: no tables unless someone ran
   // prisma by hand (the CLI was a devDependency, missing from the runtime image).
@@ -2559,5 +2559,68 @@ describe("Every deployment target gets a real CI deploy job", () => {
     assert.match(create, /QuarkusTransaction\.requiringNew\(\)\.run\(entity::persist\);\s+publisher\.publish\(/);
     const before = res.slice(0, res.indexOf("public Response create("));
     assert.doesNotMatch(before.slice(before.lastIndexOf("@POST")), /@Transactional/, "create itself must not be transactional");
+  });
+
+  // Express, Hono and Nest match in registration order, so GET /users/:id registered first
+  // would swallow GET /users/search (id = "search"). Static segments must be registered first.
+  it("typescript: static route segments are registered before parameters in every framework", () => {
+    const eps = [
+      { id: "1", method: "GET" as const, path: "/users/:id", summary: "", auth: false, pattern: "crud_get" },
+      { id: "2", method: "GET" as const, path: "/users/search", summary: "", auth: false, pattern: "paginated_search" },
+    ];
+    const users = [SAMPLE_ENTITIES.find((e) => e.name === "User")!];
+    for (const framework of ["express", "fastify", "hono", "nestjs"]) {
+      const src = gen({ language: "typescript", framework }, eps, users).get(framework === "nestjs" ? "src/app.controller.ts" : "src/app.ts")!;
+      const at = (p: string) => src.search(new RegExp(`(get|Get)\\("${p}"`));
+      assert.ok(at("/users/search") >= 0 && at("/users/:id") >= 0, framework);
+      assert.ok(at("/users/search") < at("/users/:id"), `${framework}: /users/search must be registered before /users/:id`);
+    }
+  });
+
+  // A plain stub (GET /users …) beside a User entity used to register the same method+path twice:
+  // Fastify refused to boot, the others served whichever came first. The entity route owns it
+  // and inherits the stub's auth, so declaring auth:true can never leave the route open.
+  it("typescript: a plain endpoint duplicating an entity route is served once, by the entity route, keeping its auth", () => {
+    for (const framework of ["express", "fastify", "hono", "nestjs"]) {
+      const g = gen({ language: "typescript", framework, auth: "clerk" }, SAMPLE_ENDPOINTS, SAMPLE_ENTITIES);
+      const app = g.get(framework === "nestjs" ? "src/app.controller.ts" : "src/app.ts")!;
+      for (const op of ["GET /users", "POST /users", "GET /users/:id", "DELETE /users/:id"]) {
+        assert.ok(!app.includes(`op: "${op}"`), `${framework}: stub ${op} must not be registered beside the entity route`);
+      }
+      const router = g.get(framework === "nestjs" ? "src/modules/user/user.controller.ts" : framework === "express" ? "src/routes/user.router.ts" : "src/routes/user.route.ts")!;
+      const guard = framework === "nestjs"
+        ? /@UseGuards\(JwtAuthGuard\)\n {2}(?:async )?(\w+)\(/g
+        : /\.(get|post|patch|delete)(?:<[^>]*>)?\("([^"]*)", (?:authRequired|\{ preHandler: authRequired \}), /g;
+      const guarded = [...router.matchAll(guard)].map((m) => (framework === "nestjs" ? m[1] : `${m[1]} ${m[2]}`)).sort();
+      assert.deepEqual(guarded, framework === "nestjs" ? ["create", "getById", "list", "remove"] : ["delete /:id", "get /", "get /:id", "post /"], `${framework}: auth:true stubs keep the entity routes protected; PATCH had no stub`);
+    }
+  });
+
+  // Clients (and older SDKs) send Content-Type: application/json on bodyless DELETEs;
+  // Fastify's stock parser answers that with 400 "Body cannot be empty".
+  it("typescript fastify: an empty JSON body is accepted, invalid JSON still goes through the stock 400 parser", () => {
+    const app = gen({ language: "typescript", framework: "fastify" }).get("src/app.ts")!;
+    assert.match(app, /const parseJson = app\.getDefaultJsonParser\("error", "error"\);/, "keeps the stock parser's 400 + proto-poisoning checks");
+    assert.match(app, /app\.removeContentTypeParser\("application\/json"\);\n {2}app\.addContentTypeParser\("application\/json", \{ parseAs: "string" \}/);
+    assert.match(app, /if \(body === ""\) return done\(null, undefined\);\n {4}parseJson\(request, body as string, done\);/);
+  });
+
+  // The generated suite is only worth running in CI if it needs no services and checks auth
+  // for real: the app is built in-process, data clients are faked, tokens are verified by the app.
+  it("typescript: generated contract tests run the real app with faked services and real tokens, and CI runs them", () => {
+    const users = [SAMPLE_ENTITIES.find((e) => e.name === "User")!];
+    const t = gen({ language: "typescript", framework: "fastify", auth: "clerk", queue: "rabbitmq" }, SAMPLE_ENDPOINTS, users).get("tests/api.contract.test.ts")!;
+    assert.match(t, /vi\.mock\("@prisma\/client"/);
+    assert.match(t, /vi\.mock\("\.\.\/src\/cache"/);
+    assert.match(t, /vi\.mock\("\.\.\/src\/queue"/);
+    assert.match(t, /process\.env\.AUTH_JWKS_URL = /, "provider tokens are checked through a local JWKS");
+    assert.match(t, /await import\("\.\.\/src\/app"\)/, "app loads after the auth env is set");
+    // Protected routes: rejected without a token, served with one.
+    assert.match(t, /it\('GET \/users\/:id'[\s\S]*?toBe\(401\)[\s\S]*?Bearer \$\{token\}[\s\S]*?toBe\(200\)/);
+    const self = gen({ language: "typescript", framework: "express", auth: "none" }, [{ id: "1", method: "GET", path: "/auth/me", summary: "", auth: true, pattern: "auth_me" }], users).get("tests/api.contract.test.ts")!;
+    assert.match(self, /process\.env\.JWT_SECRET = /, "self-issued auth signs HS256 with the app's secret");
+    assert.ok(!gen({ language: "typescript", framework: "express", api: "trpc" }).get("tests/api.contract.test.ts"), "tRPC has no REST routes to contract-test");
+    const ci = readFileSync(new URL("../../../../.github/workflows/ci.yml", import.meta.url), "utf-8");
+    assert.match(ci, /name: Smoke build \(TypeScript\)[\s\S]*?npx tsc --noEmit --skipLibCheck && npm test --if-present/);
   });
 });

@@ -30,7 +30,7 @@ export function tsAuthMode(config: StackConfig, endpoints: Endpoint[]): TsAuthMo
 export const tsGuarded = (e: Endpoint, mode: TsAuthMode) =>
   mode !== "off" && (e.auth || e.pattern === "auth_me" || e.pattern === "auth_change_password");
 
-const CREDENTIAL_PATTERNS = ["auth_login", "auth_register", "auth_refresh", "auth_change_password"];
+export const CREDENTIAL_PATTERNS = ["auth_login", "auth_register", "auth_refresh", "auth_change_password"];
 
 // ── framework adapter ─────────────────────────────────────────────────────────
 
@@ -145,6 +145,10 @@ function resolveModel(table: string, config: StackConfig, entities: Entity[]): P
     searchFields: nonPk.filter((f) => f.type === "string" || f.type === "text").map((f) => f.name),
   };
 }
+
+/** Whether a pattern route on this path is backed by a Prisma model (else it is an explicit stub). */
+export const tsRouteHasModel = (path: string, config: StackConfig, entities: Entity[]) =>
+  resolveModel(inferTableName(path), config, entities) !== null;
 
 const idOf = (m: PrismaModel, raw: string) => (m.pkIsNumber ? `Number(${raw})` : raw);
 // Whitelist writable fields so clients cannot set the PK or unknown columns.
