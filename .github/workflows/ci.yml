@@ -216,7 +216,9 @@ jobs:
         if: matrix.combo.language == 'typescript'
         working-directory: /tmp/smoke-repo
         run: |
-          { npm install --no-audit --no-fund && npx tsc --noEmit --skipLibCheck; } 2>&1 | tee -a /tmp/smoke.log
+          # npm test: the generated repo's own vitest suite, which needs no database, cache or broker
+          # (--if-present: gRPC repos have no test script).
+          { npm install --no-audit --no-fund && npx tsc --noEmit --skipLibCheck && npm test --if-present; } 2>&1 | tee -a /tmp/smoke.log
 
       - name: Setup Python
         if: matrix.combo.language == 'python'

@@ -140,6 +140,11 @@
     "size": 2175
   },
   {
+    "path": "src/app.ts",
+    "lines": 50,
+    "size": 1940
+  },
+  {
     "path": "src/cache.ts",
     "lines": 7,
     "size": 220
@@ -151,8 +156,8 @@
   },
   {
     "path": "src/main.ts",
-    "lines": 78,
-    "size": 3484
+    "lines": 34,
+    "size": 1398
   },
   {
     "path": "src/middleware/audit.ts",
@@ -186,8 +191,8 @@
   },
   {
     "path": "src/routes/post.router.test.ts",
-    "lines": 69,
-    "size": 2447
+    "lines": 71,
+    "size": 2488
   },
   {
     "path": "src/routes/post.router.ts",
@@ -196,13 +201,13 @@
   },
   {
     "path": "src/routes/user.router.test.ts",
-    "lines": 69,
-    "size": 2583
+    "lines": 74,
+    "size": 2834
   },
   {
     "path": "src/routes/user.router.ts",
-    "lines": 52,
-    "size": 1452
+    "lines": 53,
+    "size": 1559
   },
   {
     "path": "src/services/post.service.ts",
@@ -236,8 +241,8 @@
   },
   {
     "path": "tests/api.contract.test.ts",
-    "lines": 61,
-    "size": 1623
+    "lines": 113,
+    "size": 4566
   },
   {
     "path": "tsconfig.json",
@@ -246,7 +251,7 @@
   },
   {
     "path": "vitest.config.ts",
-    "lines": 8,
-    "size": 139
+    "lines": 10,
+    "size": 250
   }
 ]

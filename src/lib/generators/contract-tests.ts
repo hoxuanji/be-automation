@@ -2,6 +2,9 @@ import type { Endpoint, Entity, GeneratedFile, StackConfig } from "./types";
 import { isGraphqlSupported, safeName, toPascal } from "./types";
 import { goAuthMode, goDbKind } from "./go";
 import { kotlinContractTestFiles } from "./kotlin";
+import { tsEntityRouteFor, tsSendBody } from "./typescript";
+import { CREDENTIAL_PATTERNS, SELF_AUTH_PATTERNS, hasRedisCache, tsAuthMode, tsGuarded, tsRouteHasModel, tsSelfAuthUser, usesPrisma, type TsAuthMode } from "./patterns/typescript";
+import { tsQueueKind } from "./queue/typescript";
 import { javaContractTestFiles } from "./java";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -30,58 +33,150 @@ function _authHeader(auth: boolean, lang: "go" | "ts" | "py" | "rust" | "java"):
 
 // ─── TypeScript (vitest + supertest) ─────────────────────────────────────────
 
-function tsContractTests(config: StackConfig, endpoints: Endpoint[]): string {
-  const framework = config.framework;
-  const isNest = framework === "nestjs";
+// Runs the real app in-process with no Postgres / Redis / broker: the data
+// clients are module-mocked, and protected routes are exercised with a real
+// token checked by the app's own verifier (HS256 secret, or a local JWKS
+// standing in for the provider). Statuses assume those fakes: every lookup
+// finds a row, lists are empty, bodies are {} unless an entity route needs a valid one.
+function tsExpectedStatus(e: Endpoint, config: StackConfig, endpoints: Endpoint[], entities: Entity[], mode: TsAuthMode): number | null {
+  const prisma = usesPrisma(config, entities);
+  const owner = tsEntityRouteFor(e, endpoints, entities);
+  if (owner) return { list: 200, get: prisma ? 200 : 404, create: 201, update: prisma ? 200 : 404, remove: 204 }[owner.op];
+  const p = e.pattern;
+  if (!p) return config.framework === "nestjs" && e.method === "POST" ? 201 : 200; // Nest's @Post() default
+  if (mode === "jwks" && CREDENTIAL_PATTERNS.includes(p)) return 501;
+  if (SELF_AUTH_PATTERNS.includes(p) && !tsSelfAuthUser(config, entities)) return 501;
+  const model = tsRouteHasModel(e.path, config, entities);
+  switch (p) {
+    case "crud_list": case "paginated_search": case "aggregate_stats": case "health_check": case "auth_me": return 200;
+    case "crud_get": case "crud_update": case "cache_read": return model ? 200 : 404;
+    case "crud_create": case "file_upload": return 201;
+    case "crud_delete": case "auth_logout": return 204;
+    // Empty body → validation error, before any DB or token work.
+    case "auth_login": case "auth_register": case "auth_refresh": case "auth_change_password": case "send_notification": return 400;
+    case "webhook_receive": return tsQueueKind(config) ? 202 : 503;
+    default: return e.logicCode ? null : 200; // custom logic: only "no server error" is knowable
+  }
+}
 
-  const imports = isNest
-    ? `import { Test } from '@nestjs/testing';\nimport * as request from 'supertest';\nimport { AppModule } from '../src/app.module';`
-    : `import request from 'supertest';\nimport { createApp } from '../src/app';`;
+function tsContractTests(config: StackConfig, endpoints: Endpoint[], entities: Entity[]): string {
+  const fw = config.framework;
+  const mode = tsAuthMode(config, endpoints);
+  // Express keeps authRequired (JWKS verifier) on protected routes even with auth "off".
+  const guarded = (e: Endpoint) => tsGuarded(e, mode) || (fw === "express" && e.auth);
+  const auth = !endpoints.some(guarded) && mode !== "hs256" ? null : mode === "hs256" ? "hs256" : "jwks";
 
-  const setup = isNest
-    ? `let app: any;
+  const mocks = [
+    usesPrisma(config, entities) ? `vi.mock("@prisma/client", () => {
+  const row = (a?: { where?: object; data?: object }) => ({ id: "test-id-123", ...a?.where, ...a?.data });
+  const model = {
+    findMany: async () => [], count: async () => 0,
+    findUnique: async (a: any) => row(a), findFirst: async (a: any) => row(a),
+    create: async (a: any) => row(a), update: async (a: any) => row(a), delete: async (a: any) => row(a),
+  };
+  const prisma: any = new Proxy({}, {
+    get: (_t, key) =>
+      key === "$transaction" ? (fn: (tx: unknown) => unknown) => fn(prisma)
+      : key === "$queryRaw" ? async () => [{ ok: 1 }]
+      : String(key).startsWith("$") ? async () => undefined
+      : model,
+  });
+  return { PrismaClient: class { constructor() { return prisma; } } };
+});` : "",
+    hasRedisCache(config) ? `vi.mock("../src/cache", () => ({
+  redis: { get: async () => null, set: async () => "OK", del: async () => 1, ping: async () => "PONG" },
+}));` : "",
+    tsQueueKind(config) ? `vi.mock("../src/queue", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/queue")>()),
+  publish: async () => undefined, queuePing: async () => undefined, closeQueue: async () => undefined,
+}));` : "",
+  ].filter(Boolean).join("\n");
 
-beforeAll(async () => {
-  const module = await Test.createTestingModule({ imports: [AppModule] }).compile();
-  app = module.createNestApplication();
+  const tokenSetup = auth === "hs256"
+    ? `  // Self-issued auth: sign with the same JWT_SECRET the app verifies against.
+  process.env.JWT_SECRET = "contract-test-secret";
+  token = await new SignJWT({}).setProtectedHeader({ alg: "HS256" }).setSubject("test-user")
+    .setIssuedAt().setExpirationTime("5m").sign(new TextEncoder().encode(process.env.JWT_SECRET));
+`
+    : auth === "jwks"
+    ? `  // A local JWKS endpoint stands in for the auth provider; the app's own verifier checks the token.
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const jwk = { ...(await exportJWK(publicKey)), kid: "contract-test", alg: "RS256" };
+  const jwks = createServer((_req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ keys: [jwk] }));
+  });
+  await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
+  cleanup.push(() => new Promise<void>((resolve) => jwks.close(() => resolve())));
+  process.env.AUTH_ISSUER = "https://issuer.contract.test";
+  process.env.AUTH_JWKS_URL = \`http://127.0.0.1:\${(jwks.address() as AddressInfo).port}/.well-known/jwks.json\`;
+  delete process.env.AUTH_AUDIENCE;
+  token = await new SignJWT({}).setProtectedHeader({ alg: "RS256", kid: "contract-test" })
+    .setIssuer(process.env.AUTH_ISSUER).setSubject("test-user").setIssuedAt().setExpirationTime("5m").sign(privateKey);
+`
+    : "";
+
+  // Imported after the env is set: the verifier reads it at module load.
+  const appSetup = fw === "nestjs"
+    ? `  const { Test } = await import("@nestjs/testing");
+  const { AppModule } = await import("../src/app.module");
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  const app = moduleRef.createNestApplication();
   await app.init();
-});
-
-afterAll(async () => {
-  await app.close();
-});`
-    : `let app: any;
-
-beforeAll(async () => {
-  app = await createApp();
-});
-
-afterAll(async () => {
-  if (app?.close) await app.close();
-});`;
+  cleanup.push(() => app.close());
+  server = app.getHttpServer();`
+    : fw === "fastify"
+    ? `  const { createApp } = await import("../src/app");
+  const app = await createApp();
+  await app.ready();
+  cleanup.push(() => app.close());
+  server = app.server;`
+    : fw === "hono"
+    ? `  const { createAdaptorServer } = await import("@hono/node-server");
+  const { createApp } = await import("../src/app");
+  server = createAdaptorServer({ fetch: createApp().fetch });`
+    : `  const { createApp } = await import("../src/app");
+  server = createApp();`;
 
   const tests = endpoints.map((ep) => {
     const method = ep.method.toLowerCase();
     const testPath = pathToParam(ep.path);
-    const status = expectedStatus(ep.method, ep.auth);
-    const body = ["POST", "PUT", "PATCH"].includes(ep.method) ? "\n      .send({})" : "";
-    const auth = ep.auth ? '\n      .set("Authorization", "Bearer test-token")' : "";
-
+    const status = tsExpectedStatus(ep, config, endpoints, entities, mode);
+    const owner = tsEntityRouteFor(ep, endpoints, entities);
+    // Entity routes validate their body; pattern handlers and stubs get {}.
+    const body = ["POST", "PUT", "PATCH"].includes(ep.method)
+      ? `\n      .send(${owner ? tsSendBody(owner.entity.fields.filter((f) => !f.primaryKey)) : "{}"})`
+      : "";
+    const call = `request(server)\n      .${method}('${testPath}')`;
+    const unauth = guarded(ep)
+      ? `    expect((await ${call}${body}).status).toBe(401);\n`
+      : "";
+    const assertStatus = status === null ? `expect(res.status).toBeLessThan(500);` : `expect(res.status).toBe(${status});`;
+    const assertJson = status === 204 ? "" : `\n    expect(res.headers['content-type']).toMatch(/json/);`;
     return `
   it('${ep.method} ${ep.path}', async () => {
-    const res = await request(app)
-      .${method}('${testPath}')${auth}${body};
     // ${ep.summary}
-    expect(res.status).toBe(${status});
-    expect(res.headers['content-type']).toMatch(/json/);
+${unauth}    const res = await ${call}${guarded(ep) ? "\n      .set('Authorization', `Bearer ${token}`)" : ""}${body};
+    ${assertStatus}${assertJson}
   });`;
   }).join("\n");
 
-  return `import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-${imports}
-
+  return `import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import request from 'supertest';
+${auth === "jwks" ? `import { createServer } from 'node:http';\nimport type { AddressInfo } from 'node:net';\n` : ""}${auth ? `import { ${auth === "jwks" ? "exportJWK, generateKeyPair, " : ""}SignJWT } from 'jose';\n` : ""}
+${mocks ? `// No database, cache or broker needed: their clients are in-memory fakes.\n${mocks}\n` : ""}
 describe('API contract tests — ${safeName(config.name)}', () => {
-${setup}
+  let server: any;
+  let token = '';
+  const cleanup: (() => Promise<unknown>)[] = [];
+
+  beforeAll(async () => {
+${(tokenSetup + appSetup).replace(/^(?=.)/gm, "  ")}
+  });
+
+  afterAll(async () => {
+    for (const fn of cleanup.reverse()) await fn();
+  });
 ${tests}
 });
 `;
@@ -285,7 +380,9 @@ export function contractTestFiles(
 
   switch (config.language) {
     case "typescript":
-      return [{ path: "tests/api.contract.test.ts", content: tsContractTests(config, endpoints) }];
+      // tRPC / GraphQL / gRPC stacks don't serve the endpoints as REST routes.
+      if (config.api !== "rest") return [];
+      return [{ path: "tests/api.contract.test.ts", content: tsContractTests(config, endpoints, entities) }];
     case "go":
       // gRPC / GraphQL stacks have no internal/server HTTP router to test.
       if (config.api === "grpc" || (config.api === "graphql" && isGraphqlSupported("go"))) return [];

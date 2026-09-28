@@ -141,8 +141,8 @@
   },
   {
     "path": "src/app.controller.ts",
-    "lines": 47,
-    "size": 1427
+    "lines": 25,
+    "size": 965
   },
   {
     "path": "src/app.module.ts",
@@ -176,13 +176,13 @@
   },
   {
     "path": "src/modules/post/post.controller.spec.ts",
-    "lines": 53,
-    "size": 2159
+    "lines": 56,
+    "size": 2297
   },
   {
     "path": "src/modules/post/post.controller.ts",
-    "lines": 35,
-    "size": 873
+    "lines": 40,
+    "size": 1184
   },
   {
     "path": "src/modules/post/post.module.ts",
@@ -196,13 +196,13 @@
   },
   {
     "path": "src/modules/user/user.controller.spec.ts",
-    "lines": 53,
-    "size": 2261
+    "lines": 56,
+    "size": 2399
   },
   {
     "path": "src/modules/user/user.controller.ts",
-    "lines": 35,
-    "size": 873
+    "lines": 45,
+    "size": 1356
   },
   {
     "path": "src/modules/user/user.module.ts",
@@ -261,8 +261,8 @@
   },
   {
     "path": "tests/api.contract.test.ts",
-    "lines": 64,
-    "size": 1777
+    "lines": 118,
+    "size": 4835
   },
   {
     "path": "tsconfig.json",
@@ -271,7 +271,7 @@
   },
   {
     "path": "vitest.config.ts",
-    "lines": 8,
-    "size": 139
+    "lines": 10,
+    "size": 250
   }
 ]

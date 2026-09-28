@@ -52,7 +52,7 @@ export function tsGraphqlFiles(
 }
 
 /**
- * Adds a route to the REST tree's src/main.ts (right before /health, i.e.
+ * Adds a route to the REST tree's app (right before /health, i.e.
  * after every app-wide middleware) and merges runtime deps into package.json.
  * Shared by the GraphQL and tRPC generators.
  */
@@ -60,8 +60,10 @@ export function mountOnTsRest(
   rest: GeneratedFile[],
   o: { imports: string; mount: string; deps: Record<string, string>; anchor?: RegExp }
 ): GeneratedFile[] {
+  // Express / Fastify / Hono build their routes in src/app.ts; NestJS bootstraps in src/main.ts.
+  const target = rest.some((f) => f.path === "src/app.ts") ? "src/app.ts" : "src/main.ts";
   return rest.map((f) => {
-    if (f.path === "src/main.ts") {
+    if (f.path === target) {
       // NestJS main.ts has no /health route (it lives in a controller), so callers pass their own anchor.
       const health = o.anchor ?? /^( *)app\.get\("\/health"/m;
       const fwImport = /^import .* from "(express|fastify|hono|@nestjs\/core)";$/m;
