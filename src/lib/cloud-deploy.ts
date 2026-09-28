@@ -19,7 +19,7 @@ export const CLOUD_SECRET_NAMES = {
   aws: {
     accessKeyId: "AWS_ACCESS_KEY_ID",
     secretAccessKey: "AWS_SECRET_ACCESS_KEY",
-    // deploy.yml also accepts AWS_ROLE_ARN (OIDC) instead of keys; Helios doesn't collect it yet.
+    roleArn: "AWS_ROLE_ARN", // OIDC mode — set instead of (never alongside) the key pair
   },
   gcp: {
     serviceAccountKey: "GCP_SA_KEY",
@@ -54,6 +54,7 @@ export function cloudSecretsFor<P extends CloudProvider>(
     case "aws": {
       const c = creds as CloudCreds<"aws">;
       const n = CLOUD_SECRET_NAMES.aws;
+      if ("roleArn" in c) return { [n.roleArn]: c.roleArn };
       return { [n.accessKeyId]: c.accessKeyId, [n.secretAccessKey]: c.secretAccessKey };
     }
     case "gcp": {
@@ -178,6 +179,28 @@ export async function putRepoSecrets(token: string, fullName: string, secrets: R
       method: "PUT",
       body: JSON.stringify({ encrypted_value, key_id }),
     });
+  }
+}
+
+/**
+ * Secrets from the provider's *other* credential mode. configure-aws-credentials prefers
+ * static keys when both are present, so a repo that once used keys would silently keep
+ * using them after switching to OIDC (and a stale AWS_ROLE_ARN would be assumed in key mode).
+ */
+export function supersededSecrets(provider: CloudProvider, secrets: Record<string, string>): string[] {
+  if (provider !== "aws") return [];
+  const n = CLOUD_SECRET_NAMES.aws;
+  return n.roleArn in secrets ? [n.accessKeyId, n.secretAccessKey] : [n.roleArn];
+}
+
+/** Deletes repo secrets; ones that don't exist are fine. */
+export async function deleteRepoSecrets(token: string, fullName: string, names: string[]): Promise<void> {
+  for (const name of names) {
+    try {
+      await gh(token, `/repos/${fullName}/actions/secrets/${name}`, { method: "DELETE" });
+    } catch (err) {
+      if (!(err instanceof ActionsError && err.code === "not_found")) throw err;
+    }
   }
 }
 

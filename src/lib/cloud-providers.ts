@@ -14,14 +14,48 @@ export function isCloudProvider(id: string): id is CloudProvider {
   return (CLOUD_PROVIDERS as readonly string[]).includes(id);
 }
 
+// arn:aws:iam::<12-digit account>:role/<optional/path/>name
+export const AWS_ROLE_ARN_RE = /^arn:aws:iam::\d{12}:role\/(?:[\w+=,.@-]+\/)*[\w+=,.@-]{1,64}$/;
+
+export const isAwsRoleArn = (v: string) => AWS_ROLE_ARN_RE.test(v.trim());
+
+/** IAM trust policy letting GitHub Actions runs in `repo` ("owner/name") assume the role via OIDC. */
+export function awsOidcTrustPolicy(repo: string, accountId = "<AWS_ACCOUNT_ID>"): string {
+  const idp = "token.actions.githubusercontent.com";
+  return JSON.stringify(
+    {
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Effect: "Allow",
+          Principal: { Federated: `arn:aws:iam::${accountId}:oidc-provider/${idp}` },
+          Action: "sts:AssumeRoleWithWebIdentity",
+          Condition: {
+            StringEquals: { [`${idp}:aud`]: "sts.amazonaws.com" },
+            StringLike: { [`${idp}:sub`]: `repo:${repo}:*` },
+          },
+        },
+      ],
+    },
+    null,
+    2
+  );
+}
+
 // Stored credential shapes (encrypted in users.deploy_creds_enc, one entry per
 // provider). Each maps 1:1 onto the Actions secrets in CLOUD_SECRET_NAMES.
 export const CLOUD_CRED_SCHEMAS = {
   // AWS region is not a credential — deploy.yml bakes in config.region.
-  aws: z.object({
-    accessKeyId: z.string().trim().regex(/^[A-Z0-9]{16,128}$/, "Access key ID looks malformed."),
-    secretAccessKey: z.string().trim().min(16).max(512),
-  }),
+  // Either an IAM role assumed via GitHub OIDC (recommended) or an access-key pair.
+  aws: z.union([
+    z.object({
+      roleArn: z.string().trim().regex(AWS_ROLE_ARN_RE, "Role ARN must look like arn:aws:iam::123456789012:role/name."),
+    }),
+    z.object({
+      accessKeyId: z.string().trim().regex(/^[A-Z0-9]{16,128}$/, "Access key ID looks malformed."),
+      secretAccessKey: z.string().trim().min(16).max(512),
+    }),
+  ]),
   // Project id is read from the key itself.
   gcp: z.object({
     serviceAccountKey: z.string().trim().min(100).max(16_000),
@@ -55,7 +89,7 @@ export const CLOUD_META: Record<
 > = {
   aws: {
     label: "AWS",
-    credsLabel: "IAM access key",
+    credsLabel: "IAM role or access key",
     docsUrl: "https://console.aws.amazon.com/iam/home#/security_credentials",
     docsText: "IAM → Security credentials",
     fields: [
@@ -94,3 +128,8 @@ export const CLOUD_META: Record<
     ],
   },
 };
+
+// AWS "IAM role (OIDC)" mode — swapped in for CLOUD_META.aws.fields in Settings.
+export const AWS_OIDC_FIELDS: CloudField[] = [
+  { key: "roleArn", label: "IAM role ARN", placeholder: "arn:aws:iam::123456789012:role/helios-deploy" },
+];

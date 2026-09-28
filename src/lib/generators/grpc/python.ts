@@ -513,7 +513,7 @@ function pyGrpcSqlService(pkg: string, entity: Entity, isPostgres: boolean): str
     const r = `request.${protoField(f)}`;
     const v = f === pk && f.type === "number" ? `int(${r}) or None`
       : pyIsText(f) ? `${r} or None`
-      : f.type === "number" ? `int(${r})`
+      : f.type === "number" ? `float(${r})`
       : f.type === "boolean" ? r
       : f.type === "date" ? `${r}.ToDatetime() if request.HasField("${protoField(f)}") else None`
       : isPostgres ? `parse_json(${r}, "${protoField(f)}", context)`
@@ -562,7 +562,7 @@ def _get(db, request, context) -> ${name}:
     if not ${pkReq}:
         context.abort(grpc.StatusCode.INVALID_ARGUMENT, "${protoField(pk)} is required")
 ${uuidPk ? `    try:
-        key = uuid.UUID(${pkReq})
+        key = str(uuid.UUID(${pkReq}))  # validated; the model column holds the string form
     except ValueError:
         context.abort(grpc.StatusCode.INVALID_ARGUMENT, "${protoField(pk)} must be a UUID")
 ` : `    key = ${pk.type === "number" ? `int(${pkReq})` : pkReq}

@@ -33,6 +33,8 @@ import {
   ActionsError,
   cloudSecretsFor,
   putRepoSecrets,
+  supersededSecrets,
+  deleteRepoSecrets,
   getDefaultBranch,
   dispatchWorkflow,
   findDispatchedRun,
@@ -1015,6 +1017,7 @@ export async function* runCloudDeployPipeline(
   }
   try {
     await putRepoSecrets(githubToken, fullName, secrets);
+    await deleteRepoSecrets(githubToken, fullName, supersededSecrets(provider, secrets));
   } catch (err) {
     throw classifyActionsErr(err, "actions_secrets");
   }

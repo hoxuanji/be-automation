@@ -42,7 +42,7 @@
   {
     "path": "Cargo.toml",
     "lines": 34,
-    "size": 1171
+    "size": 1182
   },
   {
     "path": "DEPLOY.md",
@@ -132,7 +132,7 @@
   {
     "path": "QUICKSTART.md",
     "lines": 106,
-    "size": 2529
+    "size": 2566
   },
   {
     "path": "README.md",
@@ -147,17 +147,17 @@
   {
     "path": "sdk/test-app-client.ts",
     "lines": 76,
-    "size": 2175
+    "size": 2035
   },
   {
     "path": "src/auth.rs",
-    "lines": 84,
-    "size": 3438
+    "lines": 95,
+    "size": 3894
   },
   {
     "path": "src/bin/worker.rs",
     "lines": 50,
-    "size": 1570
+    "size": 1589
   },
   {
     "path": "src/cache.rs",
@@ -191,8 +191,8 @@
   },
   {
     "path": "src/main.rs",
-    "lines": 87,
-    "size": 3512
+    "lines": 119,
+    "size": 4945
   },
   {
     "path": "src/models/mod.rs",
@@ -211,8 +211,8 @@
   },
   {
     "path": "src/queue.rs",
-    "lines": 98,
-    "size": 3287
+    "lines": 126,
+    "size": 4371
   },
   {
     "path": "src/telemetry.rs",

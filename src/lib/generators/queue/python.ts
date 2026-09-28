@@ -444,6 +444,7 @@ handle() returns, so a message interrupted mid-handler is redelivered.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import signal
 
@@ -456,7 +457,7 @@ log = logging.getLogger("app.worker")
 async def handle(topic: str, payload: dict) -> None:
     """Process one message. Raise to signal failure (the broker redelivers / dead-letters)."""
     # Replace with real work: send the notification, process the webhook event, …
-    log.info("message received", extra={"topic": topic, "payload": payload})
+    log.info("consumed", extra={"topic": topic, "body": json.dumps(payload)[:200]})
 
 
 async def main() -> None:

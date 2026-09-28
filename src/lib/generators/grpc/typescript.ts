@@ -69,7 +69,8 @@ function tsGrpcPkgJson(name: string, prisma: boolean, withAuth: boolean, extraDe
     "grpc-health-check": "^2.0.2",
     ...extraDeps,
   };
-  if (prisma) deps["@prisma/client"] = "^5.22.0";
+  // The prisma CLI runs at container start (see tsGrpcDockerfile), so it is a runtime dependency.
+  if (prisma) Object.assign(deps, { "@prisma/client": "^5.22.0", prisma: "^5.22.0" });
   if (withAuth) deps["jose"] = "^5.9.6";
 
   const devDeps: Record<string, string> = {
@@ -77,7 +78,6 @@ function tsGrpcPkgJson(name: string, prisma: boolean, withAuth: boolean, extraDe
     tsx: "^4.19.0",
     typescript: "^5.7.2",
   };
-  if (deps["@prisma/client"]) devDeps["prisma"] = "^5.22.0";
 
   return JSON.stringify(
     {
@@ -120,28 +120,37 @@ function tsGrpcTsconfig(): string {
   ) + "\n";
 }
 
-// With Prisma, the client is generated in the build stage (needs the prisma
-// CLI, a devDependency) and copied into the runtime image.
+// Same shape as the REST image (tsDockerfile): the Prisma client is generated in the
+// build stage; the api creates / updates the tables at start (the worker overrides CMD).
 function tsGrpcDockerfile(prisma: boolean): string {
+  const runtime = prisma
+    ? `COPY --from=build /app/prisma ./prisma
+USER node
+EXPOSE 8080
+# Creates / updates tables to match prisma/schema.prisma, then starts the api. Idempotent,
+# and it refuses changes that would drop data. For reviewed migrations use prisma migrate deploy.
+CMD ["sh", "-c", "node_modules/.bin/prisma db push --skip-generate && exec node dist/main.js"]`
+    : `USER node
+EXPOSE 8080
+CMD ["node", "dist/main.js"]`;
   return `# syntax=docker/dockerfile:1
 FROM node:22-alpine AS build
-WORKDIR /app
-COPY package*.json tsconfig.json ./
-RUN npm ci
+${prisma ? "# Prisma's query engine needs OpenSSL; Alpine ships without it.\nRUN apk add --no-cache openssl\n" : ""}WORKDIR /app
+COPY package.json package-lock.json* tsconfig.json ./
+# The generated repo ships no lockfile; npm ci needs one.
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY src ./src
 COPY proto ./proto
-${prisma ? "COPY prisma ./prisma\nRUN npx prisma generate\n" : ""}RUN npm run build
+${prisma ? "COPY prisma ./prisma\nRUN npx prisma generate\n" : ""}RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine
-WORKDIR /app
+${prisma ? "RUN apk add --no-cache openssl\n" : ""}WORKDIR /app
 ENV NODE_ENV=production
-COPY package*.json ./
-RUN npm ci --omit=dev
+COPY package.json ./
+COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/proto ./proto
-${prisma ? "COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma\n" : ""}USER node
-EXPOSE 8080
-CMD ["node", "dist/main.js"]
+${runtime}
 `;
 }
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useStackStore } from "@/lib/store";
+import { stackCaveats, type StackCaveat } from "@/lib/stack-caveats";
 import {
   languages,
   databases,
@@ -12,6 +13,7 @@ import {
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
+  AlertTriangle,
   CircleDollarSign,
   Cpu,
   Gauge,
@@ -31,15 +33,18 @@ export function StackSummary() {
   const queue = queues.find((q) => q.id === config.queue)?.label;
   const deploy = deployments.find((d) => d.id === config.deployment)?.label;
 
+  const caveats = stackCaveats(config);
+  const caveatFor = (o: StackCaveat["option"]) =>
+    caveats.filter((c) => c.option === o).map((c) => c.message).join("\n") || undefined;
   const cost = estimateCost(config.replicas, config.autoscale, config.kubernetes);
 
   const rows = [
     { label: "Runtime", value: `${lang} · ${fw}`, icon: Cpu },
     { label: "Database", value: db, icon: HardDrive },
     { label: "Cache", value: cache, icon: Zap },
-    { label: "Queue", value: queue, icon: Network },
-    { label: "API", value: config.api.toUpperCase(), icon: Network },
-    { label: "Deploy", value: `${deploy} · ${config.region}`, icon: TrendingUp },
+    { label: "Queue", value: queue, icon: Network, caveat: caveatFor("queue") },
+    { label: "API", value: config.api.toUpperCase(), icon: Network, caveat: caveatFor("api") },
+    { label: "Deploy", value: `${deploy} · ${config.region}`, icon: TrendingUp, caveat: caveatFor("deployment") },
   ];
 
   return (
@@ -50,10 +55,17 @@ export function StackSummary() {
             <div className="text-xs text-muted-foreground">Stack summary</div>
             <div className="mt-0.5 text-sm font-semibold">{config.name}</div>
           </div>
-          <Badge variant="success">
-            <span className="h-1.5 w-1.5 rounded-full bg-current" />
-            valid
-          </Badge>
+          {caveats.length > 0 ? (
+            <Badge variant="warning" title={caveats.map((c) => c.message).join("\n")}>
+              <AlertTriangle className="h-3 w-3" />
+              {caveats.length} caveat{caveats.length > 1 ? "s" : ""}
+            </Badge>
+          ) : (
+            <Badge variant="success">
+              <span className="h-1.5 w-1.5 rounded-full bg-current" />
+              valid
+            </Badge>
+          )}
         </div>
       </div>
 
@@ -69,7 +81,14 @@ export function StackSummary() {
                 <Icon className="h-3.5 w-3.5" />
                 {r.label}
               </span>
-              <span className="font-medium">{r.value}</span>
+              <span className="flex items-center gap-1.5 font-medium">
+                {"caveat" in r && r.caveat && (
+                  <span title={r.caveat} aria-label={r.caveat} className="text-amber-300">
+                    <AlertTriangle className="h-3.5 w-3.5" />
+                  </span>
+                )}
+                {r.value}
+              </span>
             </div>
           );
         })}

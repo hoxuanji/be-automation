@@ -111,8 +111,8 @@
   },
   {
     "path": "Dockerfile",
-    "lines": 23,
-    "size": 507
+    "lines": 29,
+    "size": 1044
   },
   {
     "path": "Makefile",
@@ -157,7 +157,7 @@
   {
     "path": "sdk/test-app-client.ts",
     "lines": 76,
-    "size": 2175
+    "size": 2035
   },
   {
     "path": "src/auth.ts",
@@ -203,11 +203,6 @@
     "path": "src/tracing.ts",
     "lines": 14,
     "size": 650
-  },
-  {
-    "path": "tests/api.contract.test.ts",
-    "lines": 64,
-    "size": 1777
   },
   {
     "path": "tsconfig.json",

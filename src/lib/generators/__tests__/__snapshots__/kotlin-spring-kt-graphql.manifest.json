@@ -132,7 +132,7 @@
   {
     "path": "sdk/test-app-client.ts",
     "lines": 76,
-    "size": 2175
+    "size": 2035
   },
   {
     "path": "settings.gradle.kts",
@@ -177,7 +177,7 @@
   {
     "path": "src/main/kotlin/dev/helios/test_app/Queue.kt",
     "lines": 39,
-    "size": 1308
+    "size": 1333
   },
   {
     "path": "src/main/kotlin/dev/helios/test_app/SecurityConfig.kt",

@@ -51,6 +51,9 @@ async function timedFetch(url: string, init: RequestInit, host: string): Promise
 // ─── AWS: STS GetCallerIdentity ──────────────────────────────────────────────
 
 export async function verifyAws(c: CloudCreds<"aws">) {
+  // OIDC: the token is issued to the Actions run, so Helios can't call STS.
+  // The schema already checked the ARN format; AWS checks the trust policy on the first run.
+  if ("roleArn" in c) return { arn: c.roleArn, account: c.roleArn.split(":")[4], mode: "oidc" };
   const sts = new STSClient({
     region: "us-east-1", // GetCallerIdentity works from any region; the deploy region comes from config.region
     credentials: { accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey },

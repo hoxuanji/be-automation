@@ -1,6 +1,6 @@
 import type { Endpoint, Entity, EntityField, FieldType, GeneratedFile, StackConfig } from "./types";
 import { toPascal, toSnake, toKebab } from "./types";
-import { needsAuth } from "./auth/providers";
+import { goAuthMode } from "./go";
 import { rustFeatures, rustInfraDeps, rustTelemetry, rustCache, rustQueue, rustWorker } from "./rust-infra";
 import type { RustFeatures } from "./rust-infra";
 
@@ -26,21 +26,24 @@ export function rustFiles(
 ): GeneratedFile[] {
   const safe = safeName(config.name);
   const sql = rustSql(config.database);
-  const withAuth = needsAuth(config, endpoints.some((e) => e.auth));
+  // Same rule as Go/TS/Python: a provider → JWKS; auth "none" with auth_* patterns →
+  // HS256 tokens signed with JWT_SECRET; otherwise nothing to verify.
+  const authMode = goAuthMode(config, endpoints);
+  const withAuth = authMode !== "off";
   const metrics = config.monitoring === "grafana";
   const feat = rustFeatures(config);
   // Cache-aside only makes sense in front of a real database.
   const cached = feat.cache && sql !== null;
   const files: GeneratedFile[] = [];
 
-  files.push({ path: "Cargo.toml", content: cargoToml(safe, config.framework, sql, withAuth, metrics, feat) });
+  files.push({ path: "Cargo.toml", content: cargoToml(safe, config.framework, sql, authMode, metrics, feat) });
   files.push({ path: "Dockerfile", content: rustDockerfile(safe, feat) });
   files.push({ path: ".dockerignore", content: "target/\n.git/\n.env\n" });
   files.push({ path: "src/config.rs", content: rustConfig(sql) });
   files.push({ path: "src/db.rs", content: rustDb(sql) });
   files.push({ path: "src/main.rs", content: rustMain(config.framework, entities, endpoints, sql, withAuth, metrics, feat) });
   if (withAuth) {
-    files.push({ path: "src/auth.rs", content: rustAuth(config.framework) });
+    files.push({ path: "src/auth.rs", content: rustAuth(config.framework, authMode === "hs256") });
   }
   if (feat.tracing) files.push({ path: "src/telemetry.rs", content: rustTelemetry(safe, feat) });
   if (feat.cache) files.push({ path: "src/cache.rs", content: rustCache() });
@@ -113,16 +116,16 @@ function modFile(entities: Entity[], _kind: string): string {
 
 // ─── Cargo.toml ───────────────────────────────────────────────────────────────
 
-function cargoToml(safeName: string, framework: string, sql: RustSql | null, withAuth: boolean, metrics: boolean, feat: RustFeatures): string {
+function cargoToml(safeName: string, framework: string, sql: RustSql | null, authMode: "jwks" | "hs256" | "off", metrics: boolean, feat: RustFeatures): string {
   const sqlxDriver = sql?.mysql ? "mysql" : "postgres";
-  const sqlx = `sqlx = { version = "0.8", features = ["runtime-tokio", "${sqlxDriver}", "uuid", "chrono", "json", "macros"] }`;
-  // JWKS-based JWT verification (src/auth.rs). rustls keeps the distroless
-  // runtime image free of an OpenSSL dependency.
-  const authDeps = withAuth
-    ? `jsonwebtoken = "9"
+  const sqlx = `sqlx = { version = "0.8", features = ["runtime-tokio", "${sqlxDriver}", "uuid", "chrono", "json", "macros", "migrate"] }`;
+  // JWT verification (src/auth.rs); reqwest fetches the JWKS. rustls keeps the
+  // distroless runtime image free of an OpenSSL dependency.
+  const authDeps = authMode === "off" ? ""
+    : authMode === "hs256" ? `jsonwebtoken = "9"\n`
+    : `jsonwebtoken = "9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-`
-    : "";
+`;
   const infraDeps = rustInfraDeps(framework, feat);
   // src/bin/worker.rs makes this a two-binary package; keep `cargo run` pointing at the API.
   const defaultRun = feat.queue ? `default-run = "${safeName}"\n` : "";
@@ -276,7 +279,8 @@ pub async fn connect(database_url: &str) -> sqlx::${sql.pool} {
 
 // ─── src/auth.rs ──────────────────────────────────────────────────────────────
 
-function rustAuth(framework: string): string {
+function rustAuth(framework: string, hs256: boolean): string {
+  // Missing verifier config is a server fault: fail closed with 500, never let the request through.
   const middleware = framework === "actix"
     ? `/// actix-web middleware (wrap a scope with \`middleware::from_fn(require_auth)\`).
 /// Verified claims are stored in the request extensions.
@@ -285,6 +289,10 @@ pub async fn require_auth(
     next: actix_web::middleware::Next<impl actix_web::body::MessageBody>,
 ) -> Result<actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>, actix_web::Error> {
     use actix_web::HttpMessage;
+    if let Some(missing) = unconfigured() {
+        tracing::error!("auth: {} is not set; rejecting protected request", missing);
+        return Err(actix_web::error::ErrorInternalServerError("auth is not configured"));
+    }
     let token = bearer(req.headers().get("authorization").and_then(|v| v.to_str().ok()))
         .ok_or_else(|| actix_web::error::ErrorUnauthorized("missing bearer token"))?;
     let claims = verify(&token).await.map_err(|e| {
@@ -300,6 +308,10 @@ pub async fn require_auth(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
+    if let Some(missing) = unconfigured() {
+        tracing::error!("auth: {} is not set; rejecting protected request", missing);
+        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
     let header = req.headers().get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok());
     let token = bearer(header).ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
     let claims = verify(&token).await.map_err(|e| {
@@ -310,14 +322,7 @@ pub async fn require_auth(
     Ok(next.run(req).await)
 }`;
 
-  return `//! JWT verification against the provider's JWKS (AUTH_JWKS_URL).
-//! Validates signature, exp, iss (AUTH_ISSUER) and — when set — aud (AUTH_AUDIENCE).
-
-use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
-use std::sync::OnceLock;
-use tokio::sync::RwLock;
-
-#[allow(dead_code)] // read by handlers via request extensions
+  const common = `#[allow(dead_code)] // read by handlers via request extensions
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Claims {
     pub sub: Option<String>,
@@ -325,11 +330,50 @@ pub struct Claims {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-static JWKS: OnceLock<RwLock<Option<JwkSet>>> = OnceLock::new();
+/// First required env var that is unset or empty, if any.
+fn unconfigured() -> Option<&'static str> {
+    [${hs256 ? `"JWT_SECRET"` : `"AUTH_JWKS_URL", "AUTH_ISSUER"`}]
+        .into_iter()
+        .find(|k| !std::env::var(k).is_ok_and(|v| !v.is_empty()))
+}
 
 fn bearer(header: Option<&str>) -> Option<String> {
     header?.strip_prefix("Bearer ").map(|t| t.trim().to_string())
+}`;
+
+  if (hs256) {
+    return `//! JWT verification for the HS256 tokens this service issues itself (auth "none" =
+//! self-managed): signed with JWT_SECRET. Validates signature, exp and sub.
+
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+
+${common}
+
+pub async fn verify(token: &str) -> Result<Claims, String> {
+    let secret = std::env::var("JWT_SECRET").map_err(|_| "JWT_SECRET is not set".to_string())?;
+    // HS256 only — "alg: none" and asymmetric tokens are rejected.
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_required_spec_claims(&["exp", "sub"]);
+    validation.validate_aud = false;
+    decode::<Claims>(token, &DecodingKey::from_secret(secret.as_bytes()), &validation)
+        .map(|data| data.claims)
+        .map_err(|e| e.to_string())
 }
+
+${middleware}
+`;
+  }
+
+  return `//! JWT verification against the provider's JWKS (AUTH_JWKS_URL).
+//! Validates signature, exp, iss (AUTH_ISSUER) and — when set — aud (AUTH_AUDIENCE).
+
+use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
+use std::sync::OnceLock;
+use tokio::sync::RwLock;
+
+${common}
+
+static JWKS: OnceLock<RwLock<Option<JwkSet>>> = OnceLock::new();
 
 async fn fetch_jwks() -> Result<JwkSet, String> {
     let url = std::env::var("AUTH_JWKS_URL").map_err(|_| "AUTH_JWKS_URL is not set".to_string())?;
@@ -387,10 +431,13 @@ function rustModel(entity: Entity, sql: RustSql | null): string {
   const pascal = toPascal(entity.name);
   const fromRowDerive = sql ? ", sqlx::FromRow" : "";
 
+  // Optional columns are nullable in the migration, so the row type must accept NULL.
   const structFields = entity.fields.map((f) => {
     const rustType = rustFieldType(f.type, sql);
     const fieldName = toSnake(f.name);
-    return `    pub ${fieldName}: ${rustType},`;
+    return f.required || f.primaryKey
+      ? `    pub ${fieldName}: ${rustType},`
+      : `    pub ${fieldName}: Option<${rustType}>,`;
   }).join("\n");
 
   const createFields = nonPkFields(entity).map((f) => {
@@ -1043,6 +1090,51 @@ const otelShutdown = `    if let Some(provider) = otel {
     }
 `;
 
+// Readiness shared by both frameworks: every dependency is pinged concurrently
+// (each ping is bounded ≤ 2 s) and reported by name; any failure means 503.
+// The in-memory store has nothing to ping, so it adds no "db" key.
+function rustReadiness(feat: RustFeatures, sql: RustSql | null): string {
+  const deps: [string, string][] = [
+    ...(sql ? [["db", "db_ping(pool)"] as [string, string]] : []),
+    ...(feat.cache ? [["cache", "cache::ping()"] as [string, string]] : []),
+    ...(feat.queue ? [["queue", "queue::ping()"] as [string, string]] : []),
+  ];
+  const convert = (n: string) =>
+    n === "cache" ? `("cache", if cache { Ok(()) } else { Err("PING failed".to_string()) })` : `("${n}", ${n})`;
+  const dbPing = sql
+    ? `
+async fn db_ping(pool: &sqlx::${sql.pool}) -> Result<(), String> {
+    match tokio::time::timeout(std::time::Duration::from_secs(2), sqlx::query("SELECT 1").execute(pool)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("db timeout".to_string()),
+    }
+}
+`
+    : "";
+  return `
+// Liveness: GET /health. Readiness: GET /health?ready=1 also pings ${deps.map(([n]) => n).join(", ")};
+// the body names each dependency ("ok" or the error) and any failure is a 503.
+async fn readiness(${sql ? `pool: &sqlx::${sql.pool}` : ""}) -> (bool, serde_json::Value) {
+    let (${deps.map(([n]) => n).join(", ")},) = tokio::join!(${deps.map(([, e]) => e).join(", ")});
+    let mut ok = true;
+    let mut body = serde_json::Map::new();
+    for (name, res) in [${deps.map(([n]) => convert(n)).join(", ")}] {
+        let status = match res {
+            Ok(()) => "ok".to_string(),
+            Err(e) => {
+                ok = false;
+                e
+            }
+        };
+        body.insert(name.to_string(), status.into());
+    }
+    body.insert("ok".to_string(), ok.into());
+    (ok, body.into())
+}
+${dbPing}`;
+}
+
 function axumMain(entities: Entity[], endpoints: Endpoint[], sql: RustSql | null, withAuth: boolean, metrics: boolean, feat: RustFeatures): string {
   const entityRoutes = entities.map((e) => `        .merge(handlers::${toSnake(e.name)}::router())`);
 
@@ -1065,8 +1157,14 @@ ${protectedRoutes.join("\n")}
 `
     : "";
 
+  // db/migrations.ts emits migrations/ only when there are entities; migrate!() needs the dir.
+  const migrate = sql && entities.length > 0
+    ? `    // Apply migrations/ (embedded at build time). Only the api migrates — the worker never
+    // does — and sqlx takes a lock on the migrations table, so api replicas don't race.
+    sqlx::migrate!("./migrations").run(&pool).await.expect("db: migrations failed");\n`
+    : "";
   const poolSetup = sql
-    ? `    let pool = db::connect(&cfg.database_url).await;\n`
+    ? `    let pool = db::connect(&cfg.database_url).await;\n${migrate}`
     : `    let store = db::new_store();\n`;
 
   const rateLimit = feat.rateLimit
@@ -1113,15 +1211,16 @@ ${protectedRoutes.join("\n")}
   const connectInfo = feat.rateLimit || feat.audit;
   const service = connectInfo ? "app.into_make_service_with_connect_info::<std::net::SocketAddr>()" : "app";
 
-  const health = feat.cache
-    ? `
-// Liveness: GET /health. Readiness: GET /health?ready=1 also requires Redis to answer PING.
-async fn health(uri: axum::http::Uri) -> (axum::http::StatusCode, &'static str) {
-    let ready = uri.query().is_some_and(|q| q.split('&').any(|p| p == "ready=1"));
-    if ready && !cache::ping().await {
-        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "cache unavailable");
+  const readyChecks = sql !== null || feat.cache || feat.queue !== null;
+  const health = readyChecks
+    ? `${rustReadiness(feat, sql)}
+async fn health(${sql ? `axum::extract::State(pool): axum::extract::State<sqlx::${sql.pool}>, ` : ""}uri: axum::http::Uri) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    if !uri.query().is_some_and(|q| q.split('&').any(|p| p == "ready=1")) {
+        return (axum::http::StatusCode::OK, axum::Json(serde_json::json!({"ok": true})));
     }
-    (axum::http::StatusCode::OK, "ok")
+    let (ok, body) = readiness(${sql ? "&pool" : ""}).await;
+    let code = if ok { axum::http::StatusCode::OK } else { axum::http::StatusCode::SERVICE_UNAVAILABLE };
+    (code, axum::Json(body))
 }
 `
     : "";
@@ -1177,7 +1276,7 @@ ${poolSetup}${metrics ? `    // Prometheus: per-route request counters + latency
     let (prometheus_layer, metric_handle) = axum_prometheus::PrometheusMetricLayer::pair();
 ` : ""}${rateLimit}${protectedBlock}
     let app = Router::new()
-        .route("/health", axum::routing::get(${feat.cache ? "health" : `|| async { "ok" }`}))
+        .route("/health", axum::routing::get(${readyChecks ? "health" : `|| async { "ok" }`}))
 ${tail}
 
     let addr = format!("0.0.0.0:{}", cfg.port);
@@ -1237,8 +1336,14 @@ ${protectedRoutes.map((r) => `                    ${r}`).join("\n")},
             )`]
     : [];
 
+  // db/migrations.ts emits migrations/ only when there are entities; migrate!() needs the dir.
+  const migrate = sql && entities.length > 0
+    ? `    // Apply migrations/ (embedded at build time). Only the api migrates — the worker never
+    // does — and sqlx takes a lock on the migrations table, so api replicas don't race.
+    sqlx::migrate!("./migrations").run(&pool).await.expect("db: migrations failed");\n`
+    : "";
   const poolSetup = sql
-    ? `    let pool = db::connect(&cfg.database_url).await;\n    let pool_data = actix_web::web::Data::new(pool);\n`
+    ? `    let pool = db::connect(&cfg.database_url).await;\n${migrate}    let pool_data = actix_web::web::Data::new(pool);\n`
     : `    let store = db::new_store();\n    let store_data = actix_web::web::Data::new(store);\n`;
 
   const appData = sql ? `            .app_data(pool_data.clone())` : `            .app_data(store_data.clone())`;
@@ -1256,6 +1361,7 @@ ${protectedRoutes.map((r) => `                    ${r}`).join("\n")},
 `
     : "";
 
+  const readyChecks = sql !== null || feat.cache || feat.queue !== null;
   // App::wrap: the last middleware registered runs first.
   const body = [
     ...(metrics ? [`            .wrap(prometheus.clone())`] : []),
@@ -1264,22 +1370,23 @@ ${protectedRoutes.map((r) => `                    ${r}`).join("\n")},
     ...(feat.tracing ? [`            .wrap(tracing_actix_web::TracingLogger::default())`] : []),
     ...(feat.sentry ? [`            .wrap(sentry_actix::Sentry::new())`] : []),
     appData,
-    feat.cache
+    readyChecks
       ? `            .route("/health", web::get().to(health))`
       : `            .route("/health", web::get().to(|| async { actix_web::HttpResponse::Ok().body("ok") }))`,
     ...mainRoutes.map((r) => `            ${r}`),
     ...protectedScope,
   ].join("\n");
 
-  const health = feat.cache
-    ? `
-// Liveness: GET /health. Readiness: GET /health?ready=1 also requires Redis to answer PING.
-async fn health(req: actix_web::HttpRequest) -> actix_web::HttpResponse {
-    let ready = req.query_string().split('&').any(|p| p == "ready=1");
-    if ready && !cache::ping().await {
-        return actix_web::HttpResponse::ServiceUnavailable().body("cache unavailable");
+  const health = readyChecks
+    ? `${rustReadiness(feat, sql)}
+async fn health(${sql ? `pool: actix_web::web::Data<sqlx::${sql.pool}>, ` : ""}req: actix_web::HttpRequest) -> actix_web::HttpResponse {
+    if !req.query_string().split('&').any(|p| p == "ready=1") {
+        return actix_web::HttpResponse::Ok().json(serde_json::json!({"ok": true}));
     }
-    actix_web::HttpResponse::Ok().body("ok")
+    match readiness(${sql ? "&pool" : ""}).await {
+        (true, body) => actix_web::HttpResponse::Ok().json(body),
+        (false, body) => actix_web::HttpResponse::ServiceUnavailable().json(body),
+    }
 }
 `
     : "";

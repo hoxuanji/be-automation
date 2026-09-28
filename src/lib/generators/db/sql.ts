@@ -1,5 +1,6 @@
 import type { Entity, EntityField, FieldType } from "../types";
 import { toSnake } from "../types";
+import { AUTH_CREDENTIAL_ID, selfAuthUser } from "../patterns/index";
 
 export type SqlDialect = "postgres" | "mysql" | "sqlite";
 
@@ -87,7 +88,7 @@ function columnDef(field: EntityField, dialect: SqlDialect): string {
   return `  ${name} ${type}${pk}${def}${nullable}${unique}`;
 }
 
-function tableSql(entity: Entity, dialect: SqlDialect): string {
+function tableSql(entity: Entity, dialect: SqlDialect, entities: Entity[]): string {
   const tbl = tableName(entity);
   const fields = entity.fields;
   const hasPk = fields.some((f) => f.primaryKey);
@@ -111,19 +112,26 @@ function tableSql(entity: Entity, dialect: SqlDialect): string {
     );
   }
 
+  // A user's credential row goes with the user. Table-level FOREIGN KEY because
+  // MySQL silently ignores inline column REFERENCES; SQLite needs foreign_keys=ON.
+  const user = entity.id === AUTH_CREDENTIAL_ID ? selfAuthUser(entities) : undefined;
+  if (user) cols.push(`  FOREIGN KEY (user_id) REFERENCES ${tableName(user.entity)}(${toSnake(user.pk.name)}) ON DELETE CASCADE`);
+
   return `CREATE TABLE IF NOT EXISTS ${tbl} (\n${cols.join(",\n")}\n);`;
 }
 
-function indexSql(entity: Entity, _dialect: SqlDialect): string[] {
+function indexSql(entity: Entity, dialect: SqlDialect): string[] {
   const tbl = tableName(entity);
   const out: string[] = [];
+  // MySQL 8 has no CREATE INDEX IF NOT EXISTS; the migration tool runs this once anyway.
+  const ifNotExists = dialect === "mysql" ? "" : "IF NOT EXISTS ";
   for (const f of entity.fields) {
     if (f.unique && !f.primaryKey) {
       // UNIQUE already creates an index; skip explicit one.
       continue;
     }
     if (/Id$|_id$|^id$/.test(f.name)) {
-      out.push(`CREATE INDEX IF NOT EXISTS idx_${tbl}_${toSnake(f.name)} ON ${tbl} (${toSnake(f.name)});`);
+      out.push(`CREATE INDEX ${ifNotExists}idx_${tbl}_${toSnake(f.name)} ON ${tbl} (${toSnake(f.name)});`);
     }
   }
   return out;
@@ -146,7 +154,7 @@ export function initialMigrationSql(
     };
   }
 
-  const tables = entities.map((e) => tableSql(e, dialect));
+  const tables = entities.map((e) => tableSql(e, dialect, entities));
   const indexes = entities.flatMap((e) => indexSql(e, dialect));
 
   const up = [

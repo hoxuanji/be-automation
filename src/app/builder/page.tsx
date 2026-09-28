@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  AlertTriangle,
   ArrowRight,
   CheckCircle2,
   ChevronDown,
@@ -51,6 +52,7 @@ import { NLPrompt } from "@/components/builder/nl-prompt";
 import { EntityBuilder } from "@/components/builder/entity-builder";
 import { OnboardingWizard } from "@/components/builder/onboarding-wizard";
 import { useStackStore } from "@/lib/store";
+import { stackCaveats, type StackCaveat } from "@/lib/stack-caveats";
 import { toast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 import { BrandIcon } from "@/components/shared/brand-icon";
@@ -373,14 +375,17 @@ export default function BuilderPage() {
               />
             )}
             {activeTab === "queue" && (
-              <OptionPanel
-                title="Message Queue"
-                description="Decouple services with durable messaging, pub/sub or streaming."
-                options={queues}
-                selected={config.queue}
-                onSelect={(id) => set("queue", id)}
-                icon={<Workflow className="h-4 w-4" />}
-              />
+              <div className="space-y-4">
+                <Caveats option="queue" />
+                <OptionPanel
+                  title="Message Queue"
+                  description="Decouple services with durable messaging, pub/sub or streaming."
+                  options={queues}
+                  selected={config.queue}
+                  onSelect={(id) => set("queue", id)}
+                  icon={<Workflow className="h-4 w-4" />}
+                />
+              </div>
             )}
             {activeTab === "api" && (
               <div className="space-y-6">
@@ -403,14 +408,17 @@ export default function BuilderPage() {
             )}
             {activeTab === "security" && <SecurityPanel />}
             {activeTab === "deploy" && (
-              <OptionPanel
-                title="Deployment target"
-                description="Where should Helios ship this stack? One-click deploy included."
-                options={deployments}
-                selected={config.deployment}
-                onSelect={(id) => set("deployment", id)}
-                icon={<Rocket className="h-4 w-4" />}
-              />
+              <div className="space-y-4">
+                <Caveats option="deployment" />
+                <OptionPanel
+                  title="Deployment target"
+                  description="Where should Helios ship this stack? One-click deploy included."
+                  options={deployments}
+                  selected={config.deployment}
+                  onSelect={(id) => set("deployment", id)}
+                  icon={<Rocket className="h-4 w-4" />}
+                />
+              </div>
             )}
             {activeTab === "scaling" && <ScalingPanel />}
             {activeTab === "cicd" && (
@@ -793,6 +801,31 @@ function RuntimePanel() {
   );
 }
 
+// Inline "partly supported" notes for the current stack; informs, never blocks.
+function Caveats({ option }: { option: StackCaveat["option"] }) {
+  const { config } = useStackStore();
+  const items = stackCaveats(config).filter((c) => c.option === option);
+  if (items.length === 0) return null;
+  return (
+    <div className="space-y-2">
+      {items.map((c) => (
+        <div
+          key={c.message}
+          className={cn(
+            "flex items-start gap-3 rounded-xl border px-4 py-3 text-xs",
+            c.level === "warn"
+              ? "border-amber-500/20 bg-amber-500/[0.06] text-amber-300"
+              : "border-white/10 bg-white/[0.03] text-muted-foreground",
+          )}
+        >
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{c.message}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function OptionPanel({
   title,
   description,
@@ -880,6 +913,7 @@ function ApiPanel() {
               </div>
             ))}
           </div>
+          <Caveats option="api" />
         </CardContent>
       </Card>
 

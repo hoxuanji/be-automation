@@ -127,7 +127,7 @@
   {
     "path": "sdk/test-app-client.ts",
     "lines": 76,
-    "size": 2175
+    "size": 2035
   },
   {
     "path": "src/main/java/dev/helios/app/Application.java",
@@ -136,13 +136,13 @@
   },
   {
     "path": "src/main/java/dev/helios/app/controller/PostController.java",
-    "lines": 52,
-    "size": 1494
+    "lines": 57,
+    "size": 1789
   },
   {
     "path": "src/main/java/dev/helios/app/controller/UserController.java",
-    "lines": 52,
-    "size": 1494
+    "lines": 57,
+    "size": 1789
   },
   {
     "path": "src/main/java/dev/helios/app/HealthController.java",
@@ -172,7 +172,7 @@
   {
     "path": "src/main/java/dev/helios/app/messaging/NotificationConsumer.java",
     "lines": 21,
-    "size": 797
+    "size": 878
   },
   {
     "path": "src/main/java/dev/helios/app/messaging/NotificationPublisher.java",
@@ -231,18 +231,18 @@
   },
   {
     "path": "src/test/java/dev/helios/app/ApiContractTest.java",
-    "lines": 242,
-    "size": 9365
+    "lines": 245,
+    "size": 9442
   },
   {
     "path": "src/test/java/dev/helios/app/PostControllerTest.java",
-    "lines": 45,
-    "size": 1670
+    "lines": 48,
+    "size": 1747
   },
   {
     "path": "src/test/java/dev/helios/app/UserControllerTest.java",
-    "lines": 45,
-    "size": 1708
+    "lines": 48,
+    "size": 1785
   },
   {
     "path": "src/test/resources/application-test.properties",

@@ -41,7 +41,7 @@ function tsEndpointFn(e: Endpoint): string {
   return `  async ${name}(${args.join(", ")}) {
     return this.request(${pathExpr}, {
       method: "${e.method}",
-      headers: { "Content-Type": "application/json",${authHeader} },${bodyPart}
+      headers: { ${hasBody ? `"Content-Type": "application/json",` : ""}${authHeader} },${bodyPart}
       ...options,
     });
   }`;

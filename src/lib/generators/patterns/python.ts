@@ -1,5 +1,5 @@
 import type { Endpoint, Entity, StackConfig } from "../types";
-import type { PatternId } from "./index";
+import { selfAuthUser, type PatternId, type SelfAuthUser } from "./index";
 import { authProviderSpec } from "../auth/providers";
 import { pyQueue } from "../queue/python";
 
@@ -56,6 +56,11 @@ function resolveEntity(path: string, entities: Entity[]): Entity | undefined {
   return undefined;
 }
 
+/** Entities served by crud_* pattern routes — those carry the per-endpoint auth, so no second (unguarded) router may exist. */
+export function pyCrudPatternEntityIds(endpoints: Endpoint[], entities: Entity[]): Set<string> {
+  return new Set(endpoints.filter((e) => e.pattern?.startsWith("crud_")).flatMap((e) => resolveEntity(e.path, entities)?.id ?? []));
+}
+
 type PyModel = { name: string; pk: string; created: string; search: string[] };
 
 function pyModel(entity: Entity): PyModel {
@@ -69,21 +74,11 @@ function pyModel(entity: Entity): PyModel {
   };
 }
 
-// The self-issued auth flow needs a User entity with email + password hash columns.
-type PyUser = { name: string; pk: string; email: string; hash: string };
-function userEntity(entities: Entity[]): PyUser | undefined {
-  const u = entities.find((e) => e.name.toLowerCase() === "user");
-  const email = u?.fields.find((f) => f.name === "email");
-  const hash = u?.fields.find((f) => /^password_?hash$/i.test(f.name));
-  if (!u || !email || !hash) return undefined;
-  return { name: u.name, pk: u.fields.find((f) => f.primaryKey)?.name ?? "id", email: email.name, hash: hash.name };
-}
-
 const stub = (why: string) => `async def handler():
     # ${why}
     raise HTTPException(status_code=501, detail="not_implemented")`;
 const NO_ENTITY = stub("No entity matches this route — declare one (or wire this handler to your data layer).");
-const NO_USER = stub("Declare a User entity with `email` and `password_hash` fields to enable self-managed auth.");
+const NO_USER = stub("Declare a User entity with an `email` field and a uuid/string primary key to enable self-managed auth.");
 
 const searchFilter = (m: PyModel) =>
   m.search.length ? `or_(${m.search.map((f) => `${m.name}.${f}.ilike(f"%{q}%")`).join(", ")})` : "";
@@ -115,8 +110,7 @@ function crudGet(m: PyModel, param: string): string {
 
 function crudCreate(m: PyModel): string {
   return `async def handler(payload: dict, db: Session = Depends(get_db)):
-    # Whitelist real columns so clients cannot set the PK or unknown attributes.
-    item = ${m.name}(**{k: v for k, v in payload.items() if k in ${m.name}.__table__.columns and k != "${m.pk}"})
+    item = ${m.name}(**_fields(${m.name}, payload, "${m.pk}"))
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -128,9 +122,8 @@ function crudUpdate(m: PyModel, param: string): string {
     item = db.query(${m.name}).filter(${m.name}.${m.pk} == ${param}).first()
     if not item:
         raise HTTPException(status_code=404, detail="not found")
-    for key, value in payload.items():
-        if key != "${m.pk}" and key in ${m.name}.__table__.columns:
-            setattr(item, key, value)
+    for key, value in _fields(${m.name}, payload, "${m.pk}").items():
+        setattr(item, key, value)
     db.commit()
     db.refresh(item)
     return _row(item)`;
@@ -146,30 +139,50 @@ function crudDelete(m: PyModel, param: string): string {
     return Response(status_code=204)`;
 }
 
-function authLogin(u: PyUser): string {
+function authLogin(u: SelfAuthUser): string {
+  const U = u.entity.name;
   return `async def handler(credentials: Credentials, db: Session = Depends(get_db)):
-    user = db.query(${u.name}).filter(${u.name}.${u.email} == credentials.email).first()
-    if not user or not user.${u.hash}:
+    user = db.query(${U}).filter(${U}.${u.email.name} == credentials.email).first()
+    cred = db.get(AuthCredential, user.${u.pk.name}) if user else None
+    if not cred:
         # Burn a bcrypt check anyway so response timing doesn't reveal which emails exist.
         bcrypt.checkpw(credentials.password.encode(), _DUMMY_HASH)
         raise HTTPException(status_code=401, detail="invalid_credentials")
-    if not bcrypt.checkpw(credentials.password.encode(), user.${u.hash}.encode()):
+    if not bcrypt.checkpw(credentials.password.encode(), cred.password_hash.encode()):
         raise HTTPException(status_code=401, detail="invalid_credentials")
-    return {"token": create_access_token(str(user.${u.pk})), "token_type": "Bearer"}`;
+    return {"token": create_access_token(str(user.${u.pk.name})), "token_type": "Bearer"}`;
 }
 
-function authRegister(u: PyUser): string {
-  return `async def handler(payload: Credentials, db: Session = Depends(get_db)):
-    if len(payload.password) < 8:
+// The body carries email + password plus the User's own columns; required ones
+// the client omits answer 400 by name, required dates are stamped with "now".
+function authRegister(u: SelfAuthUser): string {
+  const U = u.entity.name;
+  const list = (fs: { name: string }[]) => `[${fs.map((f) => JSON.stringify(f.name)).join(", ")}]`;
+  const cols = [
+    `${u.email.name}=email`,
+    // uuid PKs get a model default; string PKs are minted here.
+    ...(u.pk.type === "uuid" ? [] : [`${u.pk.name}=str(uuid4())`]),
+    ...u.dates.map((f) => `${f.name}=datetime.utcnow()`),
+    ...(u.settable.length ? [`**{k: payload[k] for k in ${list(u.settable)} if k in payload}`] : []),
+  ];
+  return `async def handler(payload: dict, db: Session = Depends(get_db)):
+    email, password = payload.get("email"), payload.get("password")
+    if not isinstance(email, str) or not email or not isinstance(password, str):
+        raise HTTPException(status_code=400, detail="email and password required")
+    if len(password) < 8:
         raise HTTPException(status_code=400, detail="password must be at least 8 characters")
-    if db.query(${u.name}).filter(${u.name}.${u.email} == payload.email).first():
+${u.required.length ? `    missing = [f for f in ${list(u.required)} if payload.get(f) is None]
+    if missing:
+        raise HTTPException(status_code=400, detail="missing required fields: " + ", ".join(missing))
+` : ""}    if db.query(${U}).filter(${U}.${u.email.name} == email).first():
         raise HTTPException(status_code=409, detail="email_already_registered")
-    user = ${u.name}(${u.email}=payload.email, ${u.hash}=bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode())
+    user = ${U}(${cols.join(", ")})
     db.add(user)
+    db.flush()  # assigns the PK before the credential row references it
+    db.add(AuthCredential(user_id=user.${u.pk.name}, password_hash=bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()))
     db.commit()
-    db.refresh(user)
-    token = create_access_token(str(user.${u.pk}))
-    return JSONResponse(status_code=201, content={"token": token, "token_type": "Bearer", "user": {"id": str(user.${u.pk}), "email": user.${u.email}}})`;
+    token = create_access_token(str(user.${u.pk.name}))
+    return JSONResponse(status_code=201, content={"token": token, "token_type": "Bearer", "user": {"id": str(user.${u.pk.name}), "email": user.${u.email.name}}})`;
 }
 
 // auth_required returns the verified claims — provider-issued (jwks) or self-issued (hs256).
@@ -195,7 +208,7 @@ function authRefresh(): string {
     return {"token": create_access_token(sub), "token_type": "Bearer"}`;
 }
 
-function authChangePassword(u: PyUser): string {
+function authChangePassword(): string {
   return `async def handler(
     payload: ChangePasswordRequest,
     claims: dict = Depends(auth_required),
@@ -203,12 +216,10 @@ function authChangePassword(u: PyUser): string {
 ):
     if len(payload.new_password) < 8:
         raise HTTPException(status_code=400, detail="new password must be at least 8 characters")
-    user = db.query(${u.name}).filter(${u.name}.${u.pk} == claims["sub"]).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="user not found")
-    if not user.${u.hash} or not bcrypt.checkpw(payload.current_password.encode(), user.${u.hash}.encode()):
+    cred = db.query(AuthCredential).filter(AuthCredential.user_id == claims["sub"]).first()
+    if not cred or not bcrypt.checkpw(payload.current_password.encode(), cred.password_hash.encode()):
         raise HTTPException(status_code=401, detail="invalid_current_password")
-    user.${u.hash} = bcrypt.hashpw(payload.new_password.encode(), bcrypt.gensalt()).decode()
+    cred.password_hash = bcrypt.hashpw(payload.new_password.encode(), bcrypt.gensalt()).decode()
     db.commit()
     return Response(status_code=204)`;
 }
@@ -293,27 +304,34 @@ ${filter ? `    if q:\n        query = query.filter(${filter})\n` : ""}    if cu
     return {"data": [_row(i) for i in items], "next_cursor": next_cursor, "has_more": has_more}`;
 }
 
-function aggregateStats(table: string): string {
+// Row counts per period over the entity's created timestamp. Portable across
+// Postgres / MySQL / SQLite because the bucketing happens in Python.
+function aggregateStats(m: PyModel): string {
+  const col = `${m.name}.${m.created}`;
   return `async def handler(
     group_by: str = Query("day"),
     from_date: Optional[str] = Query(None, alias="from"),
     to_date: Optional[str] = Query(None, alias="to"),
     db: Session = Depends(get_db),
 ):
-    # Raw SQL for flexible aggregation — adapt to your schema
-    sql = text("""
-        SELECT DATE_TRUNC(:period, created_at) AS period,
-               COUNT(*) AS count,
-               COALESCE(SUM(amount), 0) AS total
-        FROM ${table}
-        WHERE (:from_date IS NULL OR created_at >= :from_date::timestamptz)
-          AND (:to_date IS NULL OR created_at <= :to_date::timestamptz)
-        GROUP BY period
-        ORDER BY period DESC
-    """)
-    result = db.execute(sql, {"period": group_by, "from_date": from_date, "to_date": to_date})
-    rows = [dict(r._mapping) for r in result]
-    return {"data": rows}`;
+    formats = {"hour": "%Y-%m-%dT%H:00", "day": "%Y-%m-%d", "month": "%Y-%m", "year": "%Y"}
+    if group_by not in formats:
+        raise HTTPException(status_code=422, detail="group_by must be one of: " + ", ".join(formats))
+    query = db.query(${col})
+    try:
+        if from_date:
+            query = query.filter(${col} >= datetime.fromisoformat(from_date))
+        if to_date:
+            query = query.filter(${col} <= datetime.fromisoformat(to_date))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="from / to must be ISO-8601 datetimes")
+    # ponytail: buckets in Python (one pass over the timestamps); push the GROUP BY into SQL when tables get large.
+    counts: dict = {}
+    for (ts,) in query.yield_per(1000):
+        if ts is not None:
+            key = ts.strftime(formats[group_by])
+            counts[key] = counts.get(key, 0) + 1
+    return {"data": [{"period": k, "count": v} for k, v in sorted(counts.items(), reverse=True)]}`;
 }
 
 function sendNotification(config: StackConfig): string {
@@ -382,30 +400,38 @@ function customHandler(e: Endpoint): string {
 
 const DB_PATTERNS = new Set(["crud_list", "crud_get", "crud_create", "crud_update", "crud_delete", "paginated_search", "aggregate_stats"]);
 const CREDENTIAL_PATTERNS = new Set(["auth_login", "auth_register", "auth_refresh", "auth_change_password"]);
+const KNOWN_PATTERNS = new Set([...DB_PATTERNS, ...CREDENTIAL_PATTERNS, "auth_me", "auth_logout", "health_check", "webhook_receive", "file_upload", "send_notification", "cache_read"]);
 
-function patternBody(e: Endpoint, config: StackConfig, entities: Entity[], mode: PyAuthMode): string {
+/** What a pattern route does once generated — patternBody and the Python contract tests both read this. */
+export type PyPatternKind = PatternId | "provider_managed" | "no_entity" | "no_user" | "custom";
+
+export function pyPatternPlan(e: Endpoint, entities: Entity[], mode: PyAuthMode): { kind: PyPatternKind; entity?: Entity } {
   const pattern = e.pattern as PatternId | undefined;
-  const table = inferTableName(e.path);
-  const params = pathParams(e.path);
-  const param = params[params.length - 1] ?? "id";
   const entity = resolveEntity(e.path, entities);
-  const m = entity && pyModel(entity);
-  const hasDb = entities.length > 0;
-
   // Token design (mirrors Go): with an external provider auth_required verifies
   // provider-issued tokens via JWKS, so this service must not mint its own —
   // credential endpoints answer 501 and auth_me reads the provider's claims.
-  if (mode === "jwks" && CREDENTIAL_PATTERNS.has(pattern ?? "")) {
-    return `async def handler():
+  if (mode === "jwks" && CREDENTIAL_PATTERNS.has(pattern ?? "")) return { kind: "provider_managed" };
+  if (DB_PATTERNS.has(pattern ?? "") && !entity) return { kind: "no_entity" };
+  if ((pattern === "auth_login" || pattern === "auth_register" || pattern === "auth_change_password") && !selfAuthUser(entities)) return { kind: "no_user" };
+  if (!pattern || !KNOWN_PATTERNS.has(pattern)) return { kind: "custom" };
+  return { kind: pattern, entity };
+}
+
+function patternBody(e: Endpoint, config: StackConfig, entities: Entity[], mode: PyAuthMode): string {
+  const table = inferTableName(e.path);
+  const params = pathParams(e.path);
+  const param = params[params.length - 1] ?? "id";
+  const { kind, entity } = pyPatternPlan(e, entities, mode);
+  const m = entity && pyModel(entity);
+  const user = selfAuthUser(entities);
+
+  switch (kind) {
+    case "provider_managed": return `async def handler():
     # Credentials are managed by ${config.auth}; tokens minted here would fail JWKS verification.
     raise HTTPException(status_code=501, detail="handled_by_${config.auth}")`;
-  }
-  if (pattern === "aggregate_stats" && !hasDb) return NO_ENTITY;
-  if (DB_PATTERNS.has(pattern ?? "") && pattern !== "aggregate_stats" && !m) return NO_ENTITY;
-  const user = userEntity(entities);
-  if ((pattern === "auth_login" || pattern === "auth_register" || pattern === "auth_change_password") && !user) return NO_USER;
-
-  switch (pattern) {
+    case "no_entity":    return NO_ENTITY;
+    case "no_user":      return NO_USER;
     case "crud_list":    return crudList(m!);
     case "crud_get":     return crudGet(m!, param);
     case "crud_create":  return crudCreate(m!);
@@ -416,12 +442,12 @@ function patternBody(e: Endpoint, config: StackConfig, entities: Entity[], mode:
     case "auth_me":      return authMe();
     case "auth_logout":  return authLogout();
     case "auth_refresh": return authRefresh();
-    case "auth_change_password": return authChangePassword(user!);
-    case "health_check": return healthCheck(config, hasDb);
+    case "auth_change_password": return authChangePassword();
+    case "health_check": return healthCheck(config, entities.length > 0);
     case "webhook_receive": return webhookReceive(config);
     case "file_upload":  return fileUpload();
     case "paginated_search": return paginatedSearch(m!);
-    case "aggregate_stats":  return aggregateStats(table);
+    case "aggregate_stats":  return aggregateStats(m!);
     case "send_notification": return sendNotification(config);
     case "cache_read":   return cacheRead(table, param, entity, pyHasRedis(config));
     default:             return customHandler(e);
@@ -589,7 +615,7 @@ function importLines(code: string, fw: "fastapi" | NativeFw, entities: Entity[])
     lines.push("from typing import Any");
     const core = ["Request", "Response"].filter((n) => new RegExp(`\\b${n}\\b`).test(code));
     if (core.length) lines.push(`from litestar import ${core.join(", ")}`);
-    if (uses(/\bHTTPException\(/)) lines.push("from litestar.exceptions import HTTPException");
+    if (uses(/\bHTTPException\(|_fields\(/)) lines.push("from litestar.exceptions import HTTPException");
     const params = ["Body", "Parameter"].filter((n) => code.includes(n + "("));
     if (params.length) lines.push(`from litestar.params import ${params.join(", ")}`);
     if (uses(/\bUploadFile\b/)) lines.push("from litestar.datastructures import UploadFile", "from litestar.enums import RequestEncodingType");
@@ -601,6 +627,7 @@ function importLines(code: string, fw: "fastapi" | NativeFw, entities: Entity[])
   // NotificationRequest declares an Optional field.
   if (fw !== "fastapi" && (uses(/\bOptional\b/) || usesModel("NotificationRequest"))) lines.push("from typing import Optional");
   const models = entities.filter((en) => new RegExp(`\\b${en.name}\\b`).test(code)).map((en) => en.name);
+  if (uses(/\bAuthCredential\b/)) models.push("AuthCredential");
   if (models.length) lines.push(`from .models import ${[...new Set(models)].join(", ")}`);
   if (uses(/\b_row\(/)) lines.push(fw === "fastapi" ? "from fastapi.encoders import jsonable_encoder" : "import json");
   if (uses(/\bredis_client\b/)) lines.push("from .cache import redis_client");
@@ -611,6 +638,8 @@ function importLines(code: string, fw: "fastapi" | NativeFw, entities: Entity[])
   if (uses(/\bhmac_lib\b/)) lines.push("import hmac as hmac_lib", "import hashlib", "import os");
   if (fw === "fastapi" && uses(/\bUploadFile\b/)) lines.push("from fastapi import UploadFile");
   if (uses(/\buuid4\(/)) lines.push("from uuid import uuid4");
+  if (uses(/\bdatetime\.(utcnow|fromisoformat)\(|_fields\(/)) lines.push("from datetime import datetime");
+  if (uses(/_fields\(/)) lines.push("from sqlalchemy import DateTime");
   if (uses(/\bbcrypt\./)) lines.push("import bcrypt");
   if (uses(/\bjwt\./)) lines.push("import jwt");
   const authNames = ["create_access_token", "verify_token"].filter((n) => code.includes(n + "("));
@@ -624,10 +653,23 @@ function importLines(code: string, fw: "fastapi" | NativeFw, entities: Entity[])
 def _row(item) -> dict:
     """ORM row → JSON-safe dict of its columns (password hashes never leave the service)."""
     return ${fw === "fastapi"
-      ? `jsonable_encoder({c.name: getattr(item, c.name) for c in item.__table__.columns if not c.name.startswith("password")})`
-      : `json.loads(json.dumps({c.name: getattr(item, c.name) for c in item.__table__.columns if not c.name.startswith("password")}, default=str))`}`);
+      ? `jsonable_encoder({c.key: getattr(item, c.key) for c in item.__mapper__.column_attrs if not c.key.startswith("password")})`
+      : `json.loads(json.dumps({c.key: getattr(item, c.key) for c in item.__mapper__.column_attrs if not c.key.startswith("password")}, default=str))`}`);
   if (uses(/\b_DUMMY_HASH\b/)) lines.push(`
 _DUMMY_HASH = bcrypt.hashpw(b"timing-equaliser", bcrypt.gensalt())`);
+  if (uses(/_fields\(/)) lines.push(`
+
+def _fields(model, payload: dict, pk: str) -> dict:
+    """Client-settable attributes: mapped (JSON-named) columns minus the PK; ISO strings parsed for DateTime columns."""
+    attrs = model.__mapper__.column_attrs
+    out = {k: v for k, v in payload.items() if k in attrs and k != pk}
+    for k, v in out.items():
+        if isinstance(v, str) and isinstance(attrs[k].columns[0].type, DateTime):
+            try:
+                out[k] = datetime.fromisoformat(v)
+            except ValueError:
+                raise HTTPException(status_code=422, detail=f"{k} must be an ISO-8601 datetime")
+    return out`);
   if (usesModel("Credentials")) lines.push(`
 
 class Credentials(BaseModel):

@@ -11,6 +11,7 @@ import { generateGraphqlSchema } from "./graphql/schema";
 import { migrationFiles } from "./db/migrations";
 import { clientSdkFiles } from "./client-sdk";
 import { contractTestFiles } from "./contract-tests";
+import { authCredentialEntities } from "./patterns/index";
 import { isGrpcSupported, isGraphqlSupported } from "./types";
 import type { Endpoint, Entity, GeneratedFile, StackConfig } from "./types";
 import { safeName } from "./types";
@@ -74,7 +75,9 @@ export function generate(
 
   // Migration scaffolding is language-aware but keyed on the stack's DB dialect.
   // Skipped for schemaless / keyvalue stores and when there are no entities.
-  files.push(...migrationFiles(config, entities));
+  // Self-issued auth also migrates its auth_credentials table (go/python so far).
+  const authTables = ["go", "python"].includes(config.language) ? authCredentialEntities(config, endpoints, entities) : [];
+  files.push(...migrationFiles(config, [...entities, ...authTables]));
 
   // Typed client SDKs (TypeScript + Python) derived from the endpoint list.
   // Only emitted when there are endpoints to generate methods for.

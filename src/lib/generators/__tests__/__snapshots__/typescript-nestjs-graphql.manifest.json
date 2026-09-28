@@ -142,7 +142,12 @@
   {
     "path": "sdk/test-app-client.ts",
     "lines": 76,
-    "size": 2175
+    "size": 2035
+  },
+  {
+    "path": "src/app.ts",
+    "lines": 52,
+    "size": 1997
   },
   {
     "path": "src/cache.ts",
@@ -151,8 +156,8 @@
   },
   {
     "path": "src/main.ts",
-    "lines": 77,
-    "size": 3162
+    "lines": 34,
+    "size": 1398
   },
   {
     "path": "src/middleware/audit.ts",
@@ -227,12 +232,7 @@
   {
     "path": "src/worker.ts",
     "lines": 36,
-    "size": 1502
-  },
-  {
-    "path": "tests/api.contract.test.ts",
-    "lines": 64,
-    "size": 1777
+    "size": 1505
   },
   {
     "path": "tsconfig.json",
@@ -241,7 +241,7 @@
   },
   {
     "path": "vitest.config.ts",
-    "lines": 8,
-    "size": 139
+    "lines": 10,
+    "size": 250
   }
 ]
