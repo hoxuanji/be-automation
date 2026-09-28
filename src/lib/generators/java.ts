@@ -1219,7 +1219,7 @@ function quarkusResource(entity: Entity, pascal: string, kebab: string, withAuth
 
   return `package dev.helios.app;
 
-${cached ? "import dev.helios.app.infra.JsonCache;\n" : ""}${publisher ? "import dev.helios.app.messaging.NotificationPublisher;\n" : ""}${withAuth ? "import io.quarkus.security.Authenticated;\n" : ""}${cached || publisher ? "import jakarta.inject.Inject;\n" : ""}import jakarta.transaction.Transactional;
+${cached ? "import dev.helios.app.infra.JsonCache;\n" : ""}${publisher ? "import dev.helios.app.messaging.NotificationPublisher;\n" : ""}${withAuth ? "import io.quarkus.security.Authenticated;\n" : ""}${cached || publisher ? "import jakarta.inject.Inject;\n" : ""}${publisher ? "import io.quarkus.narayana.jta.QuarkusTransaction;\n" : ""}import jakarta.transaction.Transactional;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -1253,11 +1253,14 @@ ${cached ? `
         return Response.ok(entity).build();
     }
 
-    @POST
-    @Transactional
-    public Response create(${pascal} entity) {
-        entity.persist();${publisher ? `
-        publisher.publish(${createdEvent(entity, `entity.${toCamel(pk?.name ?? "id")}`)});` : ""}
+    @POST${publisher ? "" : `
+    @Transactional`}
+    public Response create(${pascal} entity) {${publisher ? `
+        // Commit first, then publish: the emitter must not run inside the JTA transaction
+        // (its async ack reuses the enlisted connection), and a rolled-back row mustn't announce itself.
+        QuarkusTransaction.requiringNew().run(entity::persist);
+        publisher.publish(${createdEvent(entity, `entity.${toCamel(pk?.name ?? "id")}`)});` : `
+        entity.persist();`}
         return Response.status(Response.Status.CREATED).entity(entity).build();
     }
 

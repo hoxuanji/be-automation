@@ -1711,7 +1711,7 @@ describe("Every deployment target gets a real CI deploy job", () => {
     const springCtl = spring.get(`src/main/java/dev/helios/app/controller/${pascal}Controller.java`)!;
     assert.match(springCtl, /saved = service\.create\([\s\S]*publisher\.publish\("\{\\"event\\":\\"[a-z-]+\.created\\",\\"id\\":\\"" \+ saved\.get\w+\(\) \+ "\\"\}"\);/);
     const qRes = quarkus.get(`src/main/java/dev/helios/app/${pascal}Resource.java`)!;
-    assert.match(qRes, /entity\.persist\(\);\s*publisher\.publish\("\{\\"event\\":\\"[a-z-]+\.created\\",\\"id\\":\\"" \+ entity\.\w+ \+ "\\"\}"\);/);
+    assert.match(qRes, /QuarkusTransaction\.requiringNew\(\)\.run\(entity::persist\);\s*publisher\.publish\("\{\\"event\\":\\"[a-z-]+\.created\\",\\"id\\":\\"" \+ entity\.\w+ \+ "\\"\}"\);/);
     // Unit tests run without a broker: every test that creates entities mocks the publisher.
     for (const f of spring.files.filter((f) => f.path.startsWith("src/test/java/") && f.content.includes("@SpringBootTest"))) {
       assert.match(f.content, /@MockBean\s+dev\.helios\.app\.messaging\.NotificationPublisher publisher;/, f.path);
@@ -2549,5 +2549,15 @@ describe("Every deployment target gets a real CI deploy job", () => {
     // gRPC / GraphQL trees serve no REST routes, so they ship no REST tests (CI runs pytest only when tests/ exists).
     for (const api of ["grpc", "graphql"])
       assert.ok(!gen({ language: "python", framework: "fastapi", api }, [...eps, ...SAMPLE_ENDPOINTS], smokeUser).files.some((f) => f.path.startsWith("tests/")), api);
+  });
+  // Publishing from inside @Transactional let the Kafka emitter's async ack touch the enlisted
+  // JDBC connection ("Enlisted connection used without active transaction" → 500 on create),
+  // and would announce rows that later roll back. Quarkus now commits, then publishes.
+  it("Quarkus create commits before publishing the created event", () => {
+    const res = gen({ language: "java", framework: "quarkus", queue: "kafka" }, [], SAMPLE_ENTITIES).files.find((f) => /UserResource\.java$/.test(f.path) && !f.path.includes("test"))!.content;
+    const create = res.slice(res.indexOf("public Response create("), res.indexOf("return Response.status(Response.Status.CREATED)"));
+    assert.match(create, /QuarkusTransaction\.requiringNew\(\)\.run\(entity::persist\);\s+publisher\.publish\(/);
+    const before = res.slice(0, res.indexOf("public Response create("));
+    assert.doesNotMatch(before.slice(before.lastIndexOf("@POST")), /@Transactional/, "create itself must not be transactional");
   });
 });
